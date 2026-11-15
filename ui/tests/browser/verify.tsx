@@ -18,6 +18,7 @@ const {monaco}=await import("../../src/lib/monaco");
 const {MonacoDiff,MonacoFile}=await import("../../src/components/MonacoViews");
 const {VirtualFileRows}=await import("../../src/components/VirtualFileRows");
 const {Dialogs}=await import("../../src/components/Dialogs");
+const {addRemote}=await import("../../src/lib/manage");
 const {promptUpstream}=await import("../../src/lib/menus");
 const {RightPanel}=await import("../../src/components/RightPanel");
 const {GraphView}=await import("../../src/components/GraphView");
@@ -314,5 +315,80 @@ await test("O026 limit marker offers virtual comparison and safe full-file stage
   mount(<DiffView repo={repo} tabId={tabId} target={{source:{kind:"Unstaged"},file:"dense.txt",untracked:true,parent:null}}/>);
   await until(()=>!!document.querySelector('.monaco-diff-editor')&&!!button("Stage File"),"large fallback");assert(!button("Stage Hunk"),"Truncated patch offered");button("Stage File")!.click();await until(()=>calls.some(c=>c.command==="run_action"&&c.args.action.type==="stage"),"full stage");assert(!calls.some(c=>c.command==="run_action"&&c.args.action.type==="patch"),"Limit submitted as patch");
 });
-root.unmount();queryClient.clear();
-(document.body as HTMLElement).innerHTML="";const report=document.createElement("pre");report.id="verification-results";report.textContent=JSON.stringify({results,passed:results.filter(result=>result.status==="passed").length,failed:results.filter(result=>result.status==="failed").length});document.body.append(report);
+async function remotePanel() {
+  repo.remotes=[];
+  handlers.publish_targets=()=>[{id:"fixture",label:"Fixture workspace"}];
+  await openRepoPath(repo.path);addRemote(repo.path);mount(<Dialogs/>);
+  await until(()=>!!button("GitHub"),"provider tabs");
+}
+for(const service of ["GitHub","GitLab","Bitbucket","Azure DevOps"])await test(`B099 publish ${service} fields and request`,async()=>{
+  await remotePanel();button(service)!.click();
+  const submit="Create remote and push branch";
+  await until(()=>!!button(submit)&&!button(submit)!.disabled,"publishing form ready");
+  const field=(label:string)=>[...document.querySelectorAll("label")].find(el=>el.querySelector("span")?.textContent===label)?.querySelector<HTMLInputElement>("input");
+  assert(field("Repository Name")?.value==="verification","Repository folder name was not suggested");
+  assert(field("Remote Name")?.value==="origin","Default remote name changed");
+  if(service!=="Azure DevOps") {
+    const access=[...document.querySelectorAll("label")].find(el=>el.textContent?.startsWith("Access"))!.querySelector("select")!;
+    assert(access.value==="private","New repositories were public by default");
+  } else assert(document.body.textContent?.includes("Access is inherited"),"Azure access inheritance missing");
+  handlers.publish_repository=()=>({url:"https://fixture.example/new.git",connected:true,pushed:true,error:null});
+  assert(!calls.some(c=>c.command==="publish_repository"),"Opening a tab created a repository");
+  button(submit)!.click();await until(()=>!document.querySelector('[role="dialog"]'),"published panel closed");
+  const request=calls.find(c=>c.command==="publish_repository")!.args.request;
+  assert(request.remote==="origin"&&request.branch==="main"&&request.head===sha("a"),"Publication lost reviewed branch or remote");
+  assert(request.name==="verification"&&request.visibility==="private"&&request.target==="fixture","Publication lost name, access or target");
+});
+await test("B099 disconnected provider connects without creating a repository",async()=>{
+  let connected=false;
+  handlers.integration_statuses=({ids})=>ids.map((id:string)=>({id,connected,account:connected?"fixture":null,error:null}));
+  handlers.integration_sign_in=()=>{connected=true;return "fixture";};
+  await remotePanel();button("GitLab")!.click();await until(()=>!!button("Connect to GitLab"),"disconnected provider");
+  button("Connect to GitLab")!.click();await until(()=>!!button("Create remote and push branch"),"connected publishing form");
+  assert(!calls.some(c=>c.command==="publish_repository"),"Connecting created a repository");
+  button("Cancel")!.click();await until(()=>!document.querySelector('[role="dialog"]'),"cancel connected panel");
+});
+await test("B099 partial publication resumes without creating twice",async()=>{
+  await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"publish ready");
+  let release!:(value:any)=>void;
+  handlers.publish_repository=()=>new Promise(resolve=>{release=resolve;});
+  button("Create remote and push branch")!.click();await until(()=>!!release,"create request held");
+  assert(button("Cancel")!.disabled,"Pending creation could be abandoned");
+  release({url:"https://github.com/fixture/new.git",connected:true,pushed:false,error:"Synthetic authentication failure"});
+  await until(()=>!!button("Retry connection and push")&&!button("Retry connection and push")!.disabled,"retry retained repository");
+  assert(document.body.textContent?.includes("Synthetic authentication failure"),"Partial failure was hidden");
+  handlers.resume_publish=()=>({url:"https://github.com/fixture/new.git",connected:true,pushed:true,error:null});
+  button("Retry connection and push")!.click();await until(()=>!document.querySelector('[role="dialog"]'),"resume success");
+  assert(calls.filter(c=>c.command==="publish_repository").length===1,"Retry created another repository");
+  assert(calls.find(c=>c.command==="resume_publish")!.args.url==="https://github.com/fixture/new.git","Retry changed destination");
+});
+await test("B099 provider creation failure preserves the form",async()=>{
+  await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"publish ready");
+  handlers.publish_repository=()=>{throw new Error("403 missing permission");};
+  button("Create remote and push branch")!.click();await until(()=>document.body.textContent!.includes("403 missing permission"),"creation failure");
+  assert(document.querySelector<HTMLInputElement>('input[value="verification"]'),"Failed creation lost repository name");
+  assert(!calls.some(c=>c.command==="resume_publish"||c.command==="run_action"),"Failed creation continued to connect or push");
+});
+await test("B099 public visibility and keyboard provider tabs",async()=>{
+  await remotePanel();const first=button("URL")!;first.focus();first.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}));
+  await until(()=>document.activeElement===button("GitHub")&&!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"keyboard selected GitHub");
+  const access=[...document.querySelectorAll("label")].find(el=>el.textContent?.startsWith("Access"))!.querySelector("select")!;
+  access.value="public";access.dispatchEvent(new Event("change",{bubbles:true}));
+  handlers.publish_repository=()=>({url:"https://github.com/fixture/new.git",connected:true,pushed:true,error:null});
+  button("Create remote and push branch")!.click();await until(()=>calls.some(c=>c.command==="publish_repository"),"public creation");
+  assert(calls.find(c=>c.command==="publish_repository")!.args.request.visibility==="public","Explicit public access was lost");
+  await until(()=>!document.querySelector('[role="dialog"]'),"public publish closed");
+});
+await test("B099 URL fetch retry retains the newly added remote",async()=>{
+  await remotePanel();let fetches=0;
+  handlers.run_action=({action})=>action.type==="fetchRemote"&&fetches++===0?{ok:false,message:"Synthetic fetch failure"}:{ok:true,message:"Done"};
+  input(document.querySelector<HTMLInputElement>('input[placeholder="https://github.com/owner/project.git"]')!,"https://fixture.example/new.git");
+  button("Add Remote")!.click();await until(()=>!!button("Retry remote setup")&&!button("Retry remote setup")!.disabled,"fetch retry");
+  button("Retry remote setup")!.click();await until(()=>!document.querySelector('[role="dialog"]'),"fetch retry closed");
+  assert(calls.filter(c=>c.command==="run_action"&&c.args.action.type==="addRemote").length===1,"Fetch retry tried to recreate the remote");
+  assert(fetches===2,"Fetch was not retried");
+});
+const preview=new URLSearchParams(location.search).has("publishPreview");
+if(preview) {reset();await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"preview");}
+else {root.unmount();queryClient.clear();document.body.innerHTML="";}
+const report=document.createElement("pre");report.id="verification-results";report.hidden=preview;report.textContent=JSON.stringify({results,passed:results.filter(result=>result.status==="passed").length,failed:results.filter(result=>result.status==="failed").length});document.body.append(report);

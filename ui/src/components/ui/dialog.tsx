@@ -12,6 +12,7 @@ export function Dialog({
   footer,
   width = 440,
   sidebar,
+  drawerLeft,
 }: {
   open: boolean;
   onClose: () => void;
@@ -21,6 +22,7 @@ export function Dialog({
   width?: number;
   /** A list down the left side (for dialogs with several sources); the children fill the right side. */
   sidebar?: ReactNode;
+  drawerLeft?: number;
 }) {
   const content = useRef<HTMLDivElement>(null);
   return (
@@ -29,8 +31,8 @@ export function Dialog({
         <D.Overlay className="dialog-overlay fixed inset-0 bg-black/50 z-50" />
         <D.Content
           ref={content}
-          className="dialog-surface fixed left-1/2 top-[18%] -translate-x-1/2 z-50 bg-panel border border-white/12 rounded-md shadow-2xl flex flex-col max-h-[75vh]"
-          style={{ width, maxWidth: "calc(100vw - 32px)" }}
+          className={cn("dialog-surface fixed z-50 bg-panel border border-white/12 shadow-2xl flex flex-col", drawerLeft === undefined ? "left-1/2 top-[18%] -translate-x-1/2 rounded-md max-h-[75vh]" : "top-[126px] bottom-6")}
+          style={{ width, maxWidth: "calc(100vw - 32px)", ...(drawerLeft === undefined ? {} : { left: `min(${drawerLeft}px, max(16px, calc(100vw - ${width + 16}px)))` }) }}
           aria-describedby={undefined}
           onOpenAutoFocus={(event) => {
             const initial = content.current?.querySelector<HTMLElement>("[data-dialog-initial-focus]");

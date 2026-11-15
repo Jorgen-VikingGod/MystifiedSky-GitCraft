@@ -9,20 +9,7 @@ const form = (title: string, fields: FormField[], confirm: string, onSubmit: (v:
 const str = (v: string | boolean | undefined) => (typeof v === "string" ? v.trim() : "");
 
 export function addRemote(path: string) {
-  form(
-    "Add Remote",
-    [
-      { key: "name", label: "Name", value: "origin" },
-      { key: "url", label: "Pull URL", value: "", placeholder: "https://github.com/owner/project.git" },
-      { key: "push", label: "Push URL (optional)", value: "" },
-    ],
-    "Add Remote",
-    async (v) => {
-      const ok = await act(path, { type: "addRemote", name: str(v.name), url: str(v.url) });
-      if (ok && str(v.push)) await act(path, { type: "remoteEdit", name: str(v.name), newName: "", url: str(v.url), pushUrl: str(v.push) }, true);
-      if (ok) await act(path, { type: "fetchRemote", remote: str(v.name) }, true);
-    },
-  );
+  useStore.getState().setDialog({ kind: "addRemote", path });
 }
 
 export async function editRemote(path: string, name: string) {

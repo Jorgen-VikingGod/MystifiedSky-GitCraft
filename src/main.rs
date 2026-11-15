@@ -19,6 +19,7 @@ mod external;
 mod prefs;
 mod hosting;
 mod hosting_api;
+mod publishing;
 mod manage;
 mod rewrite;
 mod metrics;
@@ -473,6 +474,23 @@ async fn integration_sign_in(id: String, method: String) -> Result<String, Strin
 #[tauri::command]
 async fn integration_repos(id: String) -> Result<Vec<hosting::HostedRepo>, String> {
     blocking(move || hosting::repositories(&id)).await?
+}
+
+#[tauri::command]
+async fn publish_targets(service: String) -> Result<Vec<publishing::Target>, String> {
+    blocking(move || publishing::targets(&service)).await?
+}
+
+#[tauri::command]
+async fn publish_repository(path: String, request: publishing::PublishRequest, state: State<'_, AppState>) -> Result<publishing::PublishResult, String> {
+    let engine=state.engine.clone();
+    blocking(move || publishing::publish(Path::new(&path), &request, &engine.jobs)).await?
+}
+
+#[tauri::command]
+async fn resume_publish(path: String, request: publishing::PublishRequest, url: String, state: State<'_, AppState>) -> Result<publishing::PublishResult, String> {
+    let engine=state.engine.clone();
+    blocking(move || publishing::resume(Path::new(&path), &request, &url, &engine.jobs)).await
 }
 
 #[tauri::command]
@@ -1097,6 +1115,9 @@ fn main() {
             integration_statuses,
             integration_sign_in,
             integration_repos,
+            publish_targets,
+            publish_repository,
+            resume_publish,
             integration_add_ssh_key,
             integration_ssh_page,
             issue_branch_name,

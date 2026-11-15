@@ -322,7 +322,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
     if (!r.ok && action.type === "push" && !action.force && r.message === "This repository has no remote to push to. Add one first.") {
       confirmThen(
         "No remote to push to",
-        "This repository has no remote to push to. Would you like to add one? Enter your repository's remote URL, then push again when it has been added.",
+        "This repository has no remote to push to. Would you like to add one? Connect an existing URL or create a repository on a connected hosting account.",
         "Add Remote",
         () => addRemote(path),
         false,

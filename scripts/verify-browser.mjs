@@ -24,7 +24,9 @@ try {
   socket.onmessage = event => { const message = JSON.parse(event.data); if (message.id) { pending.get(message.id)?.(message); pending.delete(message.id); } else if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails); };
   const send = (method, params = {}) => new Promise(resolve => { const id = ++next; pending.set(id, resolve); socket.send(JSON.stringify({id,method,params})); });
   await send('Runtime.enable'); await send('Page.enable');
-  await send('Page.navigate', {url: `http://127.0.0.1:${server.httpServer.address().port}/tests/browser/index.html`});
+  const preview = process.argv.includes('--publish-preview');
+  if (preview) await send('Emulation.setDeviceMetricsOverride', {width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  await send('Page.navigate', {url: `http://127.0.0.1:${server.httpServer.address().port}/tests/browser/index.html${preview ? '?publishPreview' : ''}`});
   let report;
   for (let i = 0; i < 600; i++) {
     await sleep(200);
@@ -35,6 +37,10 @@ try {
   writeFileSync(join(repository, 'target/verification/browser-errors.json'), JSON.stringify(errors, null, 2));
   if (!report) throw new Error('Headless verification timed out; see target/verification/browser-errors.json');
   writeFileSync(join(repository, 'target/verification/browser-report.json'), JSON.stringify(report, null, 2));
+  if (preview) {
+    const shot = await send('Page.captureScreenshot', {format:'png'});
+    writeFileSync(join(repository, 'target/verification/publish-preview.png'), Buffer.from(shot.result.data, 'base64'));
+  }
   console.log(JSON.stringify(report, null, 2));
   if (report.failed) process.exitCode = 1;
 } finally {

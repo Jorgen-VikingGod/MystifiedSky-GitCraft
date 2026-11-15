@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { SERVICES, integrations } from "@/lib/integrations";
 import { PreferencesScreen } from "./prefs/Preferences";
 import { RepoManagementDialog } from "./RepoManagement";
+import { AddRemoteDialog } from "./AddRemoteDialog";
 import { useQuery } from "@tanstack/react-query";
 import { Cloud, Github, Gitlab, Globe, Laptop, LoaderCircle, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -53,6 +54,8 @@ export function Dialogs() {
       return <OpenDialog onClose={close} />;
     case "clone":
       return <CloneDialog onClose={close} />;
+    case "addRemote":
+      return <AddRemoteDialog key={d.path} path={d.path} onClose={close} />;
     case "init":
       return <InitDialog onClose={close} />;
     case "log":

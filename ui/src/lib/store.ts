@@ -100,6 +100,7 @@ export type DialogState =
   | { kind: "prompt"; title: string; label: string; value: string; confirm: string; onSubmit: (v: string, extra?: string) => void; extraLabel?: string; allowEmpty?: boolean }
   | { kind: "confirm"; title: string; text: string; confirm: string; danger?: boolean; onConfirm: () => void }
   | { kind: "clone" }
+  | { kind: "addRemote"; path: string }
   | { kind: "init" }
   | { kind: "open" }
   | { kind: "log" }

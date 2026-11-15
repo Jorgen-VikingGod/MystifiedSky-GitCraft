@@ -39,8 +39,7 @@ describe("repository loading and refresh", () => {
     expect(run).toHaveBeenCalledTimes(1);
     dialog.onConfirm();
     const form = useStore.getState().dialog;
-    expect(form?.kind).toBe("form");
-    expect(form?.kind === "form" && form.fields.find(field => field.key === "name")?.value).toBe("origin");
+    expect(form).toEqual({ kind: "addRemote", path: repo.path });
     expect(run).toHaveBeenCalledTimes(1);
   });
 
