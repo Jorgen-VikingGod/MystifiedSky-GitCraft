@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Push now offers to add a remote when a local repository has none, opening the remote setup form directly from a cancellable prompt.
+
 - A maintained bug and optimization checklist tracks priorities, ownership, reproduction evidence, and verification before issues are marked fixed.
 
 - A test workflow runs frontend and native regression suites on Windows, Ubuntu, and macOS for pull requests and pushes to main. Platform setup and desktop validation instructions document how to test all three targets.

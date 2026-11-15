@@ -192,6 +192,38 @@ await test("B079 signing Off writes explicit false for both defaults",async()=>{
   checkboxes[1].click();await until(()=>calls.some(c=>c.command==="set_git_config"&&c.args.key==="tag.gpgSign"),"tag signing write");
   assert(calls.filter(c=>c.command==="set_git_config").every(c=>c.args.value==="false"),"Off removed an override instead of disabling it");
 });
+for(const outcome of ["cancel","add failure","success"])await test(`B099 missing remote setup: ${outcome}`,async()=>{
+  repo.remotes=[];
+  const url="https://fixture.example/owner/new-repository.git";
+  handlers.run_action=({action})=>{
+    if(action.type==="push")return repo.remotes.length?{ok:true,message:"Pushed main"}:{ok:false,message:"This repository has no remote to push to. Add one first."};
+    if(action.type==="addRemote"){
+      if(outcome==="add failure")return {ok:false,message:"Could not add remote."};
+      repo.remotes=[action.name];return {ok:true,message:"Remote added"};
+    }
+    return {ok:true,message:"Fetched remote"};
+  };
+  await openRepoPath(repo.path);mount(<Dialogs/>);
+  assert(!await act(repo.path,{type:"push",force:false},true),"A missing-remote push reported success");
+  await until(()=>!!button("Add Remote"),"missing remote choice");
+  assert(calls.filter(c=>c.command==="run_action").length===1,"Opening the prompt changed the repository");
+  if(outcome==="cancel"){
+    button("Cancel")!.click();await until(()=>!document.querySelector('[role="dialog"]'),"cancelled remote prompt");
+    assert(repo.remotes.length===0&&calls.filter(c=>c.command==="run_action").length===1,"Cancel changed remotes or retried the push");return;
+  }
+  button("Add Remote")!.click();await until(()=>!!document.querySelector('input[placeholder="https://github.com/owner/project.git"]'),"remote URL form");
+  input(document.querySelector<HTMLInputElement>('input[placeholder="https://github.com/owner/project.git"]')!,url);button("Add Remote")!.click();
+  await until(()=>calls.some(c=>c.command==="run_action"&&c.args.action.type==="addRemote"),"add remote request");
+  const added=calls.find(c=>c.command==="run_action"&&c.args.action.type==="addRemote")!.args.action;
+  assert(added.name==="origin"&&added.url===url,"Remote form lost the name or URL");
+  if(outcome==="add failure"){
+    await until(()=>useStore.getState().toasts.some(t=>t.text==="Could not add remote."),"remote add failure");
+    assert(repo.remotes.length===0&&!calls.some(c=>c.command==="run_action"&&c.args.action.type==="fetchRemote"),"Failed add continued to fetch");return;
+  }
+  await until(()=>calls.some(c=>c.command==="run_action"&&c.args.action.type==="fetchRemote"),"fetch added remote");
+  assert(calls.filter(c=>c.command==="run_action"&&c.args.action.type==="push").length===1,"Adding a remote pushed without another request");
+  assert(await act(repo.path,{type:"push",force:false},true),"Push did not succeed after adding the remote");
+});
 await test("B083 force choice retains its reviewed branch and destination",async()=>{
   const review={branch:"refs/heads/main",head:sha("a"),remote:"origin",remoteRef:"refs/heads/main",url:"/fixture/remote.git",remoteOid:sha("c"),trackingOid:sha("c"),config:"fixture-config"};
   let finishReview!: (value: typeof review) => void;

@@ -26,6 +26,32 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("repository loading and refresh", () => {
+  it("offers remote setup after a no-remote push without changing the repository", async () => {
+    await open();
+    const run = vi.spyOn(api, "run").mockResolvedValue({ ok: false, message: "This repository has no remote to push to. Add one first." });
+    expect(await act(repo.path, { type: "push", force: false }, true)).toBe(false);
+    const dialog = useStore.getState().dialog;
+    expect(dialog?.kind).toBe("confirm");
+    if (dialog?.kind !== "confirm") throw new Error("Missing remote setup prompt");
+    expect(dialog.danger).toBe(false);
+    expect(dialog.confirm).toBe("Add Remote");
+    expect(useStore.getState().toasts).toHaveLength(0);
+    expect(run).toHaveBeenCalledTimes(1);
+    dialog.onConfirm();
+    const form = useStore.getState().dialog;
+    expect(form?.kind).toBe("form");
+    expect(form?.kind === "form" && form.fields.find(field => field.key === "name")?.value).toBe("origin");
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("keeps unrelated or forced push failures out of remote setup, force=%s", async (force) => {
+    await open();
+    vi.spyOn(api, "run").mockResolvedValue({ ok: false, message: force ? "This repository has no remote to push to. Add one first." : "A push hook declined the update." });
+    expect(await act(repo.path, { type: "push", force }, true)).toBe(false);
+    expect(useStore.getState().dialog).toBeNull();
+    expect(useStore.getState().toasts).toHaveLength(1);
+  });
+
   it("queues overlapping mutations until the preceding action and refresh finish", async () => {
     await open();
     let finish!: (value: { ok: boolean; message: string }) => void;

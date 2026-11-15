@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api, type Action, type FileChange, type GitRef, type RefView, type RepoView, type PushReview } from "./api";
 import { useStore } from "./store";
 import { spinButtonFor, withSpin } from "./spin";
+import { addRemote } from "./manage";
 
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: true, staleTime: 2000, retry: false } },
@@ -318,6 +319,16 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   actionChanges.set(path, { full: false });
   try {
     const r = await api.run(path, action);
+    if (!r.ok && action.type === "push" && !action.force && r.message === "This repository has no remote to push to. Add one first.") {
+      confirmThen(
+        "No remote to push to",
+        "This repository has no remote to push to. Would you like to add one? Enter your repository's remote URL, then push again when it has been added.",
+        "Add Remote",
+        () => addRemote(path),
+        false,
+      );
+      return false;
+    }
     if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
       await offerForcePush(path);
       return false;
