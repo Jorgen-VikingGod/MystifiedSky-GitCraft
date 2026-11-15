@@ -457,8 +457,8 @@ function VirtualHunkRows({lines, scrollRef, wordWrap, render}: {
   const start = wordWrap ? 0 : Math.min(range.start, lines.length);
   const end = wordWrap ? lines.length : Math.min(range.end, lines.length);
   return <tbody ref={body}>
-    {start > 0 && <tr role="presentation"><td role="presentation" colSpan={3} style={{height: start * 19, padding: 0, border: 0}} /></tr>}
+    {start > 0 && <tr inert><td colSpan={3} style={{height: start * 19, padding: 0, border: 0}} /></tr>}
     {lines.slice(start, end).map((line, index) => render(line, start + index))}
-    {end < lines.length && <tr role="presentation"><td role="presentation" colSpan={3} style={{height: (lines.length - end) * 19, padding: 0, border: 0}} /></tr>}
+    {end < lines.length && <tr inert><td colSpan={3} style={{height: (lines.length - end) * 19, padding: 0, border: 0}} /></tr>}
   </tbody>;
 }

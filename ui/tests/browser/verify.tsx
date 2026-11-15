@@ -268,8 +268,9 @@ await test("O026 dense hunk rows stay bounded and preserve original indexes",asy
   await until(()=>!!document.querySelector('tbody tr[title]'),"virtual rows");assert(document.querySelectorAll('tbody tr').length<100,`All rows mounted: ${document.querySelectorAll("tbody tr").length}, viewport ${document.querySelector("[data-hunk]")?.parentElement?.clientHeight}`);
   const scroll=document.querySelector<HTMLDivElement>('[data-hunk]')!.parentElement!;scroll.scrollTop=2500*19;scroll.dispatchEvent(new Event("scroll"));
   await until(()=>[...document.querySelectorAll('tbody tr')].some(row=>row.textContent?.endsWith("line-2500")),"middle row");
-  const spacers=[...document.querySelectorAll<HTMLTableRowElement>('tbody tr[role="presentation"]')];
-  assert(spacers.length===2&&spacers.every(row=>row.tabIndex<0&&row.cells[0].getAttribute("role")==="presentation"&&!row.querySelector('button,input,[tabindex]')),"Virtual spacing entered the accessible table or keyboard order");
+  const spacers=[...document.querySelectorAll<HTMLTableRowElement>('tbody tr[inert]')];
+  assert(spacers.length===2&&spacers.every(row=>row.inert&&row.tabIndex<0&&!row.querySelector('button,input,[tabindex]')),"Virtual spacing entered the accessible table or keyboard order");
+  for(const spacer of spacers){spacer.focus();assert(document.activeElement!==spacer,"An inert spacer received focus");}
   [...document.querySelectorAll<HTMLTableRowElement>('tbody tr')].find(row=>row.textContent?.endsWith("line-2500"))!.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));await until(()=>!!button("Stage 1 Line"),"keyboard selection");button("Stage 1 Line")!.click();await until(()=>calls.some(c=>c.command==="run_action"&&c.args.action.type==="patch"),"patch");
   const patch=calls.find(c=>c.command==="run_action"&&c.args.action.type==="patch")!.args.action;assert(patch.hunk===0&&patch.lines[0]===2500&&patch.expected.length===4001,"Row indexes changed");assert(document.querySelectorAll('tbody tr').length<100,"Scroll expanded DOM");
   results.push({id:"O026 dense diff",status:"measurement",milliseconds:Math.round(performance.now()-started),rows:document.querySelectorAll('tbody tr').length});

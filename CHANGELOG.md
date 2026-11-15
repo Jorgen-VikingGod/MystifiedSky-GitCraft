@@ -72,7 +72,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Keep virtual diff spacer rows decorative for assistive technology and wait for the reviewed branch and destination before completing rejected-push handling.
+- Keep empty virtual diff spacer rows out of keyboard navigation and assistive technology, and wait for the reviewed branch and destination before completing rejected-push handling.
 
 - Detect undecodable file and conflict previews, refuse ordinary saves that would replace original bytes, and require a correct encoding or explicit UTF-8 conversion.
 

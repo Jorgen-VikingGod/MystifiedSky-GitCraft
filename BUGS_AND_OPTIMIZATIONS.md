@@ -307,8 +307,10 @@ The current main-branch scan reported five open findings and a failing new-code 
 
 | Issue | Source change | Local verification |
 | --- | --- | --- |
-| AaHZ2-BmoCt6TAww4FsZ / AaHZ2-BmoCt6TAww4Fsa, typescript:S6825 | Virtual hunk spacer rows and cells use presentation semantics instead of aria-hidden on table rows. | Actual browser scroll verifies both spacers remain decorative/non-focusable while keyboard selection still sends original body index 2500. |
+| AaHZ2-BmoCt6TAww4FsZ / AaHZ2-BmoCt6TAww4Fsa, typescript:S6825 | Virtual hunk spacer rows use native inert behavior instead of aria-hidden or a conflicting role on table rows. | Actual browser scroll verifies both spacers remain decorative/non-focusable while keyboard selection still sends original body index 2500. |
 | AaHZ2-DIoCt6TAww4Fsb, typescript:S9383 | Rejected-push handling awaits its asynchronous branch/destination review. | Actual browser holds the review request and verifies action completion waits, then preserves the reviewed destination across a later checkout. |
 | AaHZ2-DVoCt6TAww4Fsc / AaHZ2-DVoCt6TAww4Fsd, Web:S5254 / Web:PageWithoutTitleCheck | Browser verification document declares English, UTF-8 and a descriptive page title. | Browser harness loads and completes all component checks. |
 
 Local validation for the commit containing this checkpoint: 140 frontend tests, 30 headless browser checks, TypeScript and production build passed. Remote resolution is determined by the new analysis of that commit; local checks alone do not establish a passing remote gate.
+
+Remote follow-up: analysis of f7f9bdf cleared the original five issues but reported AaHc7aqqHSNS_W3eJ1zE/AaHc7aqqHSNS_W3eJ1zF (typescript:S6843) for presentation roles on table rows. The follow-up replaces those roles with native inert rows and verifies that programmatic focus cannot reach either spacer; this excludes decorative spacing from interaction and accessibility without overriding table semantics.
