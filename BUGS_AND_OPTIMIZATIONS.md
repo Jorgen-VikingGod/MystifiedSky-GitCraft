@@ -300,3 +300,15 @@ Final local results (2026-11-14): 162 native tests passed, 3 live-provider tests
 - Evidence combines source/call-path review, extracted production-function/component fixtures, real isolated Git repositories/local bare remotes, and selected native desktop checks. Each finding states its evidence and pending scope; no live service mutations, real credential tests, or eight-hour coverage are claimed.
 - Additional randomized stress pass: 1,757 generated cases and 10,365 real Git patch stage/Undo/discard operations, with zero observed index/working-byte mismatches. Covered ordinary and unusual filenames, Unicode text, LF/CRLF, final-newline differences, and multiple hunks with changing line offsets. Unchanged generated cases were skipped; selected-line combinations and native rendering are not comprehensively verified by this pass. Extracted helper source, scripts, progress and reproduction results were retained outside the checkout in the temporary audit directory.
 - Checklist checks: unique definition IDs, all new entries present, relative source links resolve, UTF-8 decoding passes, and documentation diff whitespace check passes. The audit changed this checklist only and made no application fixes, commits or pushes.
+
+## Quality gate remediation: 2026-11-14
+
+The current main-branch scan reported five open findings and a failing new-code reliability rating. This follow-up fixes their source without changing issue statuses, quality-gate thresholds or analysis exclusions. It extends B083/O026 verification rather than allocating duplicate bug IDs.
+
+| Issue | Source change | Local verification |
+| --- | --- | --- |
+| AaHZ2-BmoCt6TAww4FsZ / AaHZ2-BmoCt6TAww4Fsa, typescript:S6825 | Virtual hunk spacer rows and cells use presentation semantics instead of aria-hidden on table rows. | Actual browser scroll verifies both spacers remain decorative/non-focusable while keyboard selection still sends original body index 2500. |
+| AaHZ2-DIoCt6TAww4Fsb, typescript:S9383 | Rejected-push handling awaits its asynchronous branch/destination review. | Actual browser holds the review request and verifies action completion waits, then preserves the reviewed destination across a later checkout. |
+| AaHZ2-DVoCt6TAww4Fsc / AaHZ2-DVoCt6TAww4Fsd, Web:S5254 / Web:PageWithoutTitleCheck | Browser verification document declares English, UTF-8 and a descriptive page title. | Browser harness loads and completes all component checks. |
+
+Local validation for the commit containing this checkpoint: 140 frontend tests, 30 headless browser checks, TypeScript and production build passed. Remote resolution is determined by the new analysis of that commit; local checks alone do not establish a passing remote gate.

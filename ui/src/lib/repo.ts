@@ -319,7 +319,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   try {
     const r = await api.run(path, action);
     if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
-      offerForcePush(path);
+      await offerForcePush(path);
       return false;
     }
     if (!r.ok && NETWORK.has(action.type) && signInProblem(r.message)) {

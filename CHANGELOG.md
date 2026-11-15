@@ -72,6 +72,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Keep virtual diff spacer rows decorative for assistive technology and wait for the reviewed branch and destination before completing rejected-push handling.
+
 - Detect undecodable file and conflict previews, refuse ordinary saves that would replace original bytes, and require a correct encoding or explicit UTF-8 conversion.
 
 - Give shared preference controls accessible captions and help text, with distinct names for path fields and Browse buttons.
