@@ -32,10 +32,10 @@ fn editor_saves_refuse_newer_disk_contents_and_deletions() {
     let before = std::fs::read(path.join("file.txt")).unwrap();
     let token = crate::files::content_token(Some(&before));
     std::fs::write(path.join("file.txt"), "external change\n").unwrap();
-    assert!(crate::files::save_checked(path, "file.txt", "stale draft", Some(&token)).is_err());
+    assert!(crate::files::save_checked_mode(path, "file.txt", "stale draft", Some(&token), false).is_err());
     assert_eq!(std::fs::read_to_string(path.join("file.txt")).unwrap(), "external change\n");
     std::fs::remove_file(path.join("file.txt")).unwrap();
-    assert!(crate::files::save_checked(path, "file.txt", "stale draft", Some(&token)).is_err());
+    assert!(crate::files::save_checked_mode(path, "file.txt", "stale draft", Some(&token), false).is_err());
     assert!(!path.join("file.txt").exists());
 }
 
@@ -200,7 +200,7 @@ fn conflict_reader_and_resolution_round_trip_the_repository_encoding() {
     std::fs::write(path.join("file.txt"), b"<<<<<<< HEAD\ncaf\xe9\n=======\nother\n>>>>>>> incoming\n").unwrap();
     let info = crate::rewrite::conflict_info(path, "file.txt");
     let readable = info.working.as_deref().is_some_and(|text| text.contains("café"));
-    let save = crate::files::save(path, "file.txt", "café\n");
+    let save = crate::files::save_checked_mode(path, "file.txt", "café\n", None, false);
     let bytes = std::fs::read(path.join("file.txt")).unwrap();
     crate::prefs::set_runtime(original);
     assert!(readable);

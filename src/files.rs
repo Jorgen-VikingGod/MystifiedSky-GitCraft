@@ -375,10 +375,6 @@ pub fn content_token(bytes: Option<&[u8]>) -> String {
     format!("{:016x}", hash.finish())
 }
 
-pub fn save_checked(dir: &Path, file: &str, content: &str, expected: Option<&str>) -> Result<(), String> {
-    save_checked_mode(dir, file, content, expected, false)
-}
-
 pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option<&str>, utf8: bool) -> Result<(), String> {
     if let Some(expected) = expected {
         let current = match std::fs::read(dir.join(file)) {
@@ -392,8 +388,6 @@ pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option
     }
     save_mode(dir, file, content, utf8)
 }
-
-pub fn save(dir: &Path, file: &str, content: &str) -> Result<(), String> { save_mode(dir, file, content, false) }
 
 fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), String> {
     let p = dir.join(file);

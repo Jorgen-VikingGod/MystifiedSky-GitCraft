@@ -31,7 +31,7 @@
 </p>
 
 <p align="center">
-  <img width="100%" alt="GitCraft desktop with repository tabs, connected branch labels, a colorful commit graph, and commit details with a file tree" src="docs/images/gitcraft-desktop.png">
+  <img width="100%" alt="GitCraft desktop with repository tabs, branch and tag labels, a commit graph, adjustable history columns, and the staging panel" src="docs/images/gitcraft-desktop.png">
   <br>
   <sub>Your branches, history, and changes — together in one clear view.</sub>
 </p>

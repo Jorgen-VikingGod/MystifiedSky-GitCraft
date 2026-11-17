@@ -6,6 +6,12 @@ The listed P1 fixes now have local regression evidence. Unchecked entries below 
 
 ## Adjustable graph columns: 2026-11-16
 
+## Build warnings and README image: 2026-11-16
+
+Verified in the commit containing this checkpoint: removed the unused save_checked/save wrappers in src/files.rs and updated the existing stale-editor and repository-encoding regressions to call the production save_checked_mode path directly. `cargo build --locked` passes without either dead_code diagnostic; editor_saves_refuse_newer_disk_contents_and_deletions and conflict_reader_and_resolution_round_trip_the_repository_encoding both pass. Cargo's existing informational warning about moving a running preview executable aside remains separate from these source warnings. The main README screenshot is the supplied image, copied byte-for-byte with matching SHA-256, and its alt text reflects the current view. This extends existing file-save verification rather than allocating duplicate bug IDs.
+
+## Adjustable graph columns (continued): 2026-11-16
+
 Implemented in the commit containing this checkpoint: Branch / Tag, Graph, Commit Message, Author, Commit Date / Time, SHA and Changes have draggable header dividers with keyboard width controls. Saved widths use the existing preferences persistence. Headers, commit cells and graph drawing share the same layout; wide custom layouts scroll horizontally with synchronized headers. Double-click resets one column; the column menu resets all widths or the full layout. Validation includes an actual headless-browser pointer drag from 200 to 300 pixels, release cleanup, keyboard resizing, header/row and scroll alignment, saving/restoring settings, and single/all-column resets. Existing automatic sizing remains the default until widths are customized. No native/backend changes are required.
 
 ## Tracking rules

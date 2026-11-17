@@ -28,6 +28,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- The main README screenshot shows the current desktop layout and commit history.
+
 - Bound structured diff payloads and render visible hunk rows only. Large and densely wrapped comparisons use the virtualized editor with safe full-file actions; oversized partial patches are refused.
 
 - Reject oversized clipboard file copies before loading their contents, with bounded reads for working files and Git blobs.
@@ -77,6 +79,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Hide the unavailable worktree WIP graph control until its data and rendering support are implemented.
 
 ### Fixed
+
+- Development builds no longer warn about obsolete file-save helpers; file safety regressions exercise the production save path directly.
 
 - Keep empty virtual diff spacer rows out of keyboard navigation and assistive technology, and wait for the reviewed branch and destination before completing rejected-push handling.
 
