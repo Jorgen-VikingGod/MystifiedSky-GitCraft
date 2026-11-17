@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Commit-list column dividers can be dragged or adjusted with the keyboard. Widths are remembered, wide layouts scroll horizontally, and individual or all column widths can be reset.
+
 - Add Remote now has URL, GitHub, GitLab, Bitbucket and Azure DevOps tabs. Connected accounts can create a hosted repository and push the current branch, with repository details, access selection, workspace/project selection where needed, and recovery after a partial failure.
 
 - Push now offers to add a remote when a local repository has none, opening the remote setup form directly from a cancellable prompt.

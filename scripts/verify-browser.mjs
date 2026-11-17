@@ -24,9 +24,11 @@ try {
   socket.onmessage = event => { const message = JSON.parse(event.data); if (message.id) { pending.get(message.id)?.(message); pending.delete(message.id); } else if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails); };
   const send = (method, params = {}) => new Promise(resolve => { const id = ++next; pending.set(id, resolve); socket.send(JSON.stringify({id,method,params})); });
   await send('Runtime.enable'); await send('Page.enable');
-  const preview = process.argv.includes('--publish-preview');
+  const graphPreview = process.argv.includes('--graph-preview');
+  const preview = process.argv.includes('--publish-preview') || graphPreview;
   if (preview) await send('Emulation.setDeviceMetricsOverride', {width:1280,height:900,deviceScaleFactor:1,mobile:false});
-  await send('Page.navigate', {url: `http://127.0.0.1:${server.httpServer.address().port}/tests/browser/index.html${preview ? '?publishPreview' : ''}`});
+  const previewQuery = graphPreview ? '?graphPreview' : '?publishPreview';
+  await send('Page.navigate', {url: `http://127.0.0.1:${server.httpServer.address().port}/tests/browser/index.html${preview ? previewQuery : ''}`});
   let report;
   for (let i = 0; i < 600; i++) {
     await sleep(200);
@@ -38,8 +40,22 @@ try {
   if (!report) throw new Error('Headless verification timed out; see target/verification/browser-errors.json');
   writeFileSync(join(repository, 'target/verification/browser-report.json'), JSON.stringify(report, null, 2));
   if (preview) {
+    if (graphPreview) {
+      const bounds = await send('Runtime.evaluate', {expression: 'JSON.stringify(document.querySelector(\'input[aria-label="Branch / Tag column width"]\').getBoundingClientRect())',returnByValue:true});
+      const rect = JSON.parse(bounds.result.result.value);
+      const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+      await send('Input.dispatchMouseEvent', {type:'mouseMoved',x,y});
+      await send('Input.dispatchMouseEvent', {type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
+      await send('Input.dispatchMouseEvent', {type:'mouseMoved',x:x+100,y,buttons:1});
+      await send('Input.dispatchMouseEvent', {type:'mouseReleased',x:x+100,y,button:'left',clickCount:1});
+      await send('Input.dispatchMouseEvent', {type:'mouseMoved',x:x+150,y});
+      await sleep(50);
+      const resized = await send('Runtime.evaluate', {expression: 'document.querySelector(\'input[aria-label="Branch / Tag column width"]\').value',returnByValue:true});
+      if (resized.result.result.value !== '300') throw new Error(`Pointer drag did not settle at 300 pixels (got ${resized.result.result.value})`);
+      console.log('Actual pointer drag resized Branch / Tag from 200 to 300 pixels');
+    }
     const shot = await send('Page.captureScreenshot', {format:'png'});
-    writeFileSync(join(repository, 'target/verification/publish-preview.png'), Buffer.from(shot.result.data, 'base64'));
+    writeFileSync(join(repository, `target/verification/${graphPreview ? 'graph-columns' : 'publish-preview'}.png`), Buffer.from(shot.result.data, 'base64'));
   }
   console.log(JSON.stringify(report, null, 2));
   if (report.failed) process.exitCode = 1;

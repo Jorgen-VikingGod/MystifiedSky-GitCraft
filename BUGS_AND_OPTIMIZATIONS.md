@@ -4,7 +4,13 @@ Last reviewed: 2026-11-14. This is the active checklist; AUDIT.md is historical 
 
 The listed P1 fixes now have local regression evidence. Unchecked entries below retain their specific desktop, live-provider, CI, or platform measurement requirements; they are not claims of completed validation. O012 selective registration is implemented and measured on Windows; remaining Linux measurements are listed below. Earlier uncommitted evidence shipped in `8eeab27`; this follow-up remains uncommitted until the completion note records otherwise.
 
+## Adjustable graph columns: 2026-11-16
+
+Implemented in the commit containing this checkpoint: Branch / Tag, Graph, Commit Message, Author, Commit Date / Time, SHA and Changes have draggable header dividers with keyboard width controls. Saved widths use the existing preferences persistence. Headers, commit cells and graph drawing share the same layout; wide custom layouts scroll horizontally with synchronized headers. Double-click resets one column; the column menu resets all widths or the full layout. Validation includes an actual headless-browser pointer drag from 200 to 300 pixels, release cleanup, keyboard resizing, header/row and scroll alignment, saving/restoring settings, and single/all-column resets. Existing automatic sizing remains the default until widths are customized. No native/backend changes are required.
+
 ## Tracking rules
+
+Column-change validation: 143 frontend tests, 43 browser checks, TypeScript and the production build pass. The preview and actual pointer check are available through `node scripts/verify-browser.mjs --graph-preview` (target/verification/graph-columns.png).
 
 - Keep stable IDs. Add new findings only after checking for duplicates here.
 - An unchecked box means work or verification remains. Statuses: **Open**, **In progress**, **Needs verification**, **Verified fixed**, **Deferred**, **Not a bug**.

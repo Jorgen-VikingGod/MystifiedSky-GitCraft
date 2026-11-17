@@ -5,7 +5,8 @@ import { assignTimeline, showsTimeline, TIMELINE_REFRESH_MS } from "@/lib/timeli
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
-import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns } from "@/lib/store";
+import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns, type GraphColumn } from "@/lib/store";
+import { ColumnResize } from "./ColumnResize";
 import { act, loadMoreRepo, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { commitMenu } from "@/lib/menus";
 import { CommitRefs } from "./CommitRefs";
@@ -29,6 +30,7 @@ export function GraphView({ repo, tabId }: Props) {
   // Sizes from the graph constants (src/metrics.rs).
   const m = useStore((s) => s.metrics);
   const cols = useStore((s) => s.settings.columns) ?? DEFAULT_COLUMNS;
+  const widths = useStore((s) => s.settings.graphColumnWidths);
   const lazyLoad = useStore((s) => s.settings.lazyLoad);
   const hidden = useStore((s) => s.settings.hidden[repo.path]) ?? NO_REFS;
   const solo = useStore((s) => s.settings.solo[repo.path]) ?? NO_REFS;
@@ -51,6 +53,7 @@ export function GraphView({ repo, tabId }: Props) {
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(400);
   const [paneW, setPaneW] = useState(300);
+  const [scrollLeft, setScrollLeft] = useState(0);
   const [hoverRef, setHoverRef] = useState<number | null>(null);
   const [hoverRow, setHoverRow] = useState<number | null>(null);
   const ghostOn = useStore((s) => s.settings.ghostRefs);
@@ -159,25 +162,44 @@ export function GraphView({ repo, tabId }: Props) {
   // Zone widths: default widths when the pane has room, otherwise the branch/tag zone gives way
   // first (down to REF_ZONE_MIN_WIDTH) and the message zone keeps COMMIT_MESSAGE_ZONE_MIN_WIDTH.
   const lanesW = GUTTER + Math.max(1, repo.graph.width) * LANE + PAD * 2;
-  const extraWidth: Record<Extra, number> = { author: m.author_zone, date: m.date_zone, sha: m.sha_zone, changes: m.changes_zone };
+  const minimum: Record<GraphColumn, number> = { refs: m.ref_zone_min, graph: lanesW, message: m.message_min, author: 80, date: 100, sha: 60, changes: 80 };
+  const maxWidth = (key: GraphColumn) => Math.max(minimum[key], key === "message" ? 10000 : 1600);
+  const sized = (key: GraphColumn, fallback: number) => {
+    const saved = widths?.[key];
+    return typeof saved === "number" && Number.isFinite(saved) ? Math.max(minimum[key], Math.min(maxWidth(key), saved)) : fallback;
+  };
+  const custom = Object.values(widths ?? {}).some(value => typeof value === "number" && Number.isFinite(value));
+  const extraWidth: Record<Extra, number> = { author: sized("author", m.author_zone), date: sized("date", m.date_zone), sha: sized("sha", m.sha_zone), changes: sized("changes", m.changes_zone) };
   const wanted = (["author", "date", "sha", "changes"] as Extra[]).filter((k) => cols[k]);
-  const baseRef = cols.refs ? m.ref_zone : 0;
-  const baseGraph = cols.graph ? Math.min(m.graph_zone, 108) : 0;
+  const baseRef = cols.refs ? sized("refs", m.ref_zone) : 0;
+  const baseGraph = cols.graph ? sized("graph", Math.min(m.graph_zone, 108)) : 0;
   // Extra columns that don't fit next to a minimum-width message are left out (rightmost first).
   const extras: Extra[] = [];
   for (const k of wanted) {
     const used = extras.reduce((a, e) => a + extraWidth[e], 0) + extraWidth[k];
-    if (paneW - used - (cols.refs ? m.ref_zone_min : 0) - (cols.graph ? lanesW : 0) >= m.message_min) extras.push(k);
+    if (custom || paneW - used - (cols.refs ? m.ref_zone_min : 0) - (cols.graph ? lanesW : 0) >= m.message_min) extras.push(k);
   }
   const extrasW = extras.reduce((a, e) => a + extraWidth[e], 0);
-  const roomy = paneW - extrasW >= baseRef + baseGraph + m.message_zone;
+  const roomy = custom || paneW - extrasW >= baseRef + baseGraph + m.message_zone;
   const graphW = !cols.graph ? 0 : roomy ? Math.max(baseGraph, lanesW) : Math.max(0, Math.min(lanesW, paneW - extrasW - (cols.refs ? m.ref_zone_min : 0) - m.message_min));
   const refW = !cols.refs
     ? 0
     : roomy
-      ? m.ref_zone
+      ? baseRef
       : Math.round(Math.max(m.ref_zone_min, Math.min(m.ref_zone, (paneW - extrasW) * 0.42, paneW - extrasW - graphW - m.message_min)));
-  const msgW = paneW - refW - graphW - extrasW;
+  const msgW = sized("message", Math.max(m.message_min, paneW - refW - graphW - extrasW));
+  const contentW = refW + graphW + msgW + extrasW;
+  const resizeColumn = (key: GraphColumn, value?: number) => {
+    const next = { ...useStore.getState().settings.graphColumnWidths };
+    if (value !== undefined && !custom) {
+      if (cols.refs) next.refs = refW;
+      if (cols.graph) next.graph = graphW;
+    }
+    if (value === undefined) delete next[key];
+    else next[key] = Math.round(Math.max(minimum[key], Math.min(maxWidth(key), value)));
+    setSettings({ graphColumnWidths: next });
+  };
+  const handle = (key: GraphColumn, label: string, width: number) => <ColumnResize label={label} width={width} min={minimum[key]} max={maxWidth(key)} onResize={value => resizeColumn(key, value)} onReset={() => resizeColumn(key)}/>;
   const laneX = (l: number) => refW + GUTTER + l * LANE + LANE / 2;
 
   useEffect(() => {
@@ -458,8 +480,9 @@ export function GraphView({ repo, tabId }: Props) {
       ] as [keyof GraphColumns, string][]
     ).map(([k, label]) => ({ label: `${cols[k] ? "✓ " : "   "}${label}`, onSelect: () => setSettings({ columns: { ...cols, [k]: !cols[k] } }) })),
     { separator: true },
-    { label: "Reset columns to default layout", onSelect: () => setSettings({ columns: DEFAULT_COLUMNS }) },
-    { label: "Reset columns to compact layout", onSelect: () => setSettings({ columns: { ...DEFAULT_COLUMNS, description: false } }) },
+    { label: "Reset column widths", onSelect: () => setSettings({ graphColumnWidths: {} }) },
+    { label: "Reset columns to default layout", onSelect: () => setSettings({ columns: DEFAULT_COLUMNS, graphColumnWidths: {} }) },
+    { label: "Reset columns to compact layout", onSelect: () => setSettings({ columns: { ...DEFAULT_COLUMNS, description: false }, graphColumnWidths: {} }) },
     { separator: true },
     { label: `${lazyLoad ? "✓ " : "   "}Lazy Load Commits in Graph`, onSelect: () => setSettings({ lazyLoad: !lazyLoad }) },
   ];
@@ -473,20 +496,25 @@ export function GraphView({ repo, tabId }: Props) {
 
   return (
     <div className="h-full flex flex-col bg-app min-w-0">
-      <div className="flex items-center shrink-0 bg-panel border-b border-black/30 text-[10px] tracking-[0.08em] text-fg3 font-medium mono" style={{ height: HEADER }}>
+      <div className="shrink-0 overflow-hidden bg-panel border-b border-black/30" style={{ height: HEADER }}>
+      <div className="flex items-center h-full text-[10px] tracking-[0.08em] text-fg3 font-medium mono" style={{ width: contentW, transform: `translateX(${-scrollLeft}px)` }}>
         {cols.refs && (
-          <div style={{ width: refW }} className="pl-[15px] truncate shrink-0">
+          <div style={{ width: refW }} className="relative pl-[15px] pr-2 truncate shrink-0 h-full flex items-center">
             BRANCH / TAG
+            {handle("refs", "Branch / Tag", refW)}
           </div>
         )}
         {cols.graph && (
-          <div style={{ width: graphW }} className="flex items-center justify-center text-white/70 shrink-0" title="GRAPH">
+          <div style={{ width: graphW }} className="relative h-full flex items-center justify-center text-white/70 shrink-0" title="GRAPH">
             <Network size={13} />
+            {handle("graph", "Graph", graphW)}
           </div>
         )}
-        <div className="flex-1 truncate min-w-0" style={{ paddingLeft: m.summary_margin }}>
+        <div className="relative shrink-0 h-full flex items-center min-w-0" style={{ width: msgW, paddingLeft: m.summary_margin }}>
+          <span className="truncate pr-16">
           {msgW >= 130 ? "COMMIT MESSAGE" : ""}
-        </div>
+          </span>
+          <div className="absolute right-2 flex items-center">
         {hiddenRefs.length > 0 && (
           <DropMenu
             align="end"
@@ -514,11 +542,16 @@ export function GraphView({ repo, tabId }: Props) {
             </button>
           }
         />
+          </div>
+          {handle("message", "Commit Message", msgW)}
+        </div>
         {extras.map((k) => (
-          <div key={k} style={{ width: extraWidth[k] }} className="shrink-0 pl-2 truncate border-l border-white/5">
+          <div key={k} style={{ width: extraWidth[k] }} className="relative h-full flex items-center shrink-0 pl-2 pr-2 truncate border-l border-white/5">
             {{ author: "AUTHOR", date: "COMMIT DATE / TIME", sha: "SHA", changes: "CHANGES" }[k]}
+            {handle(k, { author: "Author", date: "Commit Date / Time", sha: "SHA", changes: "Changes" }[k], extraWidth[k])}
           </div>
         ))}
+      </div>
       </div>
       {ui.searchOpen && (
         <div className="flex items-center gap-2 h-[34px] px-2 bg-panel border-b border-black/30 shrink-0">
@@ -558,8 +591,8 @@ export function GraphView({ repo, tabId }: Props) {
       )}
       {repo.state_note && <StateBanner repo={repo} />}
       <div className="flex-1 min-h-0 flex">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden relative" onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}>
-          <div className="relative" style={{ height: total * ROW }}>
+        <div ref={scrollRef} data-graph-scroll className="flex-1 min-w-0 overflow-auto relative" onScroll={(e) => { setScrollTop(e.currentTarget.scrollTop); setScrollLeft(e.currentTarget.scrollLeft); }}>
+          <div className="relative" style={{ height: total * ROW, width: contentW }}>
             {rows}
             <canvas ref={canvasRef} className="absolute left-0 pointer-events-none" style={{ top: scrollTop }} />
           </div>

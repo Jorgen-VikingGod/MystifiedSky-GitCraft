@@ -388,7 +388,45 @@ await test("B099 URL fetch retry retains the newly added remote",async()=>{
   assert(calls.filter(c=>c.command==="run_action"&&c.args.action.type==="addRemote").length===1,"Fetch retry tried to recreate the remote");
   assert(fetches===2,"Fetch was not retried");
 });
-const preview=new URLSearchParams(location.search).has("publishPreview");
-if(preview) {reset();await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"preview");}
+await test("graph columns resize, align, persist and reset",async()=>{
+  const {startPersistence,flushPersistence}=await import("../../src/lib/persistence");
+  const stop=startPersistence();
+  try {
+    useStore.getState().setSettings({columns:{...DEFAULT_COLUMNS,author:true,date:true,sha:true,changes:true},graphColumnWidths:{refs:200,graph:80,message:500,author:180,date:180,sha:90,changes:120}});
+    mount(<div style={{height:300,width:900}}><GraphView repo={repo} tabId={tabId}/></div>);
+    const slider=(label:string)=>document.querySelector<HTMLInputElement>(`input[aria-label="${label} column width"]`)!;
+    await until(()=>!!slider("Author"),"optional column resize controls");
+    slider("Branch / Tag").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}));
+    await until(()=>useStore.getState().settings.graphColumnWidths.refs===210,"branch width changed");
+    const header=slider("Branch / Tag").parentElement!;
+    const row=document.querySelector('.graph-row')!;
+    assert(Math.round(header.getBoundingClientRect().width)===210&&Math.round(row.children[1].getBoundingClientRect().width)===210,"Header and branch cells diverged");
+    const scroller=document.querySelector<HTMLElement>('[data-graph-scroll]')!;
+    assert(scroller.scrollWidth>scroller.clientWidth,"Wide columns could not scroll");
+    scroller.scrollLeft=150;scroller.dispatchEvent(new Event("scroll"));await sleep(30);
+    assert(Math.abs(header.getBoundingClientRect().left-row.getBoundingClientRect().left)<1,"Header did not follow horizontal scroll");
+    await flushPersistence();
+    const saved=calls.filter(c=>c.command==="save_settings").at(-1)!.args.settings.settings;
+    assert(saved.graphColumnWidths.refs===210,"Column widths were missing from the durable settings snapshot");
+    mount(<div/>);useStore.getState().setSettings({...saved});
+    mount(<div style={{height:300,width:900}}><GraphView repo={repo} tabId={tabId}/></div>);
+    await until(()=>slider("Branch / Tag")?.value==="210","restored width");
+    slider("Author").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowLeft",shiftKey:true,bubbles:true}));
+    await until(()=>useStore.getState().settings.graphColumnWidths.author===130,"optional column keyboard resizing");
+    slider("Commit Message").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}));
+    await until(()=>useStore.getState().settings.graphColumnWidths.message===510,"message width adjustment");
+    slider("Branch / Tag").dispatchEvent(new MouseEvent("dblclick",{bubbles:true}));
+    await until(()=>useStore.getState().settings.graphColumnWidths.refs===undefined,"single column reset");
+    document.querySelector<HTMLButtonElement>('button[title="Column settings"]')!.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+    await until(()=>!![...document.querySelectorAll('[role="menuitem"]')].find(el=>el.textContent==="Reset column widths"),"column reset menu");
+    ([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(el=>el.textContent==="Reset column widths")!).click();
+    await until(()=>Object.keys(useStore.getState().settings.graphColumnWidths).length===0,"all column widths reset");
+  } finally {await flushPersistence();stop();}
+});
+const params=new URLSearchParams(location.search);
+const graphPreview=params.has("graphPreview");
+const preview=params.has("publishPreview")||graphPreview;
+if(graphPreview) {reset();repo.commits[0].summary="Adjustable commit-list columns";useStore.getState().setSettings({graphColumnWidths:{refs:200,graph:90,message:650}});mount(<div style={{height:500,width:1200}}><GraphView repo={repo} tabId={tabId}/></div>);await sleep(100);}
+else if(preview) {reset();await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"preview");}
 else {root.unmount();queryClient.clear();document.body.innerHTML="";}
 const report=document.createElement("pre");report.id="verification-results";report.hidden=preview;report.textContent=JSON.stringify({results,passed:results.filter(result=>result.status==="passed").length,failed:results.filter(result=>result.status==="failed").length});document.body.append(report);

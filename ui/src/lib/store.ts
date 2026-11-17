@@ -148,6 +148,7 @@ export interface Settings {
   ignoreWhitespace: boolean;
   wordWrap: boolean;
   columns: GraphColumns;
+  graphColumnWidths: Partial<Record<GraphColumn, number>>;
   /** Hidden and soloed branches / tags per repository (full ref names). */
   hidden: Record<string, string[]>;
   solo: Record<string, string[]>;
@@ -360,6 +361,8 @@ export interface GraphColumns {
   changes: boolean;
 }
 
+export type GraphColumn = "refs" | "graph" | "message" | "author" | "date" | "sha" | "changes";
+
 export const DEFAULT_COLUMNS: GraphColumns = { refs: true, graph: true, description: true, author: false, date: false, sha: false, changes: false };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -380,6 +383,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ignoreWhitespace: false,
   wordWrap: false,
   columns: DEFAULT_COLUMNS,
+  graphColumnWidths: {},
   hidden: {},
   solo: {},
   lazyLoad: true,
