@@ -4,13 +4,15 @@ Last reviewed: 2026-11-14. This is the active checklist; AUDIT.md is historical 
 
 The listed P1 fixes now have local regression evidence. Unchecked entries below retain their specific desktop, live-provider, CI, or platform measurement requirements; they are not claims of completed validation. O012 selective registration is implemented and measured on Windows; remaining Linux measurements are listed below. Earlier uncommitted evidence shipped in `8eeab27`; this follow-up remains uncommitted until the completion note records otherwise.
 
-## Adjustable graph columns: 2026-11-16
+## Code-scanning remediation: 2026-11-16
+
+CodeQL alert 10: replaced unchecked callback invocation in the browser protocol runner with a dispatcher that validates message shape, response ID and callback type and removes callbacks before invocation. Three Node regressions and all 43 browser checks pass. Alerts 3–9: reviewed every SARIF code flow against concrete GLib types and ownership contracts; the seven reports are false positives, with per-alert evidence in [the scanning review](docs/CODE_SCANNING.md). No query/vendor exclusions or unsafe vendor rewrites are used. A Linux-only contract regression covers the reviewed conversions and pointer-array reuse; its platform result must come from CI. The existing GLib security backport remains. Related macOS fixture follow-up: accepted mock-server sockets explicitly become blocking before timed reads; the original keyless-server test and delayed fragmented-request test pass among six local AI connection tests. Remote closure and macOS/Linux results are verified against the commit's GitHub runs rather than inferred from Windows checks. This extends existing scanning/file safety evidence without duplicate bug IDs.
 
 ## Build warnings and README image: 2026-11-16
 
 Verified in the commit containing this checkpoint: removed the unused save_checked/save wrappers in src/files.rs and updated the existing stale-editor and repository-encoding regressions to call the production save_checked_mode path directly. `cargo build --locked` passes without either dead_code diagnostic; editor_saves_refuse_newer_disk_contents_and_deletions and conflict_reader_and_resolution_round_trip_the_repository_encoding both pass. Cargo's existing informational warning about moving a running preview executable aside remains separate from these source warnings. The main README screenshot is the supplied image, copied byte-for-byte with matching SHA-256, and its alt text reflects the current view. This extends existing file-save verification rather than allocating duplicate bug IDs.
 
-## Adjustable graph columns (continued): 2026-11-16
+## Adjustable graph columns: 2026-11-16
 
 Implemented in the commit containing this checkpoint: Branch / Tag, Graph, Commit Message, Author, Commit Date / Time, SHA and Changes have draggable header dividers with keyboard width controls. Saved widths use the existing preferences persistence. Headers, commit cells and graph drawing share the same layout; wide custom layouts scroll horizontally with synchronized headers. Double-click resets one column; the column menu resets all widths or the full layout. Validation includes an actual headless-browser pointer drag from 200 to 300 pixels, release cleanup, keyboard resizing, header/row and scroll alignment, saving/restoring settings, and single/all-column resets. Existing automatic sizing remains the default until widths are customized. No native/backend changes are required.
 

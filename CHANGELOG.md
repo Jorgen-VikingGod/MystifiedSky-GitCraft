@@ -4,6 +4,10 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Security
+
+- Validate browser-debugging response IDs and registered callback types before dispatch. Review and document the vendored GLib scanning false positives without excluding them from future scans.
+
 ### Added
 
 - Commit-list column dividers can be dragged or adjusted with the keyboard. Widths are remembered, wide layouts scroll horizontally, and individual or all column widths can be reset.
@@ -79,6 +83,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Hide the unavailable worktree WIP graph control until its data and rendering support are implemented.
 
 ### Fixed
+
+- Make the mock AI server's accepted sockets blocking before timed reads, preventing intermittent macOS test failures on fragmented requests.
 
 - Development builds no longer warn about obsolete file-save helpers; file safety regressions exercise the production save path directly.
 

@@ -1,4 +1,40 @@
 //! Repository fixtures for history, file safety and conflict regressions.
+
+#[cfg(target_os = "linux")]
+#[test]
+fn glib_code_scanning_type_and_container_contracts() {
+    use glib::{prelude::*, translate::*};
+    #[derive(Clone, Debug, PartialEq, glib::Boxed)]
+    #[boxed_type(name = "GitCraftScanningFixture")]
+    struct BoxedFixture(String);
+
+    let valid: bool = glib::uuid_string_is_valid("f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    assert!(valid);
+    assert!(!glib::uuid_string_is_valid("invalid"));
+    let (_, charset) = glib::charset();
+    assert!(charset.is_some());
+    let folder = tempfile::tempdir().unwrap();
+    assert!(glib::file_set_contents(folder.path().join("missing/file"), b"fixture").is_err());
+    assert!(glib::filename_from_uri("not-a-file-uri").is_err());
+
+    let object = glib::Object::new::<glib::Object>();
+    let raw: *mut glib::gobject_ffi::GObject = object.to_glib_full();
+    let owned: glib::Object = unsafe { from_glib_full(raw) };
+    let borrowed_raw: *mut glib::gobject_ffi::GObject = object.to_glib_none().0;
+    let borrowed: glib::Object = unsafe { from_glib_none(borrowed_raw) };
+    assert_eq!(object, owned); assert_eq!(object, borrowed);
+    let object_value = object.to_value();
+    assert_eq!(object_value.clone().get::<glib::Object>().unwrap(), object);
+    let boxed = BoxedFixture("fixture".into());
+    assert_eq!(boxed.to_value().clone().get::<BoxedFixture>().unwrap(), boxed);
+
+    let mut slice = glib::collections::PtrSlice::from([glib::GString::from("kept"), glib::GString::from("dropped")]);
+    slice.truncate(1); assert_eq!(slice[0].as_str(), "kept");
+    slice.push(glib::GString::from("reused")); assert_eq!(slice[1].as_str(), "reused");
+    slice.truncate(0); slice.push(glib::GString::from("after empty"));
+    assert_eq!(slice.len(), 1); assert_eq!(slice[0].as_str(), "after empty");
+}
+
 use crate::{actions::{Action, Engine}, git};
 use std::path::Path;
 

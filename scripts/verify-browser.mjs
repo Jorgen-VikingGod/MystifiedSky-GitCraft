@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname, basename } from 'node:path';
+import { dispatchCdpMessage } from './cdp-messages.mjs';
 const repository = resolve(import.meta.dirname, '..');
 const executable = process.env.CHROME_PATH ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].find(existsSync);
 if (!executable) throw new Error('Set CHROME_PATH to an installed Chromium browser.');
@@ -21,7 +22,7 @@ try {
   socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   let next = 0; const pending = new Map(); const errors = [];
-  socket.onmessage = event => { const message = JSON.parse(event.data); if (message.id) { pending.get(message.id)?.(message); pending.delete(message.id); } else if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails); };
+  socket.onmessage = event => dispatchCdpMessage(event.data, pending, errors);
   const send = (method, params = {}) => new Promise(resolve => { const id = ++next; pending.set(id, resolve); socket.send(JSON.stringify({id,method,params})); });
   await send('Runtime.enable'); await send('Page.enable');
   const graphPreview = process.argv.includes('--graph-preview');

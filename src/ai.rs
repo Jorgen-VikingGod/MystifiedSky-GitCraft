@@ -674,6 +674,8 @@ mod connection_tests {
                         Err(e) => panic!("Expected local request: {e}"),
                     }
                 };
+                // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
                 let mut reader = std::io::BufReader::new(stream);
                 let mut headers = String::new();
@@ -695,6 +697,23 @@ mod connection_tests {
             requests
         });
         (url, handle)
+    }
+
+    #[test]
+    fn mock_server_reads_fragmented_requests_after_accept() {
+        let (url, server) = server(vec![(200, json!({"ok":true}))]);
+        let address = url.trim_start_matches("http://").split('/').next().unwrap();
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        client.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        client.write_all(b"\r\n{").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        client.write_all(b"}").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert_eq!(server.join().unwrap()[0].1, json!({}));
     }
 
     #[test]

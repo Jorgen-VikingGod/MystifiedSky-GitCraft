@@ -55,5 +55,7 @@ jobs:
         run: npm --prefix ui test
       - name: Test release notes
         run: node --test scripts/changelog-release.test.mjs
+      - name: Test browser protocol dispatch
+        run: node --test scripts/cdp-messages.test.mjs
       - name: Test native Git operations
         run: cargo test --locked -- --test-threads=1
