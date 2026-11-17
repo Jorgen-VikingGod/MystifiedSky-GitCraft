@@ -48,7 +48,8 @@ and [the charset output argument](https://docs.gtk.org/glib/func.get_charset.htm
 
 The Linux-only `glib_code_scanning_type_and_container_contracts` regression
 exercises UUID validation, charset/error conversions, actual GObject reference
-ownership, object/boxed value copying, and truncating/reusing a pointer array.
+ownership, object/boxed value copying, and truncating/reusing an owning Error
+pointer array (the element type used by the vendor's own container tests).
 These checks cover the reviewed contracts; they are not a general memory-safety
 proof. Re-review a reintroduced alert if its concrete flow or dependency version
 differs from the paths above.

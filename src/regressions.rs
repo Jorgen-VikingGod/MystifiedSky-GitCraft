@@ -28,11 +28,12 @@ fn glib_code_scanning_type_and_container_contracts() {
     let boxed = BoxedFixture("fixture".into());
     assert_eq!(boxed.to_value().clone().get::<BoxedFixture>().unwrap(), boxed);
 
-    let mut slice = glib::collections::PtrSlice::from([glib::GString::from("kept"), glib::GString::from("dropped")]);
-    slice.truncate(1); assert_eq!(slice[0].as_str(), "kept");
-    slice.push(glib::GString::from("reused")); assert_eq!(slice[1].as_str(), "reused");
-    slice.truncate(0); slice.push(glib::GString::from("after empty"));
-    assert_eq!(slice.len(), 1); assert_eq!(slice[0].as_str(), "after empty");
+    let error = |message: &str| glib::Error::new(glib::FileError::Failed, message);
+    let mut slice = glib::collections::PtrSlice::from([error("kept"), error("dropped")]);
+    slice.truncate(1); assert_eq!(slice[0].message(), "kept");
+    slice.push(error("reused")); assert_eq!(slice[1].message(), "reused");
+    slice.truncate(0); slice.push(error("after empty"));
+    assert_eq!(slice.len(), 1); assert_eq!(slice[0].message(), "after empty");
 }
 
 use crate::{actions::{Action, Engine}, git};
