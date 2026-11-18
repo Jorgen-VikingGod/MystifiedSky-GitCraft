@@ -4,6 +4,10 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- Join the GitCraft community from the Help menu.
+
 ### Fixed
 
 - Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.

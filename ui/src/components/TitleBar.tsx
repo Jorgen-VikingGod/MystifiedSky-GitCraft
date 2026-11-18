@@ -121,6 +121,7 @@ export function MenuBar() {
     { label: "View Activity Logs", onSelect: () => s.setDialog({ kind: "log" }) },
     { separator: true },
     { label: "View Release Notes", onSelect: () => hosting.openUrl(RELEASES_URL) },
+    { label: "Join Discord", onSelect: () => hosting.openUrl("https://discord.gg/BsUgBu65YG") },
     { label: "About GitCraft", onSelect: () => s.setDialog({ kind: "about" }) },
   ];
 

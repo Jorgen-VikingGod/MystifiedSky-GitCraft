@@ -27,7 +27,8 @@
   <a href="CONTRIBUTING.md#build-from-source-and-package">Build from source</a> ·
   <a href="docs/AI.md">AI setup</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="CONTRIBUTING.md">Contribute</a>
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="https://discord.gg/BsUgBu65YG">Discord</a>
 </p>
 
 <p align="center">
@@ -93,9 +94,13 @@ Want AI assistance? Follow the [AI setup guide](docs/AI.md) to connect your pref
 
 Choose a theme, shape the graph, and set up the tools that fit your workflow. GitCraft's Preferences bring Git, SSH, signing, external editors, terminals, AI providers, and repository settings together in one place.
 
+## Community
+
+[Join the GitCraft Discord](https://discord.gg/BsUgBu65YG) to ask questions, share tips, or talk through feature ideas. For bug reports and feature requests you want tracked, use [GitHub Issues](https://github.com/MystifiedSky/GitCraft/issues).
+
 ## Contributing
 
-Have an idea or found a bug? [Open an issue](https://github.com/MystifiedSky/GitCraft/issues). Code, documentation, and feedback are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) to build from source and get involved.
+Code, documentation, and feedback are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to build from source and get involved.
 
 ## License
 

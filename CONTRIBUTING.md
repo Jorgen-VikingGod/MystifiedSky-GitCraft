@@ -2,6 +2,8 @@
 
 Thanks for helping improve GitCraft. Small, focused changes are easiest to review.
 
+For usage questions or early feedback on a feature idea, [join the GitCraft Discord](https://discord.gg/BsUgBu65YG).
+
 ## Report a bug or suggest a feature
 
 Open an [issue](https://github.com/MystifiedSky/GitCraft/issues) with the behavior you expected, what happened, your GitCraft version, operating system, and steps to reproduce it. Use a disposable repository when sharing a reproduction. Remove credentials, private repository URLs, and personal data from logs and screenshots.
