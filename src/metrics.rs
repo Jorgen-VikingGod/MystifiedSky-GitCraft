@@ -4,48 +4,27 @@
 
 use serde::Serialize;
 
-/// COMMIT_NODE_DIAMETER
 pub const COMMIT_NODE_DIAMETER: u32 = 22;
-/// COMMIT_AUTHOR_ZONE_AVATAR_INNER_DIAMETER (avatar inside the node ring)
 pub const AVATAR_INNER_DIAMETER: u32 = 18;
-/// COMMIT_COLUMN_WIDTH (one graph lane)
 pub const GRAPH_LANE_WIDTH: u32 = 22;
-/// COMMIT_ZONE_GUTTER_WIDTH
 pub const GRAPH_GUTTER_WIDTH: u32 = 28;
-/// COMMIT_ZONE_PADDING_LEFT / _RIGHT
 pub const GRAPH_ZONE_PADDING: u32 = 3;
-/// COMMIT_ZONE_DEFAULT_WIDTH
 pub const GRAPH_ZONE_DEFAULT_WIDTH: u32 = 150;
-/// REF_ZONE_DEFAULT_WIDTH
 pub const REF_ZONE_DEFAULT_WIDTH: u32 = 130;
-/// REF_ZONE_MIN_WIDTH
 pub const REF_ZONE_MIN_WIDTH: u32 = 32;
-/// REF_ZONE_MARGIN_LEFT + LeftPanelToGraphMarginGap (2 + 7)
 pub const REF_ZONE_MARGIN_LEFT: u32 = 2;
 pub const LEFT_PANEL_TO_GRAPH_GAP: u32 = 7;
-/// REF_ZONE_MARGIN_RIGHT
 pub const REF_ZONE_MARGIN_RIGHT: u32 = 6;
-/// REF_ZONE_MAX_REFS_TO_RENDER
 pub const REF_ZONE_MAX_REFS: u32 = 100;
-/// COMMIT_MESSAGE_ZONE_DEFAULT_WIDTH
 pub const MESSAGE_ZONE_DEFAULT_WIDTH: u32 = 300;
-/// COMMIT_MESSAGE_ZONE_MIN_WIDTH
 pub const MESSAGE_ZONE_MIN_WIDTH: u32 = 50;
-/// INLINE_SUMMARY_MARGIN_LEFT
 pub const INLINE_SUMMARY_MARGIN_LEFT: u32 = 10;
-/// GRAPH_HEADER_ROW_HEIGHT
 pub const GRAPH_HEADER_ROW_HEIGHT: u32 = 26;
-/// GRAPH_ROW_HEIGHT
 pub const GRAPH_ROW_HEIGHT: u32 = 28;
-/// GRAPH_ROW_INNER_HEIGHT (message cell and branch label height inside a row)
 pub const GRAPH_ROW_INNER_HEIGHT: u32 = 22;
-/// COMMIT_ZONE_EDGE_ARC_RADIUS (rounded corner where a line turns to another lane)
 pub const EDGE_ARC_RADIUS: u32 = 11;
-/// COMMIT_NODE_MIN_ALPHA, in percent (faded commits)
 pub const NODE_MIN_ALPHA_PERCENT: u32 = 50;
-/// DEFAULT_COMMIT_SHA_LENGTH
 pub const SHORT_SHA_LENGTH: u32 = 6;
-/// DEFAULT_AVATAR_BACKGROUND_COLOR
 pub const DEFAULT_AVATAR_BACKGROUND: &str = "#199489";
 /// Diff defaults (libgit2 conventions):
 /// version 1, flags 0, context_lines 3, interhunk_lines 0.
@@ -73,36 +52,25 @@ pub const TIME_WEEK_SECS: u32 = 604800;
 pub const TIME_DAY_SECS: u32 = 86400;
 pub const TIME_HOUR_SECS: u32 = 3600;
 pub const TIME_MINUTE_SECS: u32 = 60;
-/// GRAPH_ROW_LAZY_LOAD_COMMITS_OFFSET: load more history when the view is this many rows from the end.
 pub const LAZY_LOAD_OFFSET: u32 = 1400;
-/// Commits read for the graph at first and added each time more are loaded
-/// ("Initial Commits in Graph": "Minimum 500"; GitCraft reads 2000).
 pub const INITIAL_COMMITS: usize = 2000;
 /// Commits listed in File History before "Go Deeper".
 pub const FILE_HISTORY_MAX: usize = 500;
-/// COMMIT_AUTHOR_ZONE_DEFAULT_WIDTH
 pub const AUTHOR_ZONE_DEFAULT_WIDTH: u32 = 130;
-/// COMMIT_DATE_TIME_ZONE_DEFAULT_WIDTH
 pub const DATE_TIME_ZONE_DEFAULT_WIDTH: u32 = 130;
-/// COMMIT_SHA_ZONE_MAX_WIDTH (the default, 130, is larger than its own maximum, so the maximum is used)
 pub const SHA_ZONE_WIDTH: u32 = 100;
-/// CHANGES_ZONE_DEFAULT_WIDTH
 pub const CHANGES_ZONE_DEFAULT_WIDTH: u32 = 200;
-/// Theme: stats-added-color / stats-deleted-color / stats-files-color
 pub const STATS_ADDED_COLOR: &str = "#347d39";
 pub const STATS_DELETED_COLOR: &str = "#c93c37";
 pub const STATS_FILES_COLOR: &str = "#e2c08d";
-/// Merge tool colours (theme conflict-left / conflict-right / conflict-output border colours).
 pub const CONFLICT_A_COLOR: &str = "#15a0bf";
 pub const CONFLICT_B_COLOR: &str = "#f2ca33";
 pub const CONFLICT_OUTPUT_COLOR: &str = "#c517b6";
 /// Characters the commit summary counter counts down from.
 pub const COMMIT_SUMMARY_COUNTER: u32 = 72;
-/// Auto-fetch interval default in minutes (used from Stage 4).
 pub const AUTO_FETCH_INTERVAL_MIN: u32 = 1;
 /// Zoom steps: zoom in / out moves to the next entry.
 pub const ZOOM_FACTORS: [f32; 12] = [3.0, 2.5, 2.0, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8];
-/// DEFAULT_ZOOM_FACTOR
 pub const DEFAULT_ZOOM_FACTOR: f32 = 1.0;
 
 /// Working-folder watcher debounce.
@@ -113,18 +81,9 @@ pub const GITDIR_WATCH_DEBOUNCE_MS: u32 = 200;
 pub const WATCH_DEBOUNCE_MIN_MS: u32 = 1;
 pub const WATCH_DEBOUNCE_MAX_MS: u32 = 60000;
 
-/// In a 930 px window the Undo button starts at x 389, against Actions; wider windows centre
-/// the Undo ... Terminal group. The group has 20 px of left padding, so the
-/// pickers' column ends 20 px earlier: 389 - 20 = 369.
 pub const TOOLBAR_LEFT_MAX: u32 = 369;
-/// Undo ... Terminal group width: .toolbar-btn{width:48px;margin:0 2px} x 8 buttons, the Pull options
-/// button (width:14px, margin-left:0, + 2 px right), padding-left:20px and the 9 px divider before Terminal.
 pub const TOOLBAR_CENTER_WIDTH: u32 = 461;
-/// Tabs that make room for a dragged tab slide over this long (ms): the sortable list
-/// uses its default transition, `transform 250ms ease`.
 pub const TAB_SLIDE_TIME_MS: u32 = 250;
-/// The "// WIP" box leaves this much of the row for the change counts:
-/// `.work-dir-input{max-width:calc(100% - 75px)}`.
 pub const WIP_BOX_STATS_SPACE: u32 = 75;
 
 #[derive(Serialize, Clone)]
@@ -207,7 +166,6 @@ pub fn metrics() -> Metrics {
         conflict_a: CONFLICT_A_COLOR.to_string(),
         conflict_b: CONFLICT_B_COLOR.to_string(),
         conflict_output: CONFLICT_OUTPUT_COLOR.to_string(),
-        // (seconds, suffix as in the Time-N* texts, colour class)
         time_units: vec![
             (TIME_YEAR_SECS, "y".into(), "red".into()),
             (TIME_MONTH_SECS, "M".into(), "red".into()),

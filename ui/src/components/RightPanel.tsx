@@ -239,7 +239,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
     }
   }, [merging, repo.merge_msg]);
   const branch = repo.head_branch ?? repo.head_sha.slice(0, s.metrics.sha_len);
-  const left = s.metrics.summary_counter - draft.summary.length; // the 72-character summary counter
+  const left = s.metrics.summary_counter - draft.summary.length;
   const push = s.settings.pushAfterCommit;
   const [skipHooks, setSkipHooks] = useState(s.settings.skipHooks);
   const [coauthors, setCoauthors] = useState("");

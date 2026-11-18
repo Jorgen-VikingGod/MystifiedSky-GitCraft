@@ -207,7 +207,6 @@ export function GraphView({ repo, tabId }: Props) {
   const first = Math.max(0, Math.floor(scrollTop / ROW) - 4);
   const last = Math.min(total - 1, Math.ceil((scrollTop + viewH) / ROW) + 4);
 
-  // Lazy loading: read more history once the view is GRAPH_ROW_LAZY_LOAD_COMMITS_OFFSET rows from the end.
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const more = () => {
@@ -818,9 +817,7 @@ function StateBanner({ repo }: { repo: RepoView }) {
   );
 }
 
-/** Extra width beside the typed text: the input wrapper is the text width + 35 px. */
 const WIP_INPUT_PAD = 35;
-/** .work-dir-input{min-width:100px; max-width:calc(100% - 75px)}, input height 22px. */
 const WIP_INPUT_MIN = 100;
 const WIP_INPUT_HEIGHT = 22;
 
@@ -834,7 +831,6 @@ function WipInput({ path, onFocus }: { path: string; onFocus: () => void }) {
   const measure = useRef<HTMLSpanElement>(null);
   const box = useRef<HTMLSpanElement>(null);
   const [width, setWidth] = useState(WIP_INPUT_MIN);
-  // max-width: the row's message area minus metrics.wip_stats_space (src/metrics.rs WIP_BOX_STATS_SPACE), kept up to date as panels are resized.
   const [maxWidth, setMaxWidth] = useState<number | undefined>(undefined);
   useLayoutEffect(() => {
     setWidth(Math.max(WIP_INPUT_MIN, (measure.current?.offsetWidth ?? 0) + WIP_INPUT_PAD));

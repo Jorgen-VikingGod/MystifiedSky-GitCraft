@@ -92,13 +92,11 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   return (
     // The Undo ... Terminal group is centred in the window, Actions / Search sit at the right
     // edge. In a narrow window the pickers keep their space and the group slides right until it meets Actions.
-    // Left column minimum: clamp(300px, 100vw - (centre group + right group), 389px) - see TOOLBAR_* below.
     <div
       className="h-[50px] bg-toolbar grid items-center shrink-0 border-b border-black/30 text-white/90"
       style={{ gridTemplateColumns: `minmax(clamp(${TOOLBAR_LEFT_MIN}px, calc(100vw - ${s.metrics.toolbar_center + TOOLBAR_RIGHT}px), ${s.metrics.toolbar_left_max}px), 1fr) auto minmax(max-content, 1fr)` }}
     >
       {/* repository / branch pickers */}
-      {/* .toolbar .upper .bread-crumb{max-width:45vw} */}
       <div className="flex items-center h-full min-w-0 max-w-[45vw]">
       <DropMenu
         items={repoMenu}
@@ -123,7 +121,6 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
         }
       />
       </div>
-      {/* .toolbar .upper .btn-toolbar{justify-content:center;padding-left:20px} */}
       <div className="flex items-center justify-center h-full pl-[20px]">
       <TB label="Undo" labels={labels} title={repo?.undo.undo ? `Undo ${repo.undo.undo}` : "Nothing to undo"} disabled={!repo?.undo.undo} onClick={() => path && act(path, { type: "undo" })}>
         <Undo2 size={19} />
@@ -146,7 +143,6 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
         <DropMenu
           items={pullMenu}
           trigger={
-            // .toolbar-pull-button button:nth-child(2){margin-left:0;width:14px} (+2 px right margin)
             // While pulling the options are disabled too.
             <button disabled={pulling} className="w-[14px] mr-[2px] flex items-start pt-[13px] justify-center hover:bg-white/5 disabled:opacity-35 outline-none" title="Pull options">
               <ChevronDown size={13} />
@@ -190,10 +186,6 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
   );
 }
 
-/** Widths (px) of the toolbar groups (.toolbar-btn width 48px + margin 0 2px = 52 each):
- *  centre = 20 padding + Undo, Redo, Pull, Push, Branch, Stash, Pop, Terminal (8 x 52) + Pull options (14 + 2)
- *  + divider (9) = metrics.toolbar_center (src/metrics.rs); right = Actions (56) + Search (52). The left column keeps at
- *  least 300 px for the pickers and at most metrics.toolbar_left_max (src/metrics.rs). */
 const TOOLBAR_RIGHT = 108;
 const TOOLBAR_LEFT_MIN = 300;
 

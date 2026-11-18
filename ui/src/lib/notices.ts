@@ -1,6 +1,5 @@
 // Notification-center rules: unread badge, date lines, status-bar hint.
 
-/** getUnreadNotificationCountString: the count, "50+" from 50 on; empty when there is nothing unread (no badge). */
 export function unreadBadge(unread: number): string {
   if (unread <= 0) return "";
   return unread >= 50 ? "50+" : String(unread);
@@ -12,16 +11,22 @@ const ordinal = (n: number) => {
   return `${n}${({ 1: "st", 2: "nd", 3: "rd" } as Record<number, string>)[n % 10] ?? "th"}`;
 };
 
-/**
- * Date line of a notification row: "Today" from midnight on, "Yesterday" for the day before, otherwise
- * "MMMM Do" (NOTIFICATION_ELAPSED_TIME, English); then " @ " and the time as hh:mm, lower-cased, space removed.
- */
+const noticeTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+const noticeMonth = new Intl.DateTimeFormat("en-US", { month: "long" });
+
 export function formatNoticeDate(created: Date, now: Date = new Date()): string {
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0).getTime();
-  const startOfYesterday = startOfToday - 864e5;
-  const t = created.getTime();
-  const day = t >= startOfToday ? "Today" : t >= startOfYesterday ? "Yesterday" : `${created.toLocaleDateString("en-US", { month: "long" })} ${ordinal(created.getDate())}`;
-  const time = created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }).toLowerCase().replace(" ", "");
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(midnight);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  let day = "Today";
+  if (created < midnight) {
+    day = created >= yesterday ? "Yesterday" : `${noticeMonth.format(created)} ${ordinal(created.getDate())}`;
+  }
+  const time = noticeTime.formatToParts(created)
+    .filter(({ type, value }) => type !== "literal" || value.trim() !== "")
+    .map(({ type, value }) => type === "dayPeriod" ? value.toLocaleLowerCase() : value)
+    .join("");
   return `${day} @ ${time}`;
 }
 

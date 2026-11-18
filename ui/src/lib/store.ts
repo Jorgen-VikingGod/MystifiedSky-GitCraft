@@ -83,7 +83,6 @@ export type NoticeFilter = "All" | "Read" | "Unread";
 export const NOTICE_LIMIT = 100;
 /** Unread = no readAt, Read = has readAt, All = everything. */
 export const noticeVisible = (n: Notice, f: NoticeFilter) => (f === "All" ? true : f === "Unread" ? !n.readAt : !!n.readAt);
-/** getUnreadNotificationCountString: unread notifications, "50+" from 50 on. */
 export const unreadCountString = (notices: Notice[]) => {
   const n = notices.filter((x) => !x.readAt).length;
   return n >= 50 ? "50+" : String(n);
