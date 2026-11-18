@@ -1,9 +1,12 @@
+import { useShallow } from "zustand/react/shallow";
+import { VirtualRows } from "./VirtualRows";
+import { copy } from "@/lib/repo";
 import { useQuery } from "@tanstack/react-query";
 import { History, ScanLine, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { BlameLine, RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
-import { useStore, usePanelStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { Avatar } from "./Icons";
 import { MonacoDiff } from "./LazyEditors";
 import { cn, fullDate, GRAPH_COLORS, timeSince } from "@/lib/utils";
@@ -20,9 +23,9 @@ function Since({ time }: { time: number }) {
 
 /** File History and Blame for one file (opened from a file's menu or Ctrl+Shift+H). */
 export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; tabId: string; file: string; mode: "history" | "blame"; sha: string | null }) {
-  const s = usePanelStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi, toast: st.toast })));
   const m = s.metrics;
-  const hist = useQuery({ queryKey: ["history", repo.path, file], queryFn: () => api.fileHistory(repo.path, file) });
+  const hist = useQuery({ queryKey: ["history", repo.path, file], queryFn: ({ signal }) => api.fileHistory(repo.path, file, signal) });
   const entries = hist.data ?? [];
   const selected = entries.find((entry) => entry.sha === sha);
   const current = selected ?? entries[0];
@@ -56,8 +59,9 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
       </div>
       <div className="flex-1 flex min-h-0">
         <div className="w-[250px] shrink-0 border-r border-black/30 bg-panel overflow-y-auto">
+          {hist.isError && <div role="alert" className="p-3 text-bad text-[12px]">Could not load file history: {String(hist.error)} <button className="underline" onClick={() => hist.refetch()}>Retry</button></div>}
           {hist.isLoading && <div className="p-3 text-fg3 text-[12px]">Loading history…</div>}
-          {!hist.isLoading && entries.length === 0 && <div className="p-3 text-fg3 text-[12px]">No commits touch this file.</div>}
+          {!hist.isLoading && !hist.isError && entries.length === 0 && <div className="p-3 text-fg3 text-[12px]">No commits touch this file.</div>}
           {mode === "blame" && (
             <button onClick={() => setHist({ sha: null })} className={cn("w-full text-left px-3 py-2 border-b border-white/5 text-[12.5px]", !sha ? "bg-selrow text-white" : "text-fg hover:bg-hoverrow")}>
               Working folder (current)
@@ -98,7 +102,7 @@ function HistoryDiff({ repo, file, sha, parent, onGraph }: { repo: RepoView; fil
   const allowLarge = largeKey === key;
   const v = useQuery({
     queryKey: ["versions", repo.path, file, sha, parent, allowLarge],
-    queryFn: () => api.fileVersions(repo.path, { kind: "Commit", sha }, file, false, parent, allowLarge),
+    queryFn: ({ signal }) => api.fileVersions(repo.path, { kind: "Commit", sha }, file, false, parent, allowLarge, signal),
     staleTime: Infinity,
   });
   return (
@@ -136,7 +140,7 @@ function HistoryDiff({ repo, file, sha, parent, onGraph }: { repo: RepoView; fil
 function Blame({ repo, file, rev, onPick }: { repo: RepoView; file: string; rev: string | null; onPick: (sha: string) => void }) {
   const m = useStore((s) => s.metrics);
   const wrap = useStore((s) => s.settings.wordWrap);
-  const q = useQuery({ queryKey: ["blame", repo.path, file, rev], queryFn: () => api.blame(repo.path, file, rev) });
+  const q = useQuery({ queryKey: ["blame", repo.path, file, rev], queryFn: ({ signal }) => api.blame(repo.path, file, rev, signal) });
   const [hover, setHover] = useState<string | null>(null);
   const colors = useMemo(() => {
     // Same palette as the graph (code-blame-color-0..9 = graph-color-0..9 in the theme).
@@ -149,30 +153,28 @@ function Blame({ repo, file, rev, onPick }: { repo: RepoView; file: string; rev:
   const lines = q.data ?? [];
   const uncommitted = (l: BlameLine) => /^0+$/.test(l.sha);
   return (
-    <div className="h-full overflow-auto mono text-[12px] leading-[19px]">
-      <table className="border-collapse min-w-full">
-        <tbody>
-          {lines.map((l, i) => {
+    <div className="h-full flex flex-col mono text-[12px] leading-[19px]">
+      <div className="shrink-0 px-3 py-1 text-[11px] text-fg3">{lines.length.toLocaleString()} lines · <button className="text-link" onClick={() => copy(lines.map((l) => l.text).join("\n"))}>Copy file text</button></div>
+      <VirtualRows key={`${repo.path}:${file}:${rev}:${wrap}`} count={lines.length} rowHeight={19} className="flex-1 min-h-0" label="Blame lines" render={(i, firstVisible) => {
+            const l = lines[i];
             const first = i === 0 || lines[i - 1].sha !== l.sha;
             const color = uncommitted(l) ? "#888" : colors.get(l.sha)!;
             return (
-              <tr key={i} className={cn(hover === l.sha && "bg-white/[0.04]", first && i > 0 && "border-t border-white/5")} onMouseEnter={() => setHover(l.sha)}>
-                <td className="w-[230px] max-w-[230px] align-top font-sans pl-2 pr-2 select-none" style={{ boxShadow: `inset 3px 0 0 ${color}` }}>
-                  {first && (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "230px 44px minmax(0, 1fr)", minWidth: wrap ? undefined : "max-content" }} className={cn(hover === l.sha && "bg-white/[0.04]", first && i > 0 && "border-t border-white/5")} onMouseEnter={() => setHover(l.sha)}>
+                <div className="w-[230px] max-w-[230px] align-top font-sans pl-2 pr-2 select-none" style={{ boxShadow: `inset 3px 0 0 ${color}` }}>
+                  {(first || firstVisible) && (
                     <button className="flex items-center gap-1.5 text-[11.5px] w-full min-w-0 text-left" onClick={() => !uncommitted(l) && onPick(l.sha)} title={uncommitted(l) ? "Not committed yet" : `${l.summary}\n${fullDate(l.time)}\nClick to view on the graph`}>
                       <span className="text-white/85 truncate max-w-[90px]">{uncommitted(l) ? "You" : l.author}</span>
                       <span className="text-fg3 whitespace-nowrap">{uncommitted(l) ? "uncommitted" : <Since time={l.time} />}</span>
                       {!uncommitted(l) && <span className="mono text-link ml-auto">{l.sha.slice(0, m.sha_len)}</span>}
                     </button>
                   )}
-                </td>
-                <td className="w-[44px] text-right pr-2 text-fg3 select-none align-top border-r border-white/5">{l.line}</td>
-                <td className={cn("pl-3 pr-4 text-white/85 select-text", wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre")}>{l.text}</td>
-              </tr>
+                </div>
+                <div className="w-[44px] text-right pr-2 text-fg3 select-none align-top border-r border-white/5">{l.line}</div>
+                <div className={cn("pl-3 pr-4 text-white/85 select-text", wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre")}>{l.text}</div>
+              </div>
             );
-          })}
-        </tbody>
-      </table>
+      }} />
     </div>
   );
 }

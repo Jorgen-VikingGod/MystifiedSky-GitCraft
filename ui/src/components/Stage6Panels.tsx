@@ -1,3 +1,6 @@
+import { useShallow } from "zustand/react/shallow";
+import { VirtualRows } from "./VirtualRows";
+import { worktreeReads } from "@/lib/read-scheduler";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bot, CheckCircle2, ChevronDown, FileDown, FileUp, Folder, GitBranch, House, MoreVertical, Plug, Search, Plus } from "lucide-react";
@@ -18,7 +21,7 @@ export function useConflictCheck(repo: RepoView | undefined) {
   const target = repo ? conflictTarget(repo, prefs?.baseBranches ?? "", prefs?.excludedBranches ?? "", global && prefs?.conflictDetection !== false) : null;
   return useQuery({
     queryKey: ["conflictCheck", repo?.path, repo ? conflictRefsKey(repo) : "", target],
-    queryFn: () => ai.conflictCheck(repo!.path, target ?? undefined),
+    queryFn: ({ signal }) => ai.conflictCheck(repo!.path, target ?? undefined, signal),
     enabled: !!repo && !!repo.head_branch && target !== null,
     staleTime: Infinity,
   });
@@ -28,7 +31,7 @@ export function useConflictCheck(repo: RepoView | undefined) {
 export function ConflictCheckRows({ repo }: { repo: RepoView }) {
   const q = useConflictCheck(repo);
   const c = q.data;
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setDialog: st.setDialog }))), settings: useStore(useShallow((st) => ({ conflictDetection: st.settings.conflictDetection, repoPrefs: st.settings.repoPrefs }))) };
   const prefs = s.settings.repoPrefs[repo.path];
   if (repo.head_branch && conflictTarget(repo, prefs?.baseBranches ?? "", prefs?.excludedBranches ?? "", s.settings.conflictDetection !== false && prefs?.conflictDetection !== false) === null)
     return (
@@ -172,7 +175,7 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
       </div>
       {q.isLoading && <div className="py-2 text-[12px] text-fg2">Finding saved sessions…</div>}
       {q.isError && <div className="py-2 text-[12px] text-bad">Could not read saved sessions. <button className="underline" onClick={() => q.refetch()}>Retry</button></div>}
-      {visible.map((w) => <AgentWorktree key={w.path} worktree={w} repo={repo} tabId={tabId} sessions={(grouped.get(folderKey(w.path)) ?? [])} />)}
+      {visible.map((w) => <AgentWorktree key={w.path} worktree={w} repo={repo} tabId={tabId} sessions={(grouped.get(folderKey(w.path)) ?? [])} filter={filter} />)}
       {visible.length === 0 && <div className="py-3 text-[12px] text-fg2">No matching worktrees or sessions.</div>}
       <div className="pt-2 text-[11px] text-fg3 leading-relaxed">
         Codex CLI and Claude Code session history
@@ -182,9 +185,19 @@ export function AgentsView({ repo, tabId }: { repo: RepoView | undefined; tabId:
   );
 }
 
-function AgentWorktree({ worktree: w, repo, tabId, sessions }: { worktree: RepoView["worktrees"][number]; repo: RepoView; tabId: string; sessions: AgentSession[] }) {
+function AgentWorktree({ worktree: w, repo, tabId, sessions, filter }: { worktree: RepoView["worktrees"][number]; repo: RepoView; tabId: string; sessions: AgentSession[]; filter: string }) {
   const current = sameFolder(w.path, repo.path);
-  const q = useQuery({ queryKey: ["agentWorktreeStatus", w.path], queryFn: () => api.repoStatus(w.path), enabled: !current, refetchInterval: 10000 });
+  const card = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: "300px" });
+    if (card.current) observer.observe(card.current);
+    return () => observer.disconnect();
+  }, []);
+  const q = useQuery({ queryKey: ["agentWorktreeStatus", w.path], queryFn: ({ signal }) => worktreeReads.run(() => api.repoStatus(w.path, signal), signal), enabled: !current && visible, refetchInterval: visible ? 10000 : false });
+  const matching = useMemo(() => filter.trim() ? sessions.filter((a) => [a.title, a.id, a.agent, w.path, w.branch].join(" ").toLowerCase().includes(filter.trim().toLowerCase())) : sessions, [sessions, filter, w.path, w.branch]);
+  const shown = expanded || filter.trim() ? matching : matching.slice(0, 5);
   const status = current ? repo.status : q.data;
   const counts = status ? workingChanges(status) : null;
   const units = useStore((s) => s.metrics.time_units);
@@ -194,7 +207,7 @@ function AgentWorktree({ worktree: w, repo, tabId, sessions }: { worktree: RepoV
     useStore.getState().setUi(tabId, { selection: { type: "wip" }, multi: [], compareWorkdir: null, diff: null, history: null, conflict: null, pr: null, issue: null });
   };
   return (
-    <div className={cn("rounded-[3px] border overflow-hidden mb-2", current ? "border-accent/80" : "border-white/20")}>
+    <div ref={card} className={cn("rounded-[3px] border overflow-hidden mb-2", current ? "border-accent/80" : "border-white/20")}>
       <div className={cn("px-2.5 py-2", current ? "bg-white/10" : "bg-white/5")}>
         <div className="flex items-center gap-1.5">
           {current && <House size={15} className="text-fg2 shrink-0" />}
@@ -219,7 +232,8 @@ function AgentWorktree({ worktree: w, repo, tabId, sessions }: { worktree: RepoV
         <span className="flex-1 min-w-0 truncate">{sessionStatus(sessions[0])}</span>
         <span className="text-[11px] text-fg3 whitespace-nowrap">{sessions.length} session{sessions.length === 1 ? "" : "s"}</span>
       </div>
-      {sessions.map((a) => {
+      <VirtualRows key={`${w.path}:${filter}:${expanded}`} count={shown.length} rowHeight={61} className="max-h-[320px]" label="Saved sessions" render={(index) => {
+        const a = shown[index];
         const time = timeSince(a.modified, units);
         const resume = () => launchAgent(w.path, a.agent, a.id);
         return (
@@ -234,7 +248,8 @@ function AgentWorktree({ worktree: w, repo, tabId, sessions }: { worktree: RepoV
             </div>
           </CtxMenu>
         );
-      })}
+      }} />
+      {matching.length > 5 && <button className="px-3 py-2 text-link text-[12px]" onClick={() => setExpanded(!expanded)}>{expanded ? "Show recent sessions" : `Browse all ${matching.length} sessions`}</button>}
     </div>
   );
 }

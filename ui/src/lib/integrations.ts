@@ -1,3 +1,4 @@
+import { invokeRead } from "./api";
 // Preferences back end: integrations (all services), runtime Git settings, AI configuration, Git config,
 // GPG and credential helpers. Settings that change how Git runs are pushed to Rust whenever they change.
 import { invoke } from "@tauri-apps/api/core";
@@ -160,7 +161,7 @@ export const integrations = {
     finally { await Promise.all([queryClient.invalidateQueries({ queryKey: ["signedInServices"] }), queryClient.invalidateQueries({ queryKey: ["integrationStatuses"] })]); }
   },
   signIn: (id: string, method: "browser" | "gh") => invoke<string>("integration_sign_in", { id, method }),
-  repos: (id: string) => invoke<HostedRepo[]>("integration_repos", { id }),
+  repos: (id: string, signal?: AbortSignal) => invokeRead<HostedRepo[]>("integration_repos", { id }, signal),
   addSshKey: (id: string, title: string, key: string) => invoke<void>("integration_add_ssh_key", { id, title, key }),
   sshPage: (id: string) => invoke<string>("integration_ssh_page", { id }),
   createIssue: (path: string | null, tracker: { kind: string; project: string } | null, title: string, body: string) =>
@@ -169,7 +170,7 @@ export const integrations = {
 
 export const tools = {
   versions: (gpgProgram: string) => invoke<{ git: string; git_path: string; ssh: string; gpg: string }>("tool_versions", { gpgProgram }),
-  configGet: (path: string | null, scope: "global" | "local", keys: string[]) => invoke<Record<string, string>>("git_config_get", { path, scope, keys }),
+  configGet: (path: string | null, scope: "global" | "local", keys: string[], signal?: AbortSignal) => invokeRead<Record<string, string>>("git_config_get", { path, scope, keys }, signal),
   gpgGenerate: (program: string, name: string, email: string, passphrase: string) => invoke<string>("gpg_generate_key", { program, name, email, passphrase }),
   gpgExport: (program: string, key: string) => invoke<string>("gpg_export_key", { program, key }),
   forgetCredentials: (hosts: string[]) => invoke<number>("forget_credentials", { hosts }),

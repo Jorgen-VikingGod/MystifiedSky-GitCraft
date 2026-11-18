@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { RevisionGuard } from "@/lib/revision";
 import { aiApi } from "@/lib/integrations";
 import { Sparkles } from "lucide-react";
@@ -16,9 +17,9 @@ export { parseConflicts } from "@/lib/conflict";
 
 /** Merge conflict tool: A (current) and B (incoming) on top, Output below. */
 export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: string; file: string }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setDialog: st.setDialog, setUi: st.setUi, toast: st.toast })));
   const m = s.metrics;
-  const q = useQuery({ queryKey: ["conflict", repo.path, file, JSON.stringify(repo.status)], queryFn: () => api.conflictInfo(repo.path, file) });
+  const q = useQuery({ queryKey: ["conflict", repo.path, file, JSON.stringify(repo.status)], queryFn: ({ signal }) => api.conflictInfo(repo.path, file, signal) });
   const info = q.data;
   const segments = useMemo(() => (info?.working ? parseConflicts(info.working) : []), [info?.working]);
   const chunks = segments.map((seg, i) => ({ seg, i })).filter((x) => x.seg.kind === "conflict");

@@ -1,3 +1,4 @@
+import { useLaunchpad } from "@/lib/launchpad";
 import { useShallow } from "zustand/react/shallow";
 import { Gift, Keyboard, List, Loader2, Map as MapIcon, Rocket, ZoomIn } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -15,10 +16,10 @@ export function StatusBar() {
   const signedIn = useSignedInServices();
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const repoPath = tab?.kind === "repo" ? tab.path : undefined;
-  const remote = useQuery({ queryKey: ["remote", repoPath, ""], queryFn: () => hosting.remote(repoPath!), enabled: !!repoPath && signedIn.isSuccess && signedIn.data.length > 0, staleTime: Infinity, retry: false });
+  const remote = useQuery({ queryKey: ["remote", repoPath, ""], queryFn: ({ signal }) => hosting.remote(repoPath!, signal), enabled: !!repoPath && signedIn.isSuccess && signedIn.data.length > 0, staleTime: Infinity, retry: false });
   const serviceConnected = !!remote.data?.service && !!signedIn.data?.some((x) => x.id === remote.data?.service);
   // Lists the user's own pull requests; same call as the Launchpad, refreshed every 5 minutes.
-  const prs = useQuery({ queryKey: ["launchpad", s.settings.gitlabHost], queryFn: hosting.launchpad, enabled: serviceConnected, refetchInterval: 5 * 60_000, staleTime: 60_000, retry: false });
+  const prs = useLaunchpad(serviceConnected);
   // "Connect an integration" / "Select an integration" / the first pull request's sentence / "No Pull Requests".
   const hint = !s.busy && !s.job && signedIn.isSuccess ? integrationHint(signedIn.data.map((x) => x.id), remote.data?.service, prs.data ? prs.data.pull_requests : null) : null;
   const opensLaunchpad = serviceConnected;

@@ -1,3 +1,4 @@
+import { refsByCommit } from "@/lib/commit-refs";
 import { Eye, EyeOff, MessageSquare, Network, Settings2, X, ChevronUp, ChevronDown, Loader2 } from "lucide-react";
 import { hoverSegment } from "@/lib/graphnav";
 import { DEFAULT_MARKERS, markerRects, type MarkerType } from "@/lib/scrollmarkers";
@@ -67,17 +68,7 @@ export function GraphView({ repo, tabId }: Props) {
   const off = wip ? 1 : 0;
   const total = repo.commits.length + off + (repo.has_more ? 1 : 0);
 
-  const refsBySha = useMemo(() => {
-    const map = new Map<string, GitRef[]>();
-    const order = (r: GitRef) => (r.kind === "Local" && r.name === repo.head_branch ? 0 : r.kind === "Local" ? 1 : r.kind === "Remote" ? 2 : 3);
-    const hiddenRefs = new Set(hidden);
-    for (const r of repo.refs) {
-      if (hiddenRefs.has(r.full)) continue; // hidden branches don't get a label
-      map.set(r.sha, [...(map.get(r.sha) ?? []), r]);
-    }
-    for (const [k, v] of map) map.set(k, v.sort((a, b) => order(a) - order(b)));
-    return map;
-  }, [repo.refs, repo.head_branch, hidden]);
+  const refsBySha = useMemo(() => refsByCommit(repo.refs, repo.head_branch, hidden), [repo.refs, repo.head_branch, hidden]);
 
 
   const ghostRefs = useMemo(() => {
@@ -255,8 +246,9 @@ export function GraphView({ repo, tabId }: Props) {
       if (c && !stats.has(c.sha)) need.push(c.sha);
     }
     if (!need.length) return;
+    const controller = new AbortController();
     const t = setTimeout(() => {
-      api.commitStats(repo.path, need).then((res) =>
+      api.commitStats(repo.path, need, controller.signal).then((res) =>
         setStats((old) => {
           const n = new Map(old);
           for (const s of res) n.set(s.sha, s);
@@ -264,7 +256,7 @@ export function GraphView({ repo, tabId }: Props) {
         }),
       ).catch(() => undefined);
     }, 80);
-    return () => clearTimeout(t);
+    return () => { clearTimeout(t); controller.abort(); };
   }, [first, last, extras.join(), repo.path, visibleCommitIds]);
 
   // Draw the visible part of the graph on the canvas.
@@ -329,6 +321,8 @@ export function GraphView({ repo, tabId }: Props) {
       const i = d - off;
       const row = repo.graph.rows[i];
       if (!row) continue;
+      for (const [from, to] of row.up_runs ?? []) for (let lane = from; lane <= to; lane++) curve(laneX(lane), y0, laneX(lane), yc, laneColor(lane), false);
+      for (const [from, to] of row.down_runs ?? []) for (let lane = from; lane <= to; lane++) curve(laneX(lane), yc, laneX(lane), y1, laneColor(lane), true);
       for (const s of row.up) curve(laneX(s.from), y0, laneX(s.to), yc, laneColor(s.color), false);
       for (const s of row.down) curve(laneX(s.from), yc, laneX(s.to), y1, laneColor(s.color), true);
     }

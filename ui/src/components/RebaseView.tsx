@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { ArrowDown, ArrowUp, GripVertical, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Step } from "@/lib/api";
@@ -17,7 +18,7 @@ const STEPS: { step: Step; label: string; key: string; color: string }[] = [
 /** Interactive Rebase / Interactive Cherry Pick, opened in the centre.
  *  Newest commit at the top. Keys: P / R / S / D set the action, ↑ ↓ select, Ctrl+↑ ↓ move. */
 export function RebaseView({ tabId, path, plan }: { tabId: string; path: string; plan: RebasePlan }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi })));
   const n = s.metrics.sha_len;
   const [sel, setSel] = useState(0);
   const [editing, setEditing] = useState<number | null>(null);

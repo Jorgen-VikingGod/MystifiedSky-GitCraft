@@ -73,7 +73,11 @@ fn title_from(text: &str) -> Option<String> {
     Some(text.lines().next().unwrap_or_default().chars().take(120).collect())
 }
 
-fn parse_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
+#[cfg(test)]
+static PARSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn parse_session(file: &Path, agent: &str, fallback: Option<&str>) -> Option<AgentSession> {
+    #[cfg(test)]
+    PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let meta = fs::metadata(file).ok()?;
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     // A corrupt or enormous log cannot allocate unbounded memory. Partial JSON lines are ignored.
@@ -93,7 +97,6 @@ fn parse_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&s
                     cwd = p["cwd"].as_str()?.to_string();
                     id = p["id"].as_str()?.to_string();
                     has_meta = true;
-                    if !roots.iter().any(|r| belongs(&cwd, r)) { return None }
                 }
                 if v["type"] == "response_item" && p["type"] == "message" {
                     if p["role"] == "user" || p["role"] == "assistant" { messages += 1; }
@@ -128,39 +131,160 @@ fn parse_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&s
         line.clear();
     }
     if !has_meta || id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None }
-    let root = roots.iter().filter(|r| belongs(&cwd, r)).max_by_key(|r| r.len())?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     Some(AgentSession {
-        id, agent: agent.into(), path: root.clone(),
+        id, agent: agent.into(), path: cwd,
         title: if title.is_empty() { "(untitled session)".into() } else { title },
         modified, messages,
         status: if finished && meta.len() <= 32 * 1024 * 1024 { "finished" } else if now.saturating_sub(modified) < 120 { "recent" } else { "idle" }.into(),
     })
 }
 
-fn read_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
-    use std::sync::{Mutex, OnceLock};
-    type Entry = (u64, SystemTime, Option<AgentSession>);
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Entry>>> = OnceLock::new();
-    let metadata = fs::metadata(file).ok()?;
-    let modified = metadata.modified().ok()?;
-    let key = serde_json::to_string(&(file, agent, roots, fallback)).ok()?;
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some((size, time, result)) = cache.lock().unwrap().get(&key) {
-        if *size == metadata.len() && *time == modified {
-            let mut result = result.clone();
-            if let Some(session) = &mut result {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
-                if session.status == "recent" && now.saturating_sub(session.modified) >= 120 { session.status = "idle".into(); }
-            }
-            return result;
+// Admission stops at the byte budget instead of evicting every entry during a scan.
+// This retains a stable hot subset even when a catalog is larger than the cache.
+const SESSION_CACHE_BYTES: usize = 16 * 1024 * 1024;
+#[derive(Default)]
+struct SessionCache {
+    entries: std::collections::HashMap<String, (u64, SystemTime, Option<AgentSession>, usize)>,
+    bytes: usize,
+}
+impl SessionCache {
+    fn insert(&mut self, key: String, size: u64, modified: SystemTime, result: Option<AgentSession>) {
+        if let Some(old) = self.entries.remove(&key) { self.bytes -= old.3; }
+        let cost = 256 + key.len() + result.as_ref().map(|s| s.id.len() + s.agent.len() + s.path.len() + s.title.len() + s.status.len()).unwrap_or(0);
+        if self.bytes + cost <= SESSION_CACHE_BYTES {
+            self.bytes += cost;
+            self.entries.insert(key, (size, modified, result, cost));
         }
     }
-    let result = parse_session(file, agent, roots, fallback);
-    let mut entries = cache.lock().unwrap();
-    if entries.len() >= 4096 { entries.clear(); }
-    entries.insert(key, (metadata.len(), modified, result.clone()));
+}
+fn cached_session(file: &Path, agent: &str, fallback: Option<&str>) -> Option<AgentSession> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<SessionCache>> = OnceLock::new();
+    let metadata = fs::metadata(file).ok()?;
+    let modified = metadata.modified().ok()?;
+    let key = serde_json::to_string(&(file, agent, fallback)).ok()?;
+    let cache = CACHE.get_or_init(Default::default);
+    let cached = cache.lock().unwrap().entries.get(&key)
+        .filter(|(size, time, _, _)| *size == metadata.len() && *time == modified).map(|(_, _, result, _)| result.clone());
+    let result = match cached {
+        Some(result) => result,
+        None => {
+            let result = parse_session(file, agent, fallback);
+            cache.lock().unwrap().insert(key, metadata.len(), modified, result.clone());
+            result
+        }
+    };
     result
+}
+fn scoped_session(mut session: AgentSession, roots: &[String]) -> Option<AgentSession> {
+    session.path = roots.iter().filter(|r| belongs(&session.path, r)).max_by_key(|r| r.len())?.clone();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    if session.status == "recent" && now.saturating_sub(session.modified) >= 120 { session.status = "idle".into(); }
+    Some(session)
+}
+
+fn read_session(file: &Path, agent: &str, roots: &[String], fallback: Option<&str>) -> Option<AgentSession> {
+    scoped_session(cached_session(file, agent, fallback)?, roots)
+}
+
+// Each configuration keeps an event-driven index. A missed-event recovery scan
+// runs once a minute, rather than once per repository/tab refresh.
+const INDEX_BYTES: usize = 8 * 1024 * 1024;
+struct CatalogIndex {
+    root: PathBuf,
+    entries: std::collections::HashMap<PathBuf, (Option<AgentSession>, usize)>,
+    bytes: usize,
+    complete: bool,
+    events: std::sync::mpsc::Receiver<notify_debouncer_mini::notify::Event>,
+    dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watcher: Option<notify_debouncer_mini::notify::RecommendedWatcher>,
+    scanned: std::time::Instant,
+    scans: usize,
+    probes: usize,
+}
+impl CatalogIndex {
+    fn new(root: PathBuf) -> Self {
+        use notify_debouncer_mini::notify::{self, Watcher};
+        let (send, events) = std::sync::mpsc::sync_channel(1024);
+        let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let overflow = dirty.clone();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+            Ok(event) if !matches!(event.kind, notify::EventKind::Access(_)) => {
+                if send.try_send(event).is_err() { overflow.store(true, std::sync::atomic::Ordering::Release); }
+            }
+            Err(_) => { overflow.store(true, std::sync::atomic::Ordering::Release); }
+            _ => {}
+        }).ok().and_then(|mut watcher| watcher.watch(&root, notify::RecursiveMode::Recursive).ok().map(|_| watcher));
+        let mut index = Self { root, entries: Default::default(), bytes: 0, complete: true, events, dirty, watcher, scanned: std::time::Instant::now(), scans: 0, probes: 0 };
+        index.scan(); index
+    }
+    fn update_file(&mut self, path: PathBuf) {
+        if path.extension().is_none_or(|ext| ext != "jsonl") { return; }
+        // Keep discovery's original three-level directory budget; refuse escapes.
+        if !path.strip_prefix(&self.root).is_ok_and(|rel| rel.components().count() <= 4 && rel.components().all(|c| matches!(c, std::path::Component::Normal(_)))) { return; }
+        self.probes += 1;
+        let session = cached_session(&path, "codex", None);
+        if let Some((_, cost)) = self.entries.remove(&path) { self.bytes -= cost; }
+        if !path.is_file() { return; }
+        let cost = 256 + path.as_os_str().len() * 2 + session.as_ref().map(|s| s.id.len()+s.path.len()+s.title.len()+s.agent.len()+s.status.len()).unwrap_or(0);
+        if self.bytes + cost > INDEX_BYTES { self.complete = false; return; }
+        self.bytes += cost; self.entries.insert(path, (session, cost));
+    }
+    fn scan(&mut self) {
+        let mut files = Vec::new(); jsonl_files(&self.root, 3, &mut files);
+        let existing: std::collections::HashSet<_> = files.iter().cloned().collect();
+        self.entries.retain(|path, _| existing.contains(path));
+        self.bytes = self.entries.values().map(|(_, cost)| cost).sum(); self.complete = true;
+        for path in files { self.update_file(path); }
+        self.scanned = std::time::Instant::now(); self.scans += 1;
+    }
+    fn refresh(&mut self) {
+        use std::sync::atomic::Ordering;
+        let events: Vec<_> = self.events.try_iter().collect();
+        if self.watcher.is_none() || self.dirty.swap(false, Ordering::AcqRel) || events.iter().any(|e| e.need_rescan()) || self.scanned.elapsed() >= std::time::Duration::from_secs(60) {
+            // Retry registration when a previously absent sessions folder appears.
+            if self.watcher.is_none() && self.root.is_dir() { *self = Self::new(self.root.clone()); }
+            else { self.scan(); }
+            return;
+        }
+        let paths: std::collections::HashSet<_> = events.into_iter().flat_map(|e| e.paths).collect();
+        for path in paths {
+            if path.is_dir() && !path.is_symlink() {
+                let mut files = Vec::new(); jsonl_files(&path, 3, &mut files);
+                for file in files { self.update_file(file); }
+            } else if path.exists() { self.update_file(path); }
+            else {
+                self.entries.retain(|file, _| !file.starts_with(&path));
+                self.bytes = self.entries.values().map(|(_, cost)| cost).sum();
+            }
+        }
+    }
+    fn sessions(&mut self, roots: &[String]) -> Vec<AgentSession> {
+        self.refresh();
+        if !self.complete {
+            // Oversized indexes never silently omit results. Parsed-file admission
+            // stays bounded even when the index falls back to complete discovery.
+            let mut files = Vec::new(); jsonl_files(&self.root, 3, &mut files);
+            return files.into_iter().filter_map(|p| read_session(&p, "codex", roots, None)).collect();
+        }
+        self.entries.values().filter_map(|(entry, _)| scoped_session(entry.clone()?, roots)).collect()
+    }
+}
+fn codex_sessions(root: PathBuf, roots: &[String]) -> Vec<AgentSession> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Catalogs = std::collections::HashMap<PathBuf, Arc<Mutex<CatalogIndex>>>;
+    static CATALOGS: OnceLock<Mutex<Catalogs>> = OnceLock::new();
+    let cache = CATALOGS.get_or_init(Default::default);
+    let existing = cache.lock().unwrap().get(&root).cloned();
+    let index = existing.unwrap_or_else(|| {
+        let index = Arc::new(Mutex::new(CatalogIndex::new(root.clone())));
+        let mut catalogs = cache.lock().unwrap();
+        let removed = if catalogs.len() >= 2 { let key = catalogs.keys().next().cloned().unwrap(); catalogs.remove(&key) } else { None };
+        let result = catalogs.entry(root).or_insert(index).clone();
+        drop(catalogs); drop(removed); result
+    });
+    let sessions = index.lock().unwrap().sessions(roots); sessions
 }
 
 /// Only sessions whose recorded working directory is in one of this repository's worktrees.
@@ -184,11 +308,7 @@ pub fn sessions(roots: &[String], claude_dir: Option<&str>, codex_dir: Option<&s
             }
         }
     }
-    let mut files = Vec::new();
-    jsonl_files(&codex.join("sessions"), 3, &mut files);
-    for file in files {
-        if let Some(session) = read_session(&file, "codex", roots, None) { out.push(session); }
-    }
+    out.extend(codex_sessions(codex.join("sessions"), roots));
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     let mut seen = std::collections::HashSet::new();
     out.retain(|s| seen.insert((s.agent.clone(), s.id.clone())));
@@ -199,6 +319,71 @@ pub fn sessions(roots: &[String], claude_dir: Option<&str>, codex_dir: Option<&s
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn catalog_index_avoids_idle_probes_and_tracks_append_create_remove_and_overflow() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..4200 { fs::write(temp.path().join(format!("{i}.jsonl")), format!(r#"{{"type":"session_meta","payload":{{"id":"id-{i}","cwd":"/index/topic"}}}}"#)).unwrap(); }
+        let mut index = CatalogIndex::new(temp.path().to_owned());
+        assert!(index.watcher.is_some());
+        let roots = ["/index".into()]; assert_eq!(index.sessions(&roots).len(), 4200);
+        let probes = index.probes; let scans = index.scans;
+        for _ in 0..3 { assert_eq!(index.sessions(&["/index/topic".into()]).len(), 4200); }
+        assert_eq!(index.probes, probes); assert_eq!(index.scans, scans);
+        let changed = temp.path().join("0.jsonl");
+        fs::write(&changed, r#"{"type":"session_meta","payload":{"id":"changed","cwd":"/index"}}"#).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !index.sessions(&roots).iter().any(|s| s.id == "changed") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        assert!(index.probes - probes < 10, "changed file caused a full catalog scan");
+        {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true).open(&changed).unwrap();
+            writeln!(file, "\n{}", json!({"type":"event_msg","payload":{"type":"user_message","message":"Appended session title"}})).unwrap();
+        }
+        while !index.sessions(&roots).iter().any(|s| s.id == "changed" && s.title == "Appended session title") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        fs::remove_file(changed).unwrap();
+        while index.sessions(&roots).len() != 4199 { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        fs::create_dir(temp.path().join("new")).unwrap();
+        fs::write(temp.path().join("new/created.jsonl"), r#"{"type":"session_meta","payload":{"id":"created","cwd":"/index"}}"#).unwrap();
+        while !index.sessions(&roots).iter().any(|s| s.id == "created") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        index.dirty.store(true, std::sync::atomic::Ordering::Release); assert_eq!(index.sessions(&roots).len(), 4200);
+        assert!(index.scans > scans); assert!(index.bytes <= INDEX_BYTES);
+        eprintln!("catalog: {probes} initial probes, zero idle probes, {} retained bytes", index.bytes);
+    }
+
+    #[test]
+    fn repeated_4200_file_scans_and_new_repository_scopes_do_not_reparse() {
+        use std::sync::atomic::Ordering;
+        let temp = tempfile::tempdir().unwrap(); let roots = vec!["/catalog".into()];
+        for i in 0..4200 {
+            let file = temp.path().join(format!("session-{i}.jsonl"));
+            fs::write(&file, format!(r#"{{"type":"session_meta","payload":{{"id":"id-{i}","cwd":"/catalog/topic"}}}}"#)).unwrap();
+            assert!(read_session(&file, "codex", &roots, None).is_some());
+        }
+        let before = PARSES.load(Ordering::Relaxed);
+        for _ in 0..2 { for i in 0..4200 {
+            let file = temp.path().join(format!("session-{i}.jsonl"));
+            assert_eq!(read_session(&file, "codex", &["/catalog/topic".into()], None).unwrap().path, "/catalog/topic");
+        } }
+        assert_eq!(PARSES.load(Ordering::Relaxed) - before, 0);
+    }
+
+    #[test]
+    fn oversized_catalog_cache_keeps_stable_entries_and_scope_independent_metadata() {
+        let mut cache = SessionCache::default();
+        for i in 0..70_000 { cache.insert(format!("session-{i}"), 1, UNIX_EPOCH, None); }
+        assert!(cache.entries.len() > 4096); assert!(cache.bytes <= SESSION_CACHE_BYTES);
+        let retained = cache.entries.len();
+        for i in 0..70_000 { cache.insert(format!("session-{i}"), 1, UNIX_EPOCH, None); }
+        assert_eq!(retained, cache.entries.len()); assert!(cache.entries.contains_key("session-0"));
+        let temp = tempfile::tempdir().unwrap(); let file = temp.path().join("session.jsonl");
+        fs::write(&file, r#"{"type":"session_meta","payload":{"id":"scope-test","cwd":"/repo/sub"}}"#).unwrap();
+        assert!(read_session(&file, "codex", &["/elsewhere".into()], None).is_none());
+        assert_eq!(read_session(&file, "codex", &["/repo".into()], None).unwrap().path, "/repo");
+        assert_eq!(read_session(&file, "codex", &["/repo".into(), "/repo/sub".into()], None).unwrap().path, "/repo/sub");
+        fs::write(&file, r#"{"type":"session_meta","payload":{"id":"changed-session","cwd":"/repo"}}"#).unwrap();
+        assert_eq!(read_session(&file, "codex", &["/repo".into()], None).unwrap().id, "changed-session");
+    }
 
     #[test]
     fn discovers_both_agents_and_filters_worktrees_and_unrelated_folders() {

@@ -1,6 +1,7 @@
+import { useShallow } from "zustand/react/shallow";
 import { ChevronDown, Folder, GitBranch, Plus, Rocket, Settings, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useStore, usePanelStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { CtxMenu } from "./ui/menu";
 import { PROFILE_COLORS, ProfileMark } from "./Icons";
@@ -35,7 +36,7 @@ type TabDrag = { id: string; pointerId: number; startX: number; originLeft: numb
 
 /** Repository tabs. */
 export function TabsBar() {
-  const s = usePanelStore();
+  const s = { ...useStore(useShallow((st) => ({ activeId: st.activeId, activeProfile: st.activeProfile, closeTab: st.closeTab, closed: st.closed, moveTab: st.moveTab, newTab: st.newTab, openLaunchpad: st.openLaunchpad, openRepoTab: st.openRepoTab, profiles: st.profiles, renameTab: st.renameTab, reopenTab: st.reopenTab, setActive: st.setActive, setDialog: st.setDialog, tabs: st.tabs }))), settings: useStore(useShallow((st) => ({ tabWidths: st.settings.tabWidths }))) };
   const strip = useRef<HTMLDivElement>(null);
   const drag = useRef<TabDrag | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);

@@ -42,13 +42,11 @@ fn preview_contents(dir: &Path, rev: &str, file: &str, limit: usize) -> Result<O
     let size = run(dir, &["cat-file", "-s", &spec]);
     if !size.ok { return Ok(None) }
     if size.stdout.trim().parse::<u64>().map(|n| n > limit as u64).unwrap_or(true) { return Err(()) }
-    let Ok(mut child) = git::git_cmd(dir).args(["show", &spec])
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() else { return Ok(None) };
-    let mut bytes = Vec::new();
-    let read = child.stdout.take().unwrap().take(limit as u64 + 1).read_to_end(&mut bytes);
-    if bytes.len() > limit || read.is_err() { let _ = child.kill(); }
-    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-    if bytes.len() > limit { Err(()) } else if ok && read.is_ok() { Ok(Some(bytes)) } else { Ok(None) }
+    let mut command = git::git_cmd(dir); command.args(["show", &spec]);
+    let output = crate::read_jobs::run_bytes(command, limit, None);
+    if output.ok { Ok(Some(output.stdout)) }
+    else if String::from_utf8_lossy(&output.stderr).contains("budget") { Err(()) }
+    else { Ok(None) }
 }
 
 #[derive(Serialize, Default)]
@@ -406,7 +404,37 @@ fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), St
         Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF]))?,
         None => text.into_bytes(),
     } };
-    std::fs::write(p, bytes).map_err(|e| e.to_string())
+    replace_file(&p, &bytes).map_err(|e| e.to_string())
+}
+
+/// Follow an existing symlink while keeping the link itself intact. A same-directory
+/// rename publishes only a complete file; a failed write/replace leaves the old file.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    replace_file_with(path, |file| file.write_all(bytes))
+}
+fn replace_file_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
+    let destination = match std::fs::symlink_metadata(path) { Ok(_) => std::fs::canonicalize(path)?, Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(), Err(error) => return Err(error) };
+    let parent = destination.parent().ok_or_else(|| std::io::Error::other("File has no parent directory"))?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    write(pending.as_file_mut())?;
+    if let Ok(metadata) = std::fs::metadata(&destination) {
+        pending.as_file().set_permissions(metadata.permissions())?;
+    }
+    pending.as_file().sync_all()?;
+    let pending = pending.into_temp_path();
+    #[cfg(windows)]
+    if destination.exists() {
+        use std::os::windows::ffi::OsStrExt;
+        let target: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        let source: Vec<u16> = pending.as_os_str().encode_wide().chain(Some(0)).collect();
+        // ReplaceFile preserves the destination ACL and attributes on Windows.
+        let replaced = unsafe { windows_sys::Win32::Storage::FileSystem::ReplaceFileW(target.as_ptr(), source.as_ptr(), std::ptr::null(), 0, std::ptr::null(), std::ptr::null()) };
+        if replaced == 0 { return Err(std::io::Error::last_os_error()); }
+        return Ok(());
+    }
+    pending.persist(&destination).map_err(|e| e.error)?;
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -419,9 +447,10 @@ pub struct HistoryEntry {
 }
 
 /// Commits that changed a file, newest first, following renames.
-pub fn history(dir: &Path, file: &str, max: usize) -> Vec<HistoryEntry> {
+pub fn history(dir: &Path, file: &str, max: usize) -> Result<Vec<HistoryEntry>, String> {
     let count = format!("-n{max}");
     let output = run(dir, &["--literal-pathspecs", "log", "--follow", "-M", &count, "--name-status", "-z", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--", file]);
+    if !output.ok { return Err(output.message()); }
     let fields: Vec<_> = output.stdout.split('\0').collect();
     let mut position = 0; let mut entries = Vec::new();
     while position < fields.len() {
@@ -443,10 +472,10 @@ pub fn history(dir: &Path, file: &str, max: usize) -> Vec<HistoryEntry> {
         }
         entries.push(HistoryEntry { commit, path, status });
     }
-    entries
+    Ok(entries)
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct BlameLine {
     pub sha: String,
     pub author: String,
@@ -458,13 +487,18 @@ pub struct BlameLine {
 
 /// Who last changed each line (`git blame --porcelain`). `rev` None = working folder.
 pub fn blame(dir: &Path, file: &str, rev: Option<&str>) -> Result<Vec<BlameLine>, String> {
+    let bytes = preview_contents(dir, rev.unwrap_or(WORKDIR), file, PREVIEW_MAX)
+        .map_err(|_| "This file exceeds the 2 MB blame limit. Open it in an external editor.".to_string())?
+        .ok_or("Could not read this file for blame")?;
+    let line_count = bytes.iter().filter(|&&b| b == b'\n').count() + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+    if line_count > 100_000 { return Err("This file exceeds the 100,000 line blame limit.".into()); }
     let mut args = vec!["--literal-pathspecs", "blame", "--porcelain"];
     if let Some(r) = rev {
         args.push(r);
     }
     args.push("--");
     args.push(file);
-    let o = run(dir, &args);
+    let o = git::run_limited(dir, &args, 16 * 1024 * 1024);
     if !o.ok {
         return Err(o.message());
     }
@@ -515,13 +549,14 @@ pub struct Stats {
 }
 
 /// Files changed, lines added and removed for each commit (the graph's CHANGES column).
-pub fn stats(dir: &Path, shas: &[String]) -> Vec<Stats> {
+pub fn stats(dir: &Path, shas: &[String]) -> Result<Vec<Stats>, String> {
     if shas.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut args: Vec<&str> = vec!["log", "--no-walk=unsorted", "--diff-merges=first-parent", "--shortstat", "--format=%x1e%H"];
     args.extend(shas.iter().map(|s| s.as_str()));
     let o = run(dir, &args);
+    if !o.ok { return Err(o.message()); }
     let mut out = Vec::new();
     for rec in o.stdout.split('\x1e').filter(|r| !r.trim().is_empty()) {
         let mut lines = rec.lines().filter(|l| !l.trim().is_empty());
@@ -541,16 +576,17 @@ pub fn stats(dir: &Path, shas: &[String]) -> Vec<Stats> {
         }
         out.push(s);
     }
-    out
+    Ok(out)
 }
 
 /// Files that differ between two points (`to` may be WORKDIR).
-pub fn range_files(dir: &Path, from: &str, to: &str) -> Vec<FileChange> {
+pub fn range_files(dir: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, String> {
     let mut args = vec!["diff", "--name-status", "-z", "-M", from];
     if to != WORKDIR {
         args.push(to);
     }
     let o = run(dir, &args);
+    if !o.ok { return Err(o.message()); }
     let mut out = Vec::new();
     let mut it = o.stdout.split('\0').filter(|s| !s.is_empty());
     while let Some(st) = it.next() {
@@ -564,12 +600,14 @@ pub fn range_files(dir: &Path, from: &str, to: &str) -> Vec<FileChange> {
             out.push(FileChange { path: p.to_string(), status: ch });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Every tracked file (for the file history finder).
-pub fn tracked_files(dir: &Path) -> Vec<String> {
-    run(dir, &["ls-files", "-z"]).stdout.split('\0').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
+pub fn tracked_files(dir: &Path) -> Result<Vec<String>, String> {
+    let output = run(dir, &["ls-files", "-z"]);
+    if !output.ok { return Err(output.message()); }
+    Ok(output.stdout.split('\0').filter(|s| !s.is_empty()).map(str::to_owned).collect())
 }
 
 #[cfg(test)]
@@ -773,5 +811,56 @@ mod preview_tests {
         assert!(run(dir.path(), &["add", "large.txt"]).ok);
         assert!(preview_contents(dir.path(), ":", "large.txt", PREVIEW_MAX).is_err());
         assert_eq!(preview_contents(dir.path(), ":", "large.txt", LARGE_PREVIEW_MAX).unwrap().unwrap().len(), PREVIEW_MAX + 1);
+    }
+}
+
+#[cfg(test)]
+mod resource_regressions {
+    use super::*;
+    #[test]
+    fn collection_errors_are_not_empty_results() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(history(temp.path(), "file", 10).is_err());
+        assert!(tracked_files(temp.path()).is_err());
+        assert!(range_files(temp.path(), "HEAD", WORKDIR).is_err());
+        assert!(run(temp.path(), &["init"]).ok);
+        assert!(run(temp.path(), &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "root"]).ok);
+        assert!(history(temp.path(), "absent", 10).unwrap().is_empty());
+        assert!(history(temp.path(), "absent", 10).is_ok());
+    }
+    #[test]
+    fn failed_staged_write_and_replace_preserve_original() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap(); let file = temp.path().join("file.txt");
+        std::fs::write(&file, "original").unwrap();
+        assert!(replace_file_with(&file, |pending| { pending.write_all(b"partial")?; Err(std::io::Error::other("injected disk full")) }).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"original");
+        // Replacing a directory fails at publication after the temporary file is complete.
+        let directory = temp.path().join("directory"); std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("original"), "kept").unwrap();
+        assert!(replace_file(&directory, b"replacement").is_err());
+        assert_eq!(std::fs::read_to_string(directory.join("original")).unwrap(), "kept");
+        replace_file(&file, b"complete").unwrap(); assert_eq!(std::fs::read(&file).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn replacement_preserves_symlink_and_executable_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap(); let target = temp.path().join("target"); let link = temp.path().join("link");
+        std::fs::write(&target, "old").unwrap(); std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap(); symlink(&target, &link).unwrap();
+        replace_file(&link, b"new").unwrap(); assert!(link.is_symlink()); assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o751);
+    }
+    #[test]
+    fn blame_rejects_oversized_input_before_git_output() {
+        let temp = tempfile::tempdir().unwrap(); let file = temp.path().join("huge.txt");
+        std::fs::File::create(&file).unwrap().set_len(PREVIEW_MAX as u64 + 1).unwrap();
+        assert!(blame(temp.path(), "huge.txt", None).unwrap_err().contains("2 MB"));
+        std::fs::write(&file, "x\n".repeat(100_000)).unwrap();
+        // Exactly 100,000 newline-terminated lines pass preflight and reach Git.
+        assert!(!blame(temp.path(), "huge.txt", None).unwrap_err().contains("100,000"));
+        std::fs::write(file, "x\n".repeat(100_001)).unwrap();
+        assert!(blame(temp.path(), "huge.txt", None).unwrap_err().contains("100,000"));
     }
 }

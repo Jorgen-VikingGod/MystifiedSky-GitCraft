@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowDown,
@@ -15,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffLine, DiffSource, PatchOp, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
 import type { DiffTarget } from "@/lib/store";
-import { useStore, usePanelStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { act, confirmThen, refresh } from "@/lib/repo";
 import { Button } from "./ui/button";
 import { StatusIcon } from "./Icons";
@@ -37,7 +38,7 @@ export function sourceLabel(src: DiffSource, shaLen: number) {
 
 /** A file's changes, opened over the graph: Hunk / Inline / Split diff, or File View. */
 export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: string; target: DiffTarget }) {
-  const s = usePanelStore();
+  const s = { ...useStore(useShallow((st) => ({ metrics: st.metrics, setDialog: st.setDialog, setSettings: st.setSettings, setUi: st.setUi, toast: st.toast }))), settings: useStore(useShallow((st) => ({ diffMode: st.settings.diffMode, ignoreWhitespace: st.settings.ignoreWhitespace, wordWrap: st.settings.wordWrap }))) };
   const set = s.settings;
   const m = s.metrics;
   const [view, setView] = useState<"diff" | "file">("diff");
@@ -54,11 +55,11 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   const statusKey = target.source.kind === "Commit" ? "" : JSON.stringify(repo.status);
   const versions = useQuery({
     queryKey: ["versions", repo.path, JSON.stringify(target), statusKey, allowLarge],
-    queryFn: () => api.fileVersions(repo.path, target.source, target.file, target.untracked, target.parent, allowLarge),
+    queryFn: ({ signal }) => api.fileVersions(repo.path, target.source, target.file, target.untracked, target.parent, allowLarge, signal),
   });
   const lines = useQuery({
     queryKey: ["diff", repo.path, JSON.stringify(target), statusKey, set.ignoreWhitespace],
-    queryFn: () => api.fileDiff(repo.path, target.source, target.file, target.untracked, target.parent, false),
+    queryFn: ({ signal }) => api.fileDiff(repo.path, target.source, target.file, target.untracked, target.parent, false, signal),
     enabled: versions.isSuccess && !versions.data?.too_large && !versions.data?.binary && view === "diff" && set.diffMode === "hunk",
   });
 

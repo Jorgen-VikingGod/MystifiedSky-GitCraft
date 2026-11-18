@@ -45,6 +45,8 @@ export interface GraphRow {
   col: number;
   color: number;
   up: Seg[];
+  up_runs?: [number, number][];
+  down_runs?: [number, number][];
   down: Seg[];
   merge: boolean;
 }
@@ -393,50 +395,60 @@ export interface ActionResult {
   message: string;
 }
 
+let readSequence = 0;
+export function invokeRead<T>(command: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) return Promise.reject(new DOMException("Read cancelled", "AbortError"));
+  const readId = `read-${Date.now()}-${++readSequence}`;
+  const cancel = () => { void invoke("cancel_read", { id: readId }).catch(() => undefined); };
+  signal?.addEventListener("abort", cancel, { once: true });
+  return invoke<T>(command, { ...args, readId }).finally(() => signal?.removeEventListener("abort", cancel));
+}
+
 export const api = {
   launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
-  repoStatus: (path: string) => invoke<RepoView["status"]>("repo_status", { path }),
-  openRepo: (path: string, max?: number, view?: RefView) => invoke<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }),
-  historyPage: (path: string, cursor: HistoryCursor, max = 2000) => invoke<HistoryPage>("history_page", { path, cursor, max }),
-  commitDetails: (path: string, sha: string) => invoke<Commit>("commit_details", { path, sha }),
-  commitFiles: (path: string, sha: string) => invoke<FileChange[]>("commit_files", { path, sha }),
-  fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, allowLarge = false) =>
-    invoke<FileVersions>("file_versions", { path, source, file, untracked, parent, allowLarge }),
+  repoStatus: (path: string, signal?: AbortSignal) => invokeRead<RepoView["status"]>("repo_status", { path }, signal),
+  openRepo: (path: string, max?: number, view?: RefView, signal?: AbortSignal) => invokeRead<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }, signal),
+  historyPage: (path: string, cursor: HistoryCursor, max = 2000, signal?: AbortSignal) => invokeRead<HistoryPage>("history_page", { path, cursor, max }, signal),
+  commitDetails: (path: string, sha: string, signal?: AbortSignal) => invokeRead<Commit>("commit_details", { path, sha }, signal),
+  commitFiles: (path: string, sha: string, signal?: AbortSignal) => invokeRead<FileChange[]>("commit_files", { path, sha }, signal),
+  fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, allowLarge = false, signal?: AbortSignal) =>
+    invokeRead<FileVersions>("file_versions", { path, source, file, untracked, parent, allowLarge }, signal),
   saveFile: (path: string, file: string, content: string, expected?: string, utf8 = false) => invoke<void>("save_file", { path, file, content, expected, utf8 }),
-  fileHistory: (path: string, file: string) => invoke<HistoryEntry[]>("file_history", { path, file }),
-  blame: (path: string, file: string, rev: string | null) => invoke<BlameLine[]>("blame", { path, file, rev }),
-  commitStats: (path: string, shas: string[]) => invoke<Stats[]>("commit_stats", { path, shas }),
-  rangeFiles: (path: string, from: string, to: string) => invoke<FileChange[]>("range_files", { path, from, to }),
-  trackedFiles: (path: string) => invoke<string[]>("tracked_files", { path }),
+  fileHistory: (path: string, file: string, signal?: AbortSignal) => invokeRead<HistoryEntry[]>("file_history", { path, file }, signal),
+  blame: (path: string, file: string, rev: string | null, signal?: AbortSignal) => invokeRead<BlameLine[]>("blame", { path, file, rev }, signal),
+  commitStats: (path: string, shas: string[], signal?: AbortSignal) => invokeRead<Stats[]>("commit_stats", { path, shas }, signal),
+  rangeFiles: (path: string, from: string, to: string, signal?: AbortSignal) => invokeRead<FileChange[]>("range_files", { path, from, to }, signal),
+  trackedFiles: (path: string, signal?: AbortSignal) => invokeRead<string[]>("tracked_files", { path }, signal),
   /** Preferences > External Tools > Editor. */
   openInEditor: (path: string, file?: string) => {
     const t = useStore.getState().settings;
     return invoke<void>("open_in_editor", { path, file: file ?? null, tool: t.externalEditor, exe: t.editorPath, fileArgs: t.editorFileArgs, repoArgs: t.editorRepoArgs });
   },
-  accountInfo: (path: string | null) => invoke<AccountInfo>("account_info", { path }),
-  gitConfig: (path: string | null, scope: "global" | "local", keys: string[]) => invoke<Record<string, string>>("git_config_get", { path, scope, keys }),
+  accountInfo: (path: string | null, signal?: AbortSignal) => invokeRead<AccountInfo>("account_info", { path }, signal),
+  gitConfig: (path: string | null, scope: "global" | "local", keys: string[], signal?: AbortSignal) => invokeRead<Record<string, string>>("git_config_get", { path, scope, keys }, signal),
   setGitConfig: (path: string | null, scope: "global" | "local", key: string, value: string) => invoke<void>("set_git_config", { path, scope, key, value }),
   generateSshKey: (email: string, name: string) => invoke<string>("generate_ssh_key", { email, name }),
+  acknowledgeJob: (id: string) => invoke<void>("acknowledge_job", { id }),
   cancelJob: (id: string) => invoke<boolean>("cancel_job", { id }),
-  lfsLocks: (path: string) => invoke<LfsInfo["locks"]>("lfs_locks", { path }),
-  lfsInfo: (path: string) => invoke<LfsInfo>("lfs_info", { path }),
-  sparseInfo: (path: string) => invoke<{ enabled: boolean; patterns: string[] }>("sparse_info", { path }),
+  lfsLocks: (path: string, signal?: AbortSignal) => invokeRead<LfsInfo["locks"]>("lfs_locks", { path }, signal),
+  lfsInfo: (path: string, signal?: AbortSignal) => invokeRead<LfsInfo>("lfs_info", { path }, signal),
+  sparseInfo: (path: string, signal?: AbortSignal) => invokeRead<{ enabled: boolean; patterns: string[] }>("sparse_info", { path }, signal),
   gitignoreTemplates: () => invoke<string[]>("gitignore_templates"),
-  gitflowConfig: (path: string) => invoke<GitflowConfig>("gitflow_config", { path }),
-  cleanupList: (path: string) => invoke<CleanupBranch[]>("cleanup_list", { path }),
-  remotesList: (path: string) => invoke<RemoteInfo[]>("remotes_list", { path }),
-  submodulesList: (path: string) => invoke<SubmoduleInfo[]>("submodules_list", { path }),
-  rebasePlan: (path: string, base: string) => invoke<{ expected: RebaseState; commits: Commit[] }>("rebase_plan", { path, base }),
-  rebaseCommits: (path: string, base: string) => invoke<Commit[]>("rebase_commits", { path, base }),
-  conflictInfo: (path: string, file: string) => invoke<ConflictInfo>("conflict_info", { path, file }),
-  fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false) =>
-    invoke<DiffLine[]>("file_diff", { path, source, file, untracked, parent, ignoreWs }),
+  gitflowConfig: (path: string, signal?: AbortSignal) => invokeRead<GitflowConfig>("gitflow_config", { path }, signal),
+  cleanupList: (path: string, signal?: AbortSignal) => invokeRead<CleanupBranch[]>("cleanup_list", { path }, signal),
+  remotesList: (path: string, signal?: AbortSignal) => invokeRead<RemoteInfo[]>("remotes_list", { path }, signal),
+  submodulesList: (path: string, signal?: AbortSignal) => invokeRead<SubmoduleInfo[]>("submodules_list", { path }, signal),
+  rebasePlan: (path: string, base: string, signal?: AbortSignal) => invokeRead<{ expected: RebaseState; commits: Commit[] }>("rebase_plan", { path, base }, signal),
+  rebaseCommits: (path: string, base: string, signal?: AbortSignal) => invokeRead<Commit[]>("rebase_commits", { path, base }, signal),
+  conflictInfo: (path: string, file: string, signal?: AbortSignal) => invokeRead<ConflictInfo>("conflict_info", { path, file }, signal),
+  fileDiff: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, ignoreWs = false, signal?: AbortSignal) =>
+    invokeRead<DiffLine[]>("file_diff", { path, source, file, untracked, parent, ignoreWs }, signal),
   run: (path: string, action: Action) => invoke<ActionResult>("run_action", { path, action }),
   activityLogSnapshot: (version?: number) => invoke<[number, LogEntry[]] | null>("activity_log_snapshot", { version }),
   activityLog: () => invoke<LogEntry[]>("activity_log"),
   sampleRepo: () => invoke<string>("sample_repo"),
   conflictSample: () => invoke<string>("conflict_sample"),
-  lastCommitMessage: (path: string) => invoke<[string, string]>("last_commit_message", { path }),
+  lastCommitMessage: (path: string, signal?: AbortSignal) => invokeRead<[string, string]>("last_commit_message", { path }, signal),
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
   initRepo: (parent: string, name: string, options?: InitOptions) => invoke<{path: string; warning: string | null}>("init_repo", { parent, name, options: options ?? null }),
   cloneRepo: (url: string, parent: string, options?: CloneOptions) => invoke<string>("clone_repo", { url, parent, options: options ?? null }),
@@ -455,7 +467,7 @@ export const api = {
   /** Show a repository file selected in the file manager. */
   revealFile: (path: string, file: string) => invoke<void>("reveal_file", { path, file }),
   /** A file's text from the working folder, or as it was in `rev`. */
-  fileText: (path: string, file: string, rev?: string) => invoke<string>("file_text", { path, file, rev: rev ?? null }),
+  fileText: (path: string, file: string, rev?: string, signal?: AbortSignal) => invokeRead<string>("file_text", { path, file, rev: rev ?? null }, signal),
   loadSettings: () => invoke<unknown>("load_settings"),
   saveSettings: (settings: unknown) => invoke<void>("save_settings", { settings }),
   watchRepo: (path: string) => invoke<void>("watch_repo", { path }),

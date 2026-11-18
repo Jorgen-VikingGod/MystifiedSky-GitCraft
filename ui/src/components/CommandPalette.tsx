@@ -37,7 +37,7 @@ export function CommandPalette() {
   const input = useRef<HTMLInputElement>(null);
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path : undefined;
-  const files = useQuery({ queryKey: ["tracked", path], queryFn: () => api.trackedFiles(path!), enabled: !!path && (mode === "history" || mode === "blame") });
+  const files = useQuery({ queryKey: ["tracked", path], queryFn: ({ signal }) => api.trackedFiles(path!, signal), enabled: !!path && (mode === "history" || mode === "blame") });
 
   useEffect(() => {
     setQ("");

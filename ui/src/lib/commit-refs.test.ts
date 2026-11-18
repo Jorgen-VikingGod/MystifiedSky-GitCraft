@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GitRef } from "./api";
-import { groupCommitRefs } from "./commit-refs";
+import { groupCommitRefs, refsByCommit } from "./commit-refs";
 const ref = (name: string, kind: GitRef["kind"], upstream = "", sha = "same"): GitRef => ({ name, kind, upstream, sha, full: `${kind}/${name}`, ahead: 0, behind: 0 });
 describe("commit reference grouping", () => {
   it("counts two local/remote branch pairs as two labels", () => {
@@ -38,4 +38,13 @@ it("indexes large shared tips without scanning every remote for each local", () 
     {name:`origin/branch-${i}`,sha:"same",upstream:"",get kind(){kinds++;return "Remote";}},
   ]).flat() as GitRef[];
   expect(groupCommitRefs(refs)).toHaveLength(1000);expect(kinds).toBeLessThan(10000);
+});
+
+it("groups 20000 shared-tip refs with stable local/remote/tag ordering and hidden exclusions", () => {
+  const refs = Array.from({length: 20000}, (_, i) => ref(`ref-${i}`, i % 3 === 0 ? "Tag" : i % 3 === 1 ? "Remote" : "Local"));
+  const original = [...refs]; const head = refs[19997];
+  const grouped = refsByCommit(refs, head.name, [refs[0].full]).get("same")!;
+  expect(grouped).toHaveLength(19999); expect(grouped[0]).toBe(head); expect(refs).toEqual(original);
+  expect(grouped.at(-1)?.kind).toBe("Tag");
+  expect(grouped.filter(r => r.kind === "Remote")).toEqual(refs.filter(r => r.kind === "Remote"));
 });

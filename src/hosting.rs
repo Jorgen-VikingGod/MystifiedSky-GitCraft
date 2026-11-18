@@ -170,52 +170,64 @@ pub fn http_page(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> R
 }
 
 fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result<HttpPage, String> {
+    crate::read_jobs::check()?;
+    let context = crate::read_jobs::context();
     let url = match auth {
         Auth::Query(k, t) => format!("{url}{}key={}&token={}", if url.contains('?') { "&" } else { "?" }, crate::hosting_api::q(k), crate::hosting_api::q(t)),
         _ => url.to_string(),
     };
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
-    let mut req = agent.request(method, &url).set("User-Agent", "GitCraft").timeout(std::time::Duration::from_secs(30));
-    req = match auth {
-        Auth::Bearer(t) => req.set("Authorization", &format!("Bearer {t}")),
-        Auth::Header(h, t) => req.set(h, t),
-        Auth::Basic(u, p) => req.set("Authorization", &format!("Basic {}", b64(&format!("{u}:{p}")))),
-        Auth::Query(..) => req,
+    static TRANSPORT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let agent = TRANSPORT.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP transport")
+    });
+    let mut request = agent.request(method.parse().map_err(|_| "Invalid HTTP method")?, &url)
+        .header("User-Agent", "GitCraft").timeout(std::time::Duration::from_secs(30));
+    request = match auth {
+        Auth::Bearer(token) => request.bearer_auth(token),
+        Auth::Header(name, token) => request.header(*name, token),
+        Auth::Basic(user, password) => request.basic_auth(user, Some(password)),
+        Auth::Query(..) => request,
     };
-    req = if url.contains("api.github.com") || url.contains("/api/v3/") {
-        req.set("Accept", "application/vnd.github+json").set("X-GitHub-Api-Version", "2022-11-28")
-    } else {
-        req.set("Accept", "application/json")
-    };
-    let res = match body {
-        Some(b) => req.send_json(b),
-        None => req.call(),
-    };
-    match res {
-        Ok(r) => {
-            if (300..400).contains(&r.status()) { return Err("The hosting service redirected this authenticated request. Update its configured address; credentials were not forwarded.".into()); }
-            let link = r.header("Link").map(str::to_owned);
-            let next_page = r.header("X-Next-Page").map(str::to_owned);
-            let continuation = r.header("X-MS-ContinuationToken").map(str::to_owned);
-            let text = r.into_string().map_err(|e| e.to_string())?;
-            Ok(HttpPage { value: if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) }, link, next_page, continuation })
+    request = if url.contains("api.github.com") || url.contains("/api/v3/") {
+        request.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28")
+    } else { request.header("Accept", "application/json") };
+    if let Some(body) = body { request = request.json(&body); }
+    // Dropping the async request interrupts connect/header/body waits. No detached
+    // per-request thread remains alive after its consumer cancels.
+    tauri::async_runtime::block_on(async {
+        let mut operation = Box::pin(async {
+            let _slot = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(8)).acquire().await.map_err(|_| "HTTP scheduler closed".to_string())?;
+            let mut response = request.send().await.map_err(|_| "Could not contact the hosting service. Check its address and connection.".to_string())?;
+            let status = response.status().as_u16();
+            if (300..400).contains(&status) { return Err("The hosting service redirected this authenticated request. Update its configured address; credentials were not forwarded.".into()); }
+            let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+            let link = header("Link"); let next_page = header("X-Next-Page"); let continuation = header("X-MS-ContinuationToken");
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| "Could not read the hosting response.".to_string())? {
+                if bytes.len() + chunk.len() > 10 * 1024 * 1024 { return Err("The hosting response exceeded its 10 MB budget; narrow the query.".into()); }
+                bytes.extend_from_slice(&chunk);
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let value = if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text.clone())) };
+            if status >= 400 {
+                let message = value["message"].as_str().or(value["error"]["message"].as_str()).or(value["errorMessages"][0].as_str()).or(value["errors"][0]["message"].as_str()).unwrap_or(&text);
+                let hint = match status { 401 => " - the token was not accepted; reconnect in Preferences > Integrations", 403 => " - the token may be missing a permission", _ => "" };
+                return Err(format!("{status}: {}{hint}", message.chars().take(300).collect::<String>()));
+            }
+            Ok(HttpPage { value, link, next_page, continuation })
+        });
+        let started = std::time::Instant::now();
+        loop {
+            crate::read_jobs::check_context(&context)?;
+            if started.elapsed() >= std::time::Duration::from_secs(30) { return Err("The hosting request timed out.".into()); }
+            match tokio::time::timeout(std::time::Duration::from_millis(20), &mut operation).await {
+                Ok(result) => return result,
+                Err(_) => continue,
+            }
         }
-        Err(ureq::Error::Status(code, r)) => {
-            let text = r.into_string().unwrap_or_default();
-            let v = serde_json::from_str::<Value>(&text).ok();
-            let msg = v
-                .as_ref()
-                .and_then(|v| v["message"].as_str().or(v["error"]["message"].as_str()).or(v["errorMessages"][0].as_str()).or(v["errors"][0]["message"].as_str()).map(|s| s.to_string()))
-                .unwrap_or(text);
-            let hint = match code {
-                401 => " - the token was not accepted; reconnect in Preferences > Integrations",
-                403 => " - the token may be missing a permission",
-                _ => "",
-            };
-            Err(format!("{code}: {}{hint}", msg.chars().take(300).collect::<String>()))
-        }
-        Err(ureq::Error::Transport(error)) => Err(format!("Could not contact the hosting service ({:?}). Check the service address and connection.", error.kind())),
-    }
+    })
 }
 
 fn s(v: &Value) -> String {
@@ -609,6 +621,52 @@ mod http_safety_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[test]
+    fn cancelled_http_body_releases_the_connection_promptly() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap(); let address = server.local_addr().unwrap();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap(); stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+            let mut bytes = [0;8192]; let _ = stream.read(&mut bytes);
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 99999\r\n\r\n{").unwrap(); ready.send(()).unwrap();
+            let started = std::time::Instant::now(); let closed = stream.read(&mut bytes).map(|n| n == 0).unwrap_or(true);
+            assert!(closed && started.elapsed() < std::time::Duration::from_secs(2));
+        });
+        let request = std::thread::spawn(move || crate::read_jobs::scope(Some("stalled-http".into()), || http_page("GET", &format!("http://{address}/stalled"), &Auth::Bearer("fixture".into()), None)));
+        wait.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let started = std::time::Instant::now(); crate::read_jobs::cancel("stalled-http");
+        assert!(request.join().unwrap().err().unwrap().contains("cancelled"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2)); worker.join().unwrap();
+    }
+
+    #[test]
+    fn transport_reuses_connections_without_reusing_credentials_and_reconnects() {
+        use std::io::BufRead;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for count in [5, 1] {
+                let (stream, _) = listener.accept().unwrap(); stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+                let mut reader = std::io::BufReader::new(stream);
+                for _ in 0..count {
+                    let mut request = String::new();
+                    loop { let mut line = String::new(); assert!(reader.read_line(&mut line).unwrap() > 0); if line == "\r\n" { break; } request.push_str(&line); }
+                    requests.push(request);
+                    reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+                }
+            }
+            requests
+        });
+        for index in 0..6 {
+            let token = format!("fixture-account-{index}");
+            assert!(http_page("GET", &format!("http://{address}/collection"), &Auth::Bearer(token), None).is_ok());
+        }
+        for (index, request) in worker.join().unwrap().iter().enumerate() {
+            assert!(request.contains(&format!("Bearer fixture-account-{index}")));
+            assert_eq!(request.to_ascii_lowercase().matches("authorization:").count(), 1);
+        }
+    }
+
     #[test]
     fn credentials_do_not_follow_redirects_or_appear_in_errors() {
         let destination=TcpListener::bind("127.0.0.1:0").unwrap();destination.set_nonblocking(true).unwrap();

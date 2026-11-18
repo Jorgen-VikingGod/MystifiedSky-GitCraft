@@ -78,3 +78,30 @@ Report failures with reproduction steps and sanitized logs. Keep platform valida
 After installing frontend dependencies, run `node scripts/verify-browser.mjs` from the repository root. It uses a locally installed Chrome or Chromium in a temporary profile. Set `CHROME_PATH` if the executable is not in a standard location. No desktop windows or user browser profiles are controlled.
 
 The checks exercise actual React components and Monaco with synthetic backend responses: editor switches, virtual-list scrolling and keyboard focus, delayed commits, upstream submission, graph statistics, remote detection, SSH/signing selection, merge-backup review, LFS failures, bounded repository operations, ranking and session grouping. Reports are written under `target/verification/`. Backend IPC and clipboard writes are intercepted, so real OS/service interactions still require the separate desktop smoke test.
+
+## Windows release-webview regression checks
+
+Build the production renderer, then a release executable with the optional policy:
+
+```powershell
+npm --prefix ui run build
+./ui/node_modules/.bin/tauri.cmd build --no-bundle --config tauri.csp.conf.json
+node scripts/verify-desktop.mjs target/release/gitcraft.exe csp
+```
+
+The Windows harness uses WebView2's loopback debugging endpoint and an explicit
+`--screenshot ... --shot-view validation` startup mode. It creates disposable
+repositories and separate app/WebView profiles under `target/verification/`,
+without loading or saving the regular user session. Close other verification
+runs before starting it. It opens Explorer for selection checks and closes only
+new fixture windows; it also checks localhost administrative-share UNC selection
+when that share is accessible. Reports retain resource samples, timings, policy
+violations and renderer exceptions. Fixtures and profiles remain for inspection.
+
+Checks include a 50,000-commit repository, restoration after an actual local
+commit, language/editor startup, JSON workers, preferences, image policy, native
+updater configuration, concurrent watchers, five terminals and twelve cancelled
+Git reads. No live account mutation, update installation or release publishing
+occurs. The validation-only inspection commands reject ordinary app sessions.
+This verifies a release executable, not installer behavior or signed upgrades;
+use the platform smoke-test procedure above for those checks.

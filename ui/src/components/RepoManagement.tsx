@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { readRepositorySummary } from "@/lib/read-pool";
 import { sameFolder } from "@/lib/agents";
 import { useQueries } from "@tanstack/react-query";
@@ -37,7 +38,7 @@ export function openFavorite(n: number) {
 /** Repository Management: open, favorite and recent repositories with their branch and WIP summary,
  *  and fetch / pull / open / remove for one or all of them. */
 export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ closeTab: st.closeTab, setSettings: st.setSettings, tabs: st.tabs, toast: st.toast }))), settings: useStore(useShallow((st) => ({ favorites: st.settings.favorites, pullMode: st.settings.pullMode, recents: st.settings.recents }))) };
   const [q, setQ] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const open = [...new Set(s.tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!))];

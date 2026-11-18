@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Bell, Check, EllipsisVertical, Trash2, TriangleAlert, Undo2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useStore, noticeVisible, type NoticeFilter } from "@/lib/store";
@@ -21,7 +22,7 @@ const MENU_RESERVED = 168;
 /** The bell: unread badge ("50+" from 50) and the notification menu. */
 export function NotificationMenu() {
   const root = useRef<HTMLDivElement>(null);
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ markAllNotices: st.markAllNotices, markNotice: st.markNotice, noticeFilter: st.noticeFilter, noticeMenuOpen: st.noticeMenuOpen, notices: st.notices, removeNotice: st.removeNotice, setDialog: st.setDialog, setNoticeFilter: st.setNoticeFilter, setNoticeMenuOpen: st.setNoticeMenuOpen })));
   const open = s.noticeMenuOpen;
   const setOpen = (v: boolean | ((x: boolean) => boolean)) => s.setNoticeMenuOpen(typeof v === "function" ? v(useStore.getState().noticeMenuOpen) : v);
   const up = useUpdates();

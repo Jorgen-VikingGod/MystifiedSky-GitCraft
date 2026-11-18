@@ -34,6 +34,7 @@ function isActive(path: string) {
 }
 const deferred = new Map<string, boolean>();
 const pageLoads = new Map<string, Promise<void>>();
+const pageControllers = new Map<string, AbortController>();
 let nextGeneration = 0;
 const generations = new Map<string, number>();
 function generationFor(path: string) {
@@ -53,7 +54,7 @@ function historySignature(repo: RepoView) {
 export async function readRepoSnapshot(path: string, initial: number, view: RefView, previous?: RepoView, signal?: AbortSignal): Promise<RepoView> {
   const checkCancelled = () => { if (signal?.aborted) throw new Error("Repository read cancelled"); };
   checkCancelled();
-  const next = await api.openRepo(path, initial, view);
+  const next = await api.openRepo(path, initial, view, signal);
   checkCancelled();
   if (previous && historySignature(previous) === historySignature(next) &&
       next.commits.every((c, i) => previous.commits[i]?.sha === c.sha)) {
@@ -88,6 +89,9 @@ export function useRepo(path: string | undefined, active = true) {
     placeholderData: (prev, query) => (query?.queryKey[1] === path ? prev : undefined),
   });
   useEffect(() => {
+    if (path && !active) for (const [key, controller] of pageControllers) if (JSON.parse(key)[1] === path) controller.abort();
+  }, [path, active]);
+  useEffect(() => {
     if (!path || !active || !deferred.has(path)) return;
     const full = deferred.get(path);
     deferred.delete(path);
@@ -111,8 +115,10 @@ export function loadMoreRepo(path: string): Promise<void> {
   if (!before?.history_cursor || !isActive(path) || deferred.has(path)) return Promise.resolve();
   const cursor = before.history_cursor;
   const generation = generationFor(path);
+  const controller = new AbortController();
+  pageControllers.set(key, controller);
   const task = (async () => {
-    const page = await api.historyPage(path, cursor, request.initial);
+    const page = await api.historyPage(path, cursor, request.initial, controller.signal);
     if (generations.get(path) !== generation || !isActive(path) || JSON.stringify(repoRequest(path).key) !== key) return;
     queryClient.setQueryData<RepoView>(request.key, (current) => {
       if (!current || current.history_cursor !== cursor) return current;
@@ -120,13 +126,14 @@ export function loadMoreRepo(path: string): Promise<void> {
       latest.set(path, next);
       return next;
     });
-  })().finally(() => { if (pageLoads.get(key) === task) pageLoads.delete(key); });
+  })().finally(() => { if (pageLoads.get(key) === task) { pageLoads.delete(key); pageControllers.delete(key); } });
   pageLoads.set(key, task);
   return task;
 }
 
 /** Closing the final tab releases snapshots, queries and pending page results for that repository. */
 export function releaseRepo(path: string) {
+  for (const [key, controller] of pageControllers) if (JSON.parse(key)[1] === path) { controller.abort(); pageControllers.delete(key); }
   generations.delete(path);
   latest.delete(path);
   deferred.delete(path);
@@ -154,7 +161,7 @@ export async function refresh(path: string): Promise<void> {
     try {
       do {
         task.again = false;
-        await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict", "remote", "pr"].map((kind) =>
+        await Promise.all(["repo", "diff", "versions", "history", "blame", "range", "conflict", "remote", "pr", "prsPages", "issuesPages"].map((kind) =>
           queryClient.invalidateQueries({ queryKey: [kind, path] }, { cancelRefetch: false }),
         ));
       } while (task.again && isActive(path));

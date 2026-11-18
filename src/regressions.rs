@@ -447,7 +447,7 @@ fn spaced_remotes_hooks_and_config_include_round_trip() {
 fn finder_preserves_unicode_names_and_blame_supports_sha256() {
     let f=fixture("gitcraft-finder-name-");let d=f.path();let name="café file.txt";
     std::fs::write(d.join(name),"unicode").unwrap();assert!(git::run(d,&["add","--",name]).ok);
-    assert!(crate::files::tracked_files(d).contains(&name.to_owned()));
+    assert!(crate::files::tracked_files(d).unwrap().contains(&name.to_owned()));
     let f=tempfile::tempdir().unwrap();let d=f.path();assert!(git::run(d,&["init","-q","--object-format=sha256"]).ok);
     for args in [vec!["config","user.name","SHA256 Test"],vec!["config","user.email","sha@example.test"],vec!["config","commit.gpgsign","false"]] {assert!(git::run(d,&args).ok);}
     std::fs::write(d.join("file.txt"),"one\ntwo\n").unwrap();assert!(git::run(d,&["add","."]).ok);assert!(git::run(d,&["commit","-qm","sha256"]).ok);
@@ -575,7 +575,7 @@ fn commit_control_characters_remain_data_in_all_history_readers() {
     let body=format!("Real body\u{1e}{}\u{1f}\u{1f}Invented Author\u{1f}invented@example.test\u{1f}1\u{1f}Invented Subject\u{1f}Invented Body","f".repeat(40));
     std::fs::write(d.join("file.txt"),"changed\n").unwrap();assert!(git::run(d,&["commit","-qam",&format!("Real\u{1f} subject\n\n{body}")]).ok);
     let history=git::load(d,100);assert_eq!(history.commits.len(),2);assert!(history.commits.iter().all(|commit| commit.sha!="f".repeat(40)));assert!(history.commits[0].body.contains(&body));
-    let file_history=crate::files::history(d,"file.txt",100);assert_eq!(file_history.len(),2);assert_eq!(file_history[0].commit.sha,head(d));assert!(file_history[0].commit.body.contains(&body));
+    let file_history=crate::files::history(d,"file.txt",100).unwrap();assert_eq!(file_history.len(),2);assert_eq!(file_history[0].commit.sha,head(d));assert!(file_history[0].commit.body.contains(&body));
     let plan=crate::rewrite::rebase_commits(d,&base).unwrap();assert_eq!(plan.len(),1);assert!(plan[0].body.contains(&body));
 }
 

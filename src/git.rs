@@ -207,6 +207,10 @@ pub fn git_cmd(dir: &Path) -> Command {
 }
 
 pub fn run(dir: &Path, args: &[&str]) -> GitOut {
+    let verb = args.iter().find(|arg| !arg.starts_with('-')).copied().unwrap_or("");
+    if crate::read_jobs::has_context() || matches!(verb, "log" | "ls-remote" | "blame" | "status" | "show" | "diff" | "ls-files" | "cat-file" | "rev-list" | "for-each-ref") {
+        return run_limited(dir, args, 64 * 1024 * 1024);
+    }
     match git_cmd(dir).args(args).output() {
         Ok(o) => GitOut {
             ok: o.status.success(),
@@ -215,6 +219,11 @@ pub fn run(dir: &Path, args: &[&str]) -> GitOut {
         },
         Err(e) => GitOut { ok: false, stdout: String::new(), stderr: format!("Could not start git: {e}") },
     }
+}
+
+pub fn run_limited(dir: &Path, args: &[&str], limit: usize) -> GitOut {
+    let mut command = git_cmd(dir); command.args(args);
+    crate::read_jobs::run(command, limit, None)
 }
 
 pub fn run_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> GitOut {
@@ -281,7 +290,6 @@ pub fn smart_refs(dir: &Path) -> Vec<String> {
 /// read (missing or invalid), and a tag of a tree or blob is left out by its peeled type, so the list holds only what
 /// the history view keeps (see load_view).
 pub fn walkable_refs(dir: &Path) -> Vec<String> {
-    use std::io::Write;
     // Names only: asking for object types makes for-each-ref stop at a ref whose object is missing.
     let names: Vec<String> = run(dir, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"])
         .stdout
@@ -293,20 +301,10 @@ pub fn walkable_refs(dir: &Path) -> Vec<String> {
         return names;
     }
     // One answer per ref: "<sha>" when it peels to a commit, "<input> missing" when it doesn't (or is broken).
-    let Ok(mut child) = git_cmd(dir)
-        .args(["cat-file", "--batch-check=%(objectname)"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
     let input: String = names.iter().map(|n| format!("{n}^{{commit}}\n")).collect();
-    let writer = child.stdin.take().map(|mut stdin| std::thread::spawn(move || stdin.write_all(input.as_bytes())));
-    let result = child.wait_with_output();
-    if let Some(writer) = writer { let _ = writer.join(); }
-    let Ok(out) = result else { return Vec::new() };
+    let mut command = git_cmd(dir); command.args(["cat-file", "--batch-check=%(objectname)"]);
+    let out = crate::read_jobs::run_bytes(command, 64 * 1024 * 1024, Some(input.into_bytes()));
+    if !out.ok { return Vec::new(); }
     let answers = String::from_utf8_lossy(&out.stdout).into_owned();
     names.into_iter().zip(answers.lines()).filter(|(_, a)| !a.ends_with(" missing") && !a.trim().is_empty()).map(|(n, _)| n).collect()
 }
@@ -377,7 +375,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
     // so they run at the same time instead of one after another.
     let (refs, head, head_sha, log, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
         // Refs (branches, remote branches, tags) with ahead/behind info.
-        let refs = s.spawn(|| {
+        let refs = s.spawn(crate::read_jobs::inherit(|| {
             run(
                 dir,
                 &[
@@ -388,16 +386,16 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
                     "refs/tags",
                 ],
             )
-        });
-        let head = s.spawn(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]));
-        let head_sha = s.spawn(|| run(dir, &["rev-parse", "HEAD"]));
-        let log = s.spawn(|| if resolved.ok { history_log(dir, &revs, 0, max_commits) } else { run(dir, &log_args) });
-        let st = s.spawn(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"]));
-        let wt = s.spawn(|| run(dir, &["worktree", "list", "--porcelain"]));
-        let sm = s.spawn(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"]));
-        let remotes = s.spawn(|| run(dir, &["remote"]));
-        let work = s.spawn(|| try_status(dir));
-        let gitdir = s.spawn(|| run(dir, &["rev-parse", "--git-dir"]));
+        }));
+        let head = s.spawn(crate::read_jobs::inherit(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])));
+        let head_sha = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "HEAD"])));
+        let log = s.spawn(crate::read_jobs::inherit(|| if resolved.ok { history_log(dir, &revs, 0, max_commits) } else { run(dir, &log_args) }));
+        let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"])));
+        let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain"])));
+        let sm = s.spawn(crate::read_jobs::inherit(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"])));
+        let remotes = s.spawn(crate::read_jobs::inherit(|| run(dir, &["remote"])));
+        let work = s.spawn(crate::read_jobs::inherit(|| try_status(dir)));
+        let gitdir = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "--git-dir"])));
         let j = |h: std::thread::ScopedJoinHandle<'_, GitOut>| h.join().unwrap_or_else(|_| GitOut::failed("a Git read stopped unexpectedly"));
         (j(refs), j(head), j(head_sha), j(log), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_else(|_| Err("Git status read stopped unexpectedly".into())), j(gitdir))
     });
@@ -428,6 +426,8 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         d.head_branch = Some(head.stdout.trim().to_string());
     }
     d.head_sha = head_sha.stdout.trim().to_string();
+
+    crate::read_jobs::check()?;
 
     // Another broken ref (a branch file that is empty or names a missing commit) still stops the whole log. Then read
     // the history again from only the refs `for-each-ref` could read (it skips broken ones with a warning), so one
@@ -460,6 +460,8 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         }
     };
 
+    crate::read_jobs::check()?;
+    if !log.ok && head_sha.ok { return Err(log.message()); }
     d.commits = parse_commits(&log.stdout);
     if d.commits.len() > max_commits {
         d.commits.truncate(max_commits);
@@ -527,6 +529,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
     if d.state_note.is_some() {
         d.conflict_labels = Some(crate::rewrite::conflict_labels(dir));
     }
+    crate::read_jobs::check()?;
     Ok(d)
 }
 
@@ -723,8 +726,9 @@ pub fn rename_source(dir: &Path, src: &DiffSource, path: &str, parent: Option<&s
 
 /// Raw unified diff text for a file (used for the hunk view and for building partial patches).
 pub fn run_utf8(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = git_cmd(dir).args(args).output().map_err(|e| e.to_string())?;
-    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+    let mut command = git_cmd(dir); command.args(args);
+    let output = crate::read_jobs::run_bytes(command, 64 * 1024 * 1024, None);
+    if !output.ok { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
     String::from_utf8(output.stdout).map_err(|_| "Partial changes and text patch export require UTF-8 patch contents. Stage the whole file to preserve its original bytes, or explicitly convert it to UTF-8 first.".into())
 }
 
@@ -842,20 +846,10 @@ pub fn parse_commits(text: &str) -> Vec<Commit> {
 }
 
 fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize) -> GitOut {
-    use std::io::Write;
-    // Stdin avoids the Windows command-line limit for repositories with many branch/tag tips.
-    let child = git_cmd(dir).args(["log", "--stdin", "--date-order", &format!("--skip={offset}"), &format!("-n{}", max + 1),
-        "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"])
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn();
-    let mut child = match child { Ok(child) => child, Err(e) => return GitOut::failed(&e.to_string()) };
-    let input = revs.join("\n") + "\n";
-    let writer = child.stdin.take().map(|mut stdin| std::thread::spawn(move || stdin.write_all(input.as_bytes())));
-    let output = child.wait_with_output();
-    if let Some(writer) = writer { let _ = writer.join(); }
-    match output {
-        Ok(output) => GitOut { ok: output.status.success(), stdout: String::from_utf8_lossy(&output.stdout).into_owned(), stderr: String::from_utf8_lossy(&output.stderr).into_owned() },
-        Err(e) => GitOut::failed(&e.to_string()),
-    }
+    let mut command = git_cmd(dir);
+    command.args(["log", "--stdin", "--date-order", &format!("--skip={offset}"), &format!("-n{}", max + 1),
+        "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
+    crate::read_jobs::run(command, 64 * 1024 * 1024, Some((revs.join("\n") + "\n").into_bytes()))
 }
 
 pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize) -> Result<(Vec<Commit>, bool), String> {

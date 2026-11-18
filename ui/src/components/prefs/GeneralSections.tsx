@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { enableDesktopNotifications } from "@/lib/desktop-notify";
 import { useState } from "react";
@@ -8,13 +9,13 @@ import { THEMES } from "@/lib/prefs";
 import { Area, Btn, H, Note, Num, PathField, Row, Select, Text, Toggle } from "./controls";
 
 const useSet = () => {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ setSettings: st.setSettings, settings: st.settings, toast: st.toast })));
   return { set: s.settings, put: (p: Partial<Settings>) => s.setSettings(p), toast: s.toast };
 };
 
 /** Global Git config values shown on General (core.autocrlf, core.longpaths). */
 function useGlobalConfig(keys: string[]) {
-  const q = useQuery({ queryKey: ["gitConfigGlobal", keys.join()], queryFn: () => tools.configGet(null, "global", keys) });
+  const q = useQuery({ queryKey: ["gitConfigGlobal", keys.join()], queryFn: ({ signal }) => tools.configGet(null, "global", keys, signal) });
   const save = async (key: string, value: string) => {
     await api.setGitConfig(null, "global", key, value);
     q.refetch();
@@ -115,7 +116,7 @@ export function GeneralSection() {
 
 export function SshSection() {
   const { set, put, toast } = useSet();
-  const acc = useQuery({ queryKey: ["accounts", null], queryFn: () => api.accountInfo(null) });
+  const acc = useQuery({ queryKey: ["accounts", null], queryFn: ({ signal }) => api.accountInfo(null, signal) });
   const [busy, setBusy] = useState(false);
   return (
     <>

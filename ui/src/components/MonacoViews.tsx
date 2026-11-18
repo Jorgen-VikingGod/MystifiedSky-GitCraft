@@ -104,6 +104,8 @@ export function MonacoDiff({
     return () => {
       sub.dispose();
       const m = e.getModel();
+      e.setModel(null);
+      ed.current = null;
       e.dispose();
       m?.original.dispose();
       m?.modified.dispose();
@@ -172,6 +174,8 @@ export function MonacoFile({
     return () => {
       sub.dispose();
       const m = e.getModel();
+      e.setModel(null);
+      ed.current = null;
       e.dispose();
       m?.dispose();
     };

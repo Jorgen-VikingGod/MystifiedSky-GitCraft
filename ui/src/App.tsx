@@ -1,3 +1,4 @@
+import { WatchManager } from "@/lib/watch-manager";
 import { startPersistence, preferenceCloseGuard } from "@/lib/persistence";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useShallow } from "zustand/react/shallow";
@@ -77,14 +78,14 @@ function LazyRepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
 }
 
 export function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
-  const s = useStore(useShallow((s) => ({ settings: s.settings, setUi: s.setUi, setSettings: s.setSettings, closeTab: s.closeTab })));
+  const s = useStore(useShallow((s) => ({ showTerminal: s.settings.showTerminal, showLeft: s.settings.showLeft, leftWidth: s.settings.leftWidth, showRight: s.settings.showRight, rightWidth: s.settings.rightWidth, setUi: s.setUi, setSettings: s.setSettings, closeTab: s.closeTab })));
   const ui = useTabUi(tab.id);
   const q = useRepo(tab.path, active);
   const viewing = !!(ui?.diff || ui?.history || ui?.conflict || ui?.rebase);
   const [peek, setPeek] = useState(false);
   useEffect(() => setPeek(false), [viewing]);
   const repo = q.isError ? undefined : q.data;
-  const set = s.settings;
+  const set = s;
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
   const [terminalOpened, setTerminalOpened] = useState(false);
@@ -212,6 +213,11 @@ function useStartup() {
       const opts = await api.launchOptions().catch(() => ({ screenshot: false, shot_view: null as string | null, version: "0.1.0", metrics: DEFAULT_METRICS }));
       useStore.setState({ screenshot: opts.screenshot, version: opts.version, metrics: opts.metrics });
       if (opts.screenshot) {
+        if (opts.shot_view === "validation") {
+          const verification = await import("@/lib/desktop-verification");
+          verification.install();
+          return;
+        }
         const sample = await (opts.shot_view === "conflict" ? api.conflictSample() : api.sampleRepo()).catch(() => null);
         if (sample) await openRepoPath(sample);
         // Wait until the repository has drawn, then about 120 frames, then take the picture.
@@ -347,10 +353,14 @@ function useAutoFetch() {
 /** Watch open repositories and refresh when files change. */
 function useWatchers() {
   const tabs = useStore((s) => s.tabs);
-  const watched = useRef(new Set<string>());
+  const manager = useRef<WatchManager | null>(null);
+  if (!manager.current) manager.current = new WatchManager(api.watchRepo, api.unwatchRepo,
+    (path, error) => useStore.getState().toast(false, `File watching failed for ${path}: ${String(error)}. Retrying up to three times; reopen the tab to try again.`), releaseRepo);
+  useEffect(() => () => manager.current?.update([]), []);
   useEffect(() => {
     const un = listen<import("@/lib/api").JobProgress>("job-progress", (e) => {
       useStore.setState({ job: e.payload.text ? e.payload : null });
+      if (e.payload.text) void api.acknowledgeJob(e.payload.id).catch(() => undefined);
     });
     return () => {
       un.then((f) => f());
@@ -365,13 +375,7 @@ function useWatchers() {
     };
   }, []);
   useEffect(() => {
-    const now = new Set(tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!));
-    for (const p of now) if (!watched.current.has(p)) api.watchRepo(p).catch(() => {});
-    for (const p of watched.current) if (!now.has(p)) {
-      releaseRepo(p);
-      api.unwatchRepo(p).catch(() => {});
-    }
-    watched.current = now;
+    manager.current!.update(tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!));
   }, [tabs]);
 }
 
@@ -428,7 +432,7 @@ function useShortcuts() {
             const sha = sel.sha;
             const parent = repo.commits.find((c) => c.sha === sha)?.parents[0] ?? null;
             void queryClient
-              .fetchQuery({ queryKey: ["commitFiles", repo.path, sha], queryFn: () => api.commitFiles(repo.path, sha), staleTime: Infinity })
+              .fetchQuery({ queryKey: ["commitFiles", repo.path, sha], queryFn: ({ signal }) => api.commitFiles(repo.path, sha, signal), staleTime: Infinity })
               .then((files) => {
                 const cur = tabUi(tab.id);
                 if (files[0] && !cur.diff && cur.selection.type === "commit" && cur.selection.sha === sha)

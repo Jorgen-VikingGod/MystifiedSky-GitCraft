@@ -1,9 +1,10 @@
+import { useShallow } from "zustand/react/shallow";
 import type { ReactNode } from "react";
 import { SERVICES, integrations } from "@/lib/integrations";
 import { PreferencesScreen } from "./prefs/Preferences";
 import { RepoManagementDialog } from "./RepoManagement";
 import { AddRemoteDialog } from "./AddRemoteDialog";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
 import { Cloud, Github, Gitlab, Globe, Laptop, LoaderCircle, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
@@ -302,7 +303,7 @@ function FolderRow({ label, value, onChange, title }: { label: string; value: st
 }
 
 function CloneDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setBusy: st.setBusy, setSettings: st.setSettings, toast: st.toast }))), settings: useStore(useShallow((st) => ({ defaultCloneFolder: st.settings.defaultCloneFolder }))) };
   const [source, setSource] = useState("url");
   const [url, setUrl] = useState("");
   const [dir, setDir] = useState(s.settings.defaultCloneFolder);
@@ -427,13 +428,14 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
 
 /** "GitCraft will help you find stuff on {service} when cloning": your repositories on connected services. */
 function HostedRepoPicker({ onPick, service }: { onPick: (url: string) => void; service?: string }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setDialog: st.setDialog }))), settings: useStore(useShallow((st) => ({ integrations: st.settings.integrations }))) };
   const st = useQuery({ queryKey: ["integrationStatuses", s.settings.integrations], queryFn: () => integrations.statuses(SERVICES.filter((x) => x.kind === "hosting").map((x) => x.id)) });
   const connected = (st.data ?? []).filter((x) => x.connected && !x.error);
   const [svc, setSvc] = useState("");
   const [q, setQ] = useState("");
   const id = service ?? (svc || connected[0]?.id || "");
-  const repos = useQuery({ queryKey: ["hostedRepos", id], queryFn: () => integrations.repos(id), enabled: !!id });
+  const repos = useInfiniteQuery({ queryKey: ["hostedReposPages", id], initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => hostingApi.reposPage(id, pageParam, signal), getNextPageParam: (page) => page.cursor ?? undefined, enabled: !!id });
   if (service ? !connected.some((c) => c.id === service) : !connected.length)
     return (
       <div className="text-[12px] text-fg3 mb-2">
@@ -443,7 +445,7 @@ function HostedRepoPicker({ onPick, service }: { onPick: (url: string) => void; 
         </button>
       </div>
     );
-  const list = (repos.data ?? []).filter((r) => r.full_name.toLowerCase().includes(q.toLowerCase()));
+  const list = [...new Map((repos.data?.pages.flatMap((page) => page.items) ?? []).map((repo) => [repo.full_name, repo])).values()].filter((r) => r.full_name.toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="mb-3">
       <div className="flex gap-2 mb-1.5">
@@ -458,20 +460,22 @@ function HostedRepoPicker({ onPick, service }: { onPick: (url: string) => void; 
       </div>
       <div className="h-[150px] overflow-auto rounded border border-white/8 bg-white/[0.02]">
         {repos.isLoading && <div className="p-2 text-[12px] text-fg3">Loading…</div>}
-        {repos.error && <div className="p-2 text-[12px] text-[#ef7a76]">{String(repos.error)}</div>}
+        {repos.error && <div className="p-2 text-[12px] text-[#ef7a76]">{String(repos.error)} <button onClick={() => repos.isFetchNextPageError ? repos.fetchNextPage() : repos.refetch()}>Retry</button></div>}
         {list.map((r) => (
           <button key={r.full_name} className="w-full flex items-center gap-2 px-2 h-[26px] text-left text-[12.5px] hover:bg-hoverrow" title={r.description} onClick={() => onPick(r.https_url || r.ssh_url)}>
             <span className="truncate text-fg flex-1">{r.full_name}</span>
             {r.private && <span className="text-[11px] text-fg3">private</span>}
           </button>
         ))}
+        {repos.hasNextPage && <button className="w-full text-link text-[12px] py-1" disabled={repos.isFetchingNextPage} onClick={() => repos.fetchNextPage()}>{repos.isFetchingNextPage ? "Loading more…" : "Load more repositories"}</button>}
+        {!list.length && !repos.isLoading && !repos.isError && <div className="p-2 text-fg3 text-[12px]">No matches in loaded repositories.{repos.hasNextPage ? " Load more to search the next page, or paste a repository URL." : ""}</div>}
       </div>
     </div>
   );
 }
 
 function InitDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ toast: st.toast }))), settings: useStore(useShallow((st) => ({ defaultBranch: st.settings.defaultBranch, defaultCloneFolder: st.settings.defaultCloneFolder }))) };
   const [name, setName] = useState("");
   const [dir, setDir] = useState(s.settings.defaultCloneFolder);
   const [error, setError] = useState("");
@@ -616,7 +620,7 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 function ShortcutsDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setSettings: st.setSettings }))), settings: useStore(useShallow((st) => ({ keybindings: st.settings.keybindings }))) };
   const [filter, setFilter] = useState("");
   const [recording, setRecording] = useState<string | null>(null);
   const groups: Group[] = ["Repo Actions", "Navigation", "Command Palette", "UI"];
@@ -706,7 +710,7 @@ function PlanDialog({ onClose }: { onClose: () => void }) {
 }
 
 export function PrefsDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, setDialog: st.setDialog, setSettings: st.setSettings, settings: st.settings, tabs: st.tabs })));
   const set = s.settings;
   const tab = s.tabs.find((t) => t.id === s.activeId);
   return (
@@ -897,10 +901,10 @@ function FormDialog({
 
 /** "Clean Up Local Branches": filter by age, merge status and remote status, pick, delete. */
 function CleanupDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path! : "";
-  const q = useQuery({ queryKey: ["cleanup", path], queryFn: () => api.cleanupList(path), enabled: !!path });
+  const q = useQuery({ queryKey: ["cleanup", path], queryFn: ({ signal }) => api.cleanupList(path, signal), enabled: !!path });
   const [days, setDays] = useState("0");
   const [merge, setMerge] = useState<"any" | "merged" | "unmerged">("merged");
   const [up, setUp] = useState<"any" | "has" | "none">("any");
@@ -1083,10 +1087,10 @@ function MessageDialog({ title, label, value, confirm, help, generate, onSubmit,
 
 /** Ctrl+Shift+H: search for a file to view its history / blame. */
 function FileFinder({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path : undefined;
-  const q = useQuery({ queryKey: ["tracked", path], queryFn: () => api.trackedFiles(path!), enabled: !!path });
+  const q = useQuery({ queryKey: ["tracked", path], queryFn: ({ signal }) => api.trackedFiles(path!, signal), enabled: !!path });
   const [text, setText] = useState("");
   const [idx, setIdx] = useState(0);
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1184,10 +1188,10 @@ function CopyErrorButton({ text }: { text: string }) {
 
 /** Sparse checkout: keep only some folders in the working folder. */
 function SparseDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path! : "";
-  const q = useQuery({ queryKey: ["sparse", path], queryFn: () => api.sparseInfo(path), enabled: !!path });
+  const q = useQuery({ queryKey: ["sparse", path], queryFn: ({ signal }) => api.sparseInfo(path, signal), enabled: !!path });
   const [text, setText] = useState<string | null>(null);
   const value = text ?? (q.data?.patterns.join("\n") || "/src/\n/docs/");
   return (
@@ -1234,10 +1238,10 @@ function SparseDialog({ onClose }: { onClose: () => void }) {
 
 /** Identity, credentials, SSH keys and GPG signing (Git's own settings, so other tools agree). */
 export function AccountsDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs, toast: st.toast })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path! : null;
-  const q = useQuery({ queryKey: ["accounts", path], queryFn: () => api.accountInfo(path) });
+  const q = useQuery({ queryKey: ["accounts", path], queryFn: ({ signal }) => api.accountInfo(path, signal) });
   const a = q.data;
   const [edits, setEdits] = useState<Record<string, string>>({});
   const val = (k: string, fallback: string) => edits[k] ?? fallback;
@@ -1336,7 +1340,7 @@ export function AccountsDialog({ onClose }: { onClose: () => void }) {
 
 /** Profiles: separate settings and Git identity, switched from the profile button. */
 export function ProfilesPanel() {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeProfile: st.activeProfile, profiles: st.profiles })));
   const [name, setName] = useState("");
   const [gitName, setGitName] = useState("");
   const [email, setEmail] = useState("");
@@ -1468,7 +1472,7 @@ function ProfilesDialog({ onClose }: { onClose: () => void }) {
 
 /** Local workspaces: named groups of repositories you open together. */
 function WorkspacesDialog({ onClose }: { onClose: () => void }) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ tabs: st.tabs }))), settings: useStore(useShallow((st) => ({ recents: st.settings.recents, workspaces: st.settings.workspaces }))) };
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const candidates = [...new Set([...s.tabs.filter((t) => t.kind === "repo").map((t) => t.path!), ...s.settings.recents])];
@@ -1523,7 +1527,7 @@ function WorkspacesDialog({ onClose }: { onClose: () => void }) {
 
 /** GitHub / GitLab tokens, with a shortcut to shared AI connection preferences. */
 function Integrations() {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setDialog: st.setDialog, setSettings: st.setSettings, toast: st.toast }))), settings: useStore(useShallow((st) => ({ gitlabHost: st.settings.gitlabHost }))) };
   const q = useQuery({ queryKey: ["hostingStatus", s.settings.gitlabHost], queryFn: hostingApi.status });
   const [vals, setVals] = useState<Record<string, string>>({});
   const save = async (name: "github-token" | "gitlab-token", value: string) => {

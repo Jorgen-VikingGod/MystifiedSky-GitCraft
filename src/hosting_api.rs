@@ -42,6 +42,7 @@ pub struct Issue {
 
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Comment {
+    pub id: String,
     pub author: String,
     pub body: String,
     pub created: String,
@@ -286,6 +287,10 @@ pub fn pull_requests(r: &RemoteRepo) -> Result<Vec<PullRequest>, String> {
     })
 }
 
+pub fn pull_requests_page(r: &RemoteRepo, cursor: Option<&str>) -> Result<crate::pagination::Page<Vec<PullRequest>>, String> {
+    crate::pagination::one_page(cursor.map(str::to_owned), || pull_requests(r))
+}
+
 pub fn pull_request(r: &RemoteRepo, number: u64) -> Result<PullRequest, String> {
     let base = api_base(&r.service);
     Ok(match r.service.as_str() {
@@ -356,6 +361,22 @@ pub fn issues(r: &RemoteRepo) -> Result<Vec<Issue>, String> {
 }
 
 /// Issues from a separate tracker (Jira, Trello, Azure Boards): for a project / board, or the ones assigned to you.
+fn azure_workitem_page(url: &str, endpoint: &str, org: &str, scope: &str, mut fetch: impl FnMut(&str, &str, Option<Value>) -> Result<Value, String>) -> Result<crate::hosting::HttpPage, String> {
+    let fields = "System.Title,System.State,System.ChangedDate,System.Tags,System.CreatedBy,System.TeamProject";
+                let after = crate::pagination::parameter(url, "gitcraftAfter").and_then(|v| v.parse::<u64>().ok()).ok_or("Invalid work-item continuation")?;
+                let wiql = format!("Select [System.Id] From WorkItems Where {scope} And [System.State] Not In ('Closed','Done','Removed') And [System.Id] > {after} Order By [System.Id] Asc");
+                let ids = fetch("POST", endpoint, Some(json!({"query":wiql})))?;
+                let ids: Vec<u64> = list(&ids["workItems"]).iter().filter_map(|v| v["id"].as_u64()).collect();
+                if ids.iter().any(|id| *id <= after) { return Err("The service returned a repeated work-item page.".into()); }
+                let next = if ids.len() == 50 { ids.iter().max().map(|id| crate::pagination::with_parameter(url, "gitcraftAfter", &id.to_string())) } else { None };
+                let mut value = if ids.is_empty() { json!({"value":[]}) } else {
+                    let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+                    fetch("GET", &format!("https://dev.azure.com/{org}/_apis/wit/workitems?ids={ids}&fields={fields}&api-version=7.1"), None)?
+                };
+                if let Some(next) = next { value["next"] = Value::String(next); }
+                Ok(crate::hosting::HttpPage { value, link: None, next_page: None, continuation: None })
+}
+
 pub fn tracker_issues(t: &Tracker, mine: bool) -> Result<Vec<Issue>, String> {
     let id = t.kind.as_str();
     match id {
@@ -379,15 +400,10 @@ pub fn tracker_issues(t: &Tracker, mine: bool) -> Result<Vec<Issue>, String> {
                 return Err("Set your Azure DevOps organization in Preferences > Integrations.".into());
             }
             let scope = if mine || t.project.trim().is_empty() { "[System.AssignedTo] = @Me".to_string() } else { format!("[System.TeamProject] = '{}'", t.project.replace('\'', "''")) };
-            let wiql = format!("Select [System.Id] From WorkItems Where {scope} And [System.State] Not In ('Closed','Done','Removed') Order By [System.ChangedDate] Desc");
             let a = auth("azure")?;
-            let v = http("POST", &format!("https://dev.azure.com/{org}/_apis/wit/wiql?api-version=7.1&$top=50"), &a, Some(json!({ "query": wiql })))?;
-            let ids: Vec<String> = list(&v["workItems"]).iter().take(50).map(|w| s(&w["id"])).collect();
-            if ids.is_empty() {
-                return Ok(vec![]);
-            }
-            let fields = "System.Title,System.State,System.ChangedDate,System.Tags,System.CreatedBy,System.TeamProject";
-            let items = http("GET", &format!("https://dev.azure.com/{org}/_apis/wit/workitems?ids={}&fields={fields}&api-version=7.1", ids.join(",")), &a, None)?;
+            let endpoint = format!("https://dev.azure.com/{org}/_apis/wit/wiql?api-version=7.1&$top=50");
+            let start = format!("{endpoint}&gitcraftScope={}&gitcraftAfter=0", q(&scope));
+            let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, &endpoint, &org, &scope, |method, url, body| http(method, url, &a, body)))?;
             Ok(list(&items["value"])
                 .iter()
                 .map(|w| {
@@ -444,33 +460,33 @@ pub fn create_issue(r: Option<&RemoteRepo>, t: &Tracker, title: &str, body: &str
 
 pub fn comments(r: &RemoteRepo, number: u64) -> Result<Vec<Comment>, String> {
     let b = api_base(&r.service);
-    let c = |author: String, body: String, created: String| Comment { author, body, created };
+    let c = |id: String, author: String, body: String, created: String| Comment { id, author, body, created };
     Ok(match r.service.as_str() {
         "github" | "github-enterprise" => list(&rget(r, &format!("{b}/repos/{}/issues/{number}/comments?per_page=100", r.path))?)
             .iter()
-            .map(|x| c(s(&x["user"]["login"]), s(&x["body"]), s(&x["created_at"])))
+            .map(|x| c(s(&x["id"]), s(&x["user"]["login"]), s(&x["body"]), s(&x["created_at"])))
             .collect(),
         "gitlab" | "gitlab-self" => list(&rget(r, &format!("{b}/projects/{}/merge_requests/{number}/notes?sort=asc&per_page=100", enc(&r.path)))?)
             .iter()
             .filter(|x| !x["system"].as_bool().unwrap_or(false))
-            .map(|x| c(s(&x["author"]["username"]), s(&x["body"]), s(&x["created_at"])))
+            .map(|x| c(s(&x["id"]), s(&x["author"]["username"]), s(&x["body"]), s(&x["created_at"])))
             .collect(),
         "bitbucket" => list(&rget(r, &format!("{b}/repositories/{}/pullrequests/{number}/comments?pagelen=100", r.path))?["values"])
             .iter()
             .filter(|x| !x["deleted"].as_bool().unwrap_or(false))
-            .map(|x| c(s(&x["user"]["display_name"]), s(&x["content"]["raw"]), s(&x["created_on"])))
+            .map(|x| c(s(&x["id"]), s(&x["user"]["display_name"]), s(&x["content"]["raw"]), s(&x["created_on"])))
             .collect(),
         "bitbucket-server" => list(&rget(r, &format!("{b}{}/pull-requests/{number}/activities?limit=100", bbs_path(r)))?["values"])
             .iter()
             .filter(|x| x["action"] == "COMMENTED")
-            .map(|x| c(s(&x["comment"]["author"]["displayName"]), s(&x["comment"]["text"]), ms_to_iso(&x["comment"]["createdDate"])))
+            .map(|x| c(s(&x["comment"]["id"]), s(&x["comment"]["author"]["displayName"]), s(&x["comment"]["text"]), ms_to_iso(&x["comment"]["createdDate"])))
             .rev()
             .collect(),
         "azure" => list(&rget(r, &azure_url(r, &format!("/pullRequests/{number}/threads?api-version=7.1")))?["value"])
             .iter()
-            .flat_map(|t| list(&t["comments"]))
-            .filter(|x| x["commentType"] == "text")
-            .map(|x| c(s(&x["author"]["displayName"]), s(&x["content"]), s(&x["publishedDate"])))
+            .flat_map(|t| list(&t["comments"]).into_iter().map(move |x| (t, x)))
+            .filter(|(_, x)| x["commentType"] == "text")
+            .map(|(t, x)| c(format!("{}:{}", s(&t["id"]), s(&x["id"])), s(&x["author"]["displayName"]), s(&x["content"]), s(&x["publishedDate"])))
             .collect(),
         _ => vec![],
     })
@@ -617,6 +633,12 @@ pub struct Launchpad {
 }
 
 /// Open pull requests and issues that involve you, across every connected service.
+pub fn launchpad_page(service: &str, cursor: Option<&str>) -> Result<crate::pagination::Page<Launchpad>, String> {
+    if !crate::hosting::SERVICES.contains(&service) { return Err("Unknown integration".into()); }
+    let binding = format!("launchpad:{service}:{}", api_base(service));
+    crate::pagination::composite_page(&binding, cursor, || Ok(launchpad_service(service)))
+}
+
 pub fn launchpad(_gitlab_host: &str) -> Launchpad {
     parallel_launchpad(&crate::hosting::SERVICES, launchpad_service)
 }
@@ -625,7 +647,7 @@ fn parallel_launchpad(ids: &[&str], work: impl Fn(&str) -> Launchpad + Sync) -> 
     let mut out = Launchpad::default();
     for group in ids.chunks(4) {
         std::thread::scope(|scope| {
-            let tasks: Vec<_> = group.iter().map(|id| { let work = &work; scope.spawn(move || work(id)) }).collect();
+            let tasks: Vec<_> = group.iter().map(|id| { let work = &work; scope.spawn(crate::read_jobs::inherit(move || work(id))) }).collect();
             for task in tasks {
                 match task.join() {
                     Ok(result) => { out.pull_requests.extend(result.pull_requests); out.issues.extend(result.issues); out.errors.extend(result.errors); },
@@ -694,7 +716,7 @@ fn launchpad_service(only: &str) -> Launchpad {
     let org = config().azure_org.trim().to_string();
     if connected("azure") && !org.is_empty() {
         if let Ok(a) = auth("azure") {
-            match http("GET", &format!("https://dev.azure.com/{org}/_apis/git/pullrequests?searchCriteria.status=active&$top=50&api-version=7.1"), &a, None) {
+            match crate::pagination::collect(&format!("https://dev.azure.com/{org}/_apis/git/pullrequests?searchCriteria.status=active&$top=50&api-version=7.1"), |url| crate::hosting::http_page("GET", url, &a, None)) {
                 Ok(v) => out.pull_requests.extend(list(&v["value"]).iter().map(|p| {
                     let mut pr = azure_pr(p, "");
                     pr.url = format!("https://dev.azure.com/{org}/{}/_git/{}/pullrequest/{}", s(&p["repository"]["project"]["name"]), s(&p["repository"]["name"]), pr.number);
@@ -809,6 +831,28 @@ fn _uses(_: Auth) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_workitem_keyset_pages_do_not_truncate_or_send_virtual_parameters() {
+        let endpoint = "https://dev.azure.com/fixture/_apis/wit/wiql?api-version=7.1&$top=50";
+        let start = format!("{endpoint}&gitcraftScope=fixture&gitcraftAfter=0");
+        let mut queries = Vec::new();
+        let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, endpoint, "fixture", "[System.AssignedTo] = @Me", |method, url, body| {
+            assert!(!url.contains("gitcraft"));
+            if method == "POST" {
+                let query = body.unwrap()["query"].as_str().unwrap().to_owned();
+                let after = if query.contains("> 50 ") { 50 } else { 0 };
+                queries.push(query);
+                Ok(json!({"workItems": ((after+1)..=(if after==0 {50} else {73})).map(|id| json!({"id":id})).collect::<Vec<_>>()}))
+            } else {
+                let ids = crate::pagination::parameter(url, "ids").unwrap();
+                Ok(json!({"value": ids.split(',').map(|id| json!({"id":id.parse::<u64>().unwrap()})).collect::<Vec<_>>()}))
+            }
+        })).unwrap();
+        assert_eq!(items["value"].as_array().unwrap().len(), 73);
+        assert_eq!(queries.len(), 2);
+        assert!(queries[1].contains("[System.Id] > 50 Order By [System.Id] Asc"));
+    }
 
     #[test]
     fn maps_api_answers() {

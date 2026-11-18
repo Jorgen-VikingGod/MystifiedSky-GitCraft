@@ -45,12 +45,13 @@ const commit=(id:string)=>({sha:sha(id),parents:[],author:"Fixture",email:"fixtu
 let repo:any;
 let tabId:string;
 function reset(){
+  window.scrollTo(0, 0);
   root.unmount();queryClient.clear();document.getElementById("test-root")!.innerHTML="";root=createRoot(document.getElementById("test-root")!);
   useStore.setState({...initial,settings:{...DEFAULT_SETTINGS,autoUpdate:false,autoFetchMin:0,wordWrap:true,keepGitconfigUpdated:false},tabs:[],ui:{},drafts:{},dialog:null,notices:[],toasts:[]},true);
   useStore.getState().openRepoTab("/verification/repo","verification");tabId=useStore.getState().activeId;
   repo={path:"/verification/repo",name:"verification",commits:[commit("a")],refs:[],stashes:[],worktrees:[],submodules:[],remotes:["origin"],head_branch:"main",head_sha:sha("a"),status:{staged:[],unstaged:[],conflicted:false},state_note:null,has_more:false,history_cursor:null,merge_msg:null,conflict_labels:null,graph:{rows:[{col:0,color:0,up:[],down:[],merge:false}],width:1},undo:{undo:null,redo:null}};
   calls.length=0;
-  handlers={open_repo:()=>repo,repo_status:()=>repo.status,run_action:()=>({ok:true,message:"Fixture operation complete"}),repo_remote:()=>null,lfs_info:()=>({available:false,patterns:[],locks:[]}),integration_statuses:({ids})=>ids.map((id:string)=>({id,connected:true,account:"fixture",error:null})),account_info:()=>({name:"Fixture",email:"fixture@example.invalid",ssh_keys:[],gpg_keys:[],gpg:true}),git_config_get:()=>({}),pull_requests:()=>[],issues:()=>[]};
+  handlers={pr_comments_page:()=>({items:[],cursor:null}), launchpad_page:()=>({items:{pull_requests:[],issues:[],errors:[]},cursor:null}), open_repo:()=>repo,repo_status:()=>repo.status,run_action:()=>({ok:true,message:"Fixture operation complete"}),repo_remote:()=>null,lfs_info:()=>({available:false,patterns:[],locks:[]}),integration_statuses:({ids})=>ids.map((id:string)=>({id,connected:true,account:"fixture",error:null})),account_info:()=>({name:"Fixture",email:"fixture@example.invalid",ssh_keys:[],gpg_keys:[],gpg:true}),git_config_get:()=>({}),pull_requests:()=>[],issues:()=>[]};
 }
 const results:any[]=[];
 async function test(id:string,run:()=>Promise<void>){reset();const start=performance.now();try{await run();results.push({id,status:"passed",milliseconds:Math.round(performance.now()-start)});}catch(error){results.push({id,status:"failed",error:String(error)});} }
@@ -172,7 +173,7 @@ await test("O017 session grouping reused across filter edits",async()=>{
   repo.worktrees=Array.from({length:100},(_,i)=>({path:`/fixture/worktree-${i}`,branch:`branch-${i}`,locked:false}));
   let pathReads=0;const sessions=Array.from({length:5000},(_,i)=>({id:`session-${i}`,agent:"codex",title:`Session ${i}`,status:"finished",time:1,get path(){pathReads++;return `/fixture/worktree-${i%100}`;}}));
   handlers.agent_sessions=()=>sessions;handlers.repo_status=()=>repo.status;
-  mount(<AgentsView repo={repo} tabId={tabId}/>);await until(()=>document.body.textContent?.includes("Session 4999")??false,"session cards");
+  mount(<AgentsView repo={repo} tabId={tabId}/>);await until(()=>document.body.textContent?.includes("Session 99")??false,"session cards");
   const reads=pathReads;document.querySelector<HTMLButtonElement>('[title="Filter worktrees and sessions"]')!.click();await sleep(20);
   input(document.querySelector<HTMLInputElement>('[aria-label="Filter worktrees and sessions"]')!,"Session 4999");await sleep(20);
   assert(pathReads===reads,`Filter regrouped ${pathReads-reads} session paths`);assert(document.body.textContent?.includes("Session 4999"),"Matching session hidden");
@@ -423,10 +424,207 @@ await test("graph columns resize, align, persist and reset",async()=>{
     await until(()=>Object.keys(useStore.getState().settings.graphColumnWidths).length===0,"all column widths reset");
   } finally {await flushPersistence();stop();}
 });
+
+await test("B100 filtered linked worktrees keep identity and open", async () => {
+  repo.worktrees = [{path: repo.path, branch: "main", locked: false}, {path: "/verification/topic", branch: "topic", locked: false}];
+  mount(<LeftPanel repo={repo} tabId={tabId} onSelectSha={()=>{}}/>);
+  const field = document.querySelector<HTMLInputElement>('input[placeholder*="Filter"]')!;
+  assert(field, "Worktree filter missing"); input(field, "topic");
+  await until(() => !![...document.querySelectorAll('span')].find(e => e.textContent === "topic"), "filtered worktree");
+  assert(!document.body.textContent?.includes("main worktree"), "Linked checkout relabeled main");
+  const row = document.querySelector<HTMLElement>('[title="/verification/topic"]')!;
+  row.dispatchEvent(new MouseEvent("contextmenu", {bubbles:true,cancelable:true,button:2,clientX:100,clientY:100}));
+  const menu = (text: string) => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(e => e.textContent?.trim() === text);
+  await until(() => !!menu("Lock worktree"), "linked lock action");
+  assert(menu("Remove worktree") && !menu("Remove worktree")!.hasAttribute("data-disabled"), "Linked removal unavailable");
+  menu("Lock worktree")!.click(); await until(() => useStore.getState().dialog?.kind === "form", "lock form"); useStore.getState().setDialog(null);
+  row.querySelector("button")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await until(() => calls.some(c => c.command === "open_repo" && c.args.path === "/verification/topic"), "linked checkout opened");
+  repo = {...repo, worktrees: [repo.worktrees[0], {...repo.worktrees[1], locked:true}]};
+  mount(<LeftPanel repo={repo} tabId={tabId} onSelectSha={()=>{}}/>);
+  document.querySelector<HTMLElement>('[title="/verification/topic"]')!.dispatchEvent(new MouseEvent("contextmenu", {bubbles:true,cancelable:true,button:2,clientX:100,clientY:100}));
+  await until(() => !!menu("Unlock worktree"), "linked unlock action");
+  assert(menu("Remove worktree")!.hasAttribute("data-disabled"), "Locked removal enabled");
+});
+await test("B101 history failure retry and real empty state", async () => {
+  handlers.file_history = () => Promise.reject("fixture unreadable object");
+  mount(<HistoryView repo={repo} tabId={tabId} file="a.txt" mode="history" sha={null}/>);
+  await until(() => !!button("Retry"), "history error retry");
+  assert(!document.body.textContent?.includes("No commits touch this file"), "Error rendered as empty history");
+  handlers.file_history = () => []; button("Retry")!.click();
+  await until(() => document.body.textContent?.includes("No commits touch this file") ?? false, "empty history after recovery");
+});
+await test("B102 avatars recover on reconnect and honor initials", async () => {
+  const { Avatar } = await import("../../src/components/Icons");
+  let attempts = 0;
+  const observer = new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) if (node instanceof HTMLImageElement) attempts++; });
+  observer.observe(document.getElementById("test-root")!, {childList:true,subtree:true});
+  try {
+    mount(<Avatar name="Avatar Fixture" email="avatar-retry@example.invalid"/>);
+    await until(() => attempts > 0, "avatar request");
+    document.querySelector('img')?.dispatchEvent(new Event("error")); await sleep(20);
+    const before = attempts;
+    mount(<div/>); mount(<Avatar name="Avatar Fixture" email=" AVATAR-RETRY@example.invalid "/>); await sleep(20);
+    assert(attempts === before, "Normalized failure did not back off");
+    window.dispatchEvent(new Event("online"));
+    await until(() => attempts > before, "avatar reconnect retry");
+    useStore.getState().setSettings({authorInitials: true}); await sleep(20);
+    assert(!document.querySelector('img'), "Initials mode requested image");
+  } finally { observer.disconnect(); }
+});
+
+await test("O027 50000 blame lines stay bounded and navigate", async () => {
+  handlers.file_history = () => [];
+  handlers.blame = () => Array.from({length: 50000}, (_, i) => ({sha: sha("a"), author: "Fixture", time: 1, summary: "Commit", line: i + 1, text: `line ${i + 1}`}));
+  mount(<div style={{height: 400, width: 900}}><HistoryView repo={repo} tabId={tabId} file="a.txt" mode="blame" sha={null}/></div>);
+  await until(() => !!document.querySelector('[aria-label="Blame lines"] [data-virtual-row]'), "blame rows");
+  assert(document.querySelectorAll('[data-virtual-row]').length < 100, "Blame DOM budget exceeded");
+  const scroller = document.querySelector<HTMLElement>('[aria-label="Blame lines"]')!;
+  const scrollStart = performance.now();
+  scroller.scrollTop = scroller.scrollHeight; scroller.dispatchEvent(new Event("scroll"));
+  await until(() => !!document.querySelector('[data-virtual-row="49999"]'), "last blame line");
+  const scrollMs = performance.now() - scrollStart;
+  const hoverStart = performance.now();
+  document.querySelector('[data-virtual-row="49999"]')!.dispatchEvent(new MouseEvent("mouseover", {bubbles: true})); await sleep(0);
+  results.push({id:"O027 viewport sample",status:"measurement",rows:document.querySelectorAll('[data-virtual-row]').length, elements:document.querySelectorAll('[aria-label="Blame lines"] *').length, scrollMs, hoverMs:performance.now()-hoverStart, jsHeapBytes:(performance as any).memory?.usedJSHeapSize});
+  assert(document.body.textContent?.includes("line 50000"), "Original line numbers lost");
+  button("Copy file text")!.click();
+});
+await test("O030 archive expansion filtering and keyboard preserve IDs", async () => {
+  handlers.agent_sessions = () => Array.from({length: 5000}, (_, i) => ({id: `session-${i}`, agent: "codex", path: repo.path, title: `Archive ${i}`, status: "finished", modified: 1}));
+  mount(<AgentsView repo={repo} tabId={tabId}/>);
+  await until(() => !!button("Browse all 5000 sessions"), "archive available");
+  assert([...document.querySelectorAll('button')].filter(b => b.textContent === "Resume").length === 5, "Recent archive unbounded");
+  button("Browse all 5000 sessions")!.click(); await sleep(50);
+  assert(document.querySelectorAll('[data-virtual-row]').length < 50, "Expanded archive unbounded");
+  const first = document.querySelector<HTMLButtonElement>('[data-virtual-row="0"] button')!;
+  first.focus(); first.dispatchEvent(new KeyboardEvent("keydown", {key: "End", bubbles: true}));
+  await until(() => !!document.querySelector('[data-virtual-row="4999"]'), "archive End navigation");
+  assert(document.body.textContent?.includes("Archive 4999"), "Wrong session at End");
+});
+await test("O028 worktree status reads stay within four IPC calls", async () => {
+  repo.worktrees = Array.from({length: 30}, (_, i) => ({path: `/verification/wt-${i}`, branch: `wt-${i}`, locked: false}));
+  const release: Array<() => void> = []; let active = 0, peak = 0;
+  handlers.repo_status = () => new Promise(resolve => { active++; peak = Math.max(peak, active); release.push(() => { active--; resolve(repo.status); }); });
+  handlers.agent_sessions = () => [];
+  mount(<div style={{height:400, display:"flex", flexDirection:"column"}}><AgentsView repo={repo} tabId={tabId}/></div>);
+  await until(() => release.length > 0, "visible status reads"); await sleep(50);
+  assert(peak <= 4, `Status IPC peak ${peak}`);
+  mount(<div/>); const before = calls.filter(c => c.command === "repo_status").length;
+  release.forEach(f => f()); await sleep(50);
+  assert(calls.filter(c => c.command === "repo_status").length === before, "Unmount retained queued reads");
+});
+await test("S003 history skips unrelated store updates", async () => {
+  handlers.file_history = () => [];
+  let commits = 0;
+  mount(<React.Profiler id="history" onRender={() => commits++}><HistoryView repo={repo} tabId={tabId} file="a.txt" mode="history" sha={null}/></React.Profiler>);
+  await until(() => document.body.textContent?.includes("No commits touch") ?? false, "history settled");
+  const before = commits;
+  for (let i = 0; i < 20; i++) useStore.getState().setDraft(repo.path, {summary: `draft ${i}`});
+  useStore.getState().setSettings({autoFetchMin: 17}); await sleep(30);
+  assert(commits === before, `Unrelated updates caused ${commits - before} history commits`);
+});
+
+await test("O037 initial pages, continuation retry and deduplication", async () => {
+  handlers.repo_remote = () => ({provider:"github",service:"github",host:"github.com",path:"fixture/repo",web:"https://github.com/fixture/repo"});
+  const pr = (number: number) => ({number, title: `Paged PR ${number}`, source:"topic",target:"main", author:"fixture",url:"https://example.invalid/pr",draft:false});
+  let failed = false;
+  handlers.list_prs_page = ({cursor}) => {
+    if (!cursor) return {items:[pr(1)],cursor:"next-fixture"};
+    if (!failed) { failed = true; throw new Error("temporary next-page error"); }
+    return {items:[pr(1),pr(2)],cursor:null};
+  };
+  mount(<LeftPanel repo={repo} tabId={tabId} onSelectSha={()=>{}}/>);
+  await until(() => !![...document.querySelectorAll('button')].find(b => b.textContent?.trim() === "PULL REQUESTS"), "PR section");
+  button("PULL REQUESTS")!.click();
+  await until(() => !!button("Load more pull requests"), "initial page");
+  assert(document.body.textContent?.includes("Paged PR 1"), "Initial page withheld");
+  assert(calls.filter(c => c.command === "list_prs_page").length === 1, "Fetched all pages before displaying");
+  button("Load more pull requests")!.click(); await until(() => !!button("Retry"), "next-page retry");
+  assert(document.body.textContent?.includes("Paged PR 1"), "Failure discarded first page");
+  button("Retry")!.click(); await until(() => document.body.textContent?.includes("Paged PR 2") ?? false, "next-page recovery");
+  assert([...document.querySelectorAll('span')].filter(s => s.textContent === "Paged PR 1").length === 1, "Duplicate PR retained");
+});
+
+await test("O027 wrapped blame rows measure actual heights", async () => {
+  handlers.file_history = () => [];
+  handlers.blame = () => Array.from({length: 1000}, (_, i) => ({sha:sha("a"),author:"Fixture",time:1,summary:"Commit",line:i+1,text: i === 0 ? "wrapped words ".repeat(80) : `line ${i+1}`}));
+  mount(<div style={{height:400,width:650}}><HistoryView repo={repo} tabId={tabId} file="wrapped.txt" mode="blame" sha={null}/></div>);
+  await until(() => !!document.querySelector('[data-virtual-row="0"]'), "wrapped row"); await sleep(50);
+  const first = document.querySelector('[data-virtual-row="0"]')!.getBoundingClientRect();
+  const next = document.querySelector('[data-virtual-row="1"]')!.getBoundingClientRect();
+  assert(first.height > 19, `Wrapping kept one-line height ${first.height}`);
+  assert(Math.abs(next.top - first.bottom) < 1, "Wrapped row overlapped its neighbor");
+});
+
+await test("O037 repository picker loads later pages outside the service selector", async () => {
+  handlers.integration_statuses = ({ids}) => ids.map((id: string) => ({id,label:id,connected:true,account:"fixture",error:null}));
+  const item = (name: string) => ({name,full_name:`fixture/${name}`,description:"",private:false,https_url:`https://example.invalid/fixture/${name}.git`,ssh_url:"",updated:""});
+  handlers.integration_repos_page = ({cursor}) => cursor ? {items:[item("later")],cursor:null} : {items:[item("first")],cursor:"more-repos"};
+  useStore.getState().setDialog({kind:"clone"}); mount(<Dialogs/>);
+  await until(() => !!button("GitHub.com"), "clone GitHub source"); button("GitHub.com")!.click();
+  await until(() => !!button("Load more repositories"), "repository continuation");
+  assert(!button("Load more repositories")!.closest("select"), "Continuation nested in selector");
+  button("Load more repositories")!.click();
+  await until(() => !![...document.querySelectorAll('button')].find(b => b.textContent?.trim() === "fixture/later"), "later repository");
+  button("fixture/later")!.click(); await sleep(20);
+  assert([...document.querySelectorAll('input')].some(i => i.value === "https://example.invalid/fixture/later.git"), "Exact repository URL was lost");
+});
+
+await test("O037 Launchpad shows fast services before slow services and continues", async () => {
+  const { LaunchpadScreen } = await import("../../src/components/StartScreen");
+  useStore.getState().setSettings({authorInitials:true});
+  handlers.integration_statuses = ({ids}) => ids.map((id:string) => ({id,connected:["github","gitlab"].includes(id),error:null}));
+  let release!:(value:any)=>void;
+  const pr = (number:number) => ({number,title:`Launchpad ${number}`,author:"Fixture",repo:"fixture/repo",url:`https://example.invalid/${number}`,updated:"2026-01-01",draft:false});
+  handlers.launchpad_page = ({service,cursor}) => service === "gitlab" ? new Promise(resolve=>{release=resolve;}) : ({items:{pull_requests:cursor?[pr(1),pr(2)]:[pr(1)],issues:[],errors:[]},cursor:cursor?null:"github-next"});
+  mount(<LaunchpadScreen/>);
+  await until(() => document.body.textContent?.includes("Launchpad 1") ?? false, "fast provider first page");
+  assert(!!release, "Slow provider was not scheduled");
+  assert(!document.body.textContent?.includes("Launchpad 3"), "Fixture unexpectedly resolved slow provider");
+  release({items:{pull_requests:[pr(3)],issues:[],errors:[]},cursor:null});
+  await until(() => !!button("Load more results") && !button("Load more results")!.disabled, "provider pages settled");
+  button("Load more results")!.click();
+  await until(() => document.body.textContent?.includes("Launchpad 2") ?? false, "Launchpad continuation");
+  assert([...document.querySelectorAll('span')].filter(s=>s.textContent==="Launchpad 1").length===1,"Duplicate Launchpad row");
+});
+await test("O037 comment pages preserve rows through failure retry and deduplication", async () => {
+  useStore.getState().setSettings({authorInitials:true});
+  handlers.repo_remote=()=>({provider:"github",service:"github",web:"https://example.invalid/fixture"});
+  handlers.pr_details=()=>({number:1,title:"Comment fixture",author:"Fixture",source:"topic",target:"main",draft:false,state:"open",body:"",updated:"",url:"https://example.invalid/pr"});
+  let failed=false;
+  const comment=(id:string)=>({id,author:"Fixture",body:`Comment ${id}`,created:"2026-01-01"});
+  handlers.pr_comments_page=({cursor})=>{if(!cursor)return {items:[comment("one")],cursor:"more-comments"};if(!failed){failed=true;throw new Error("temporary comments error");}return {items:[comment("one"),comment("two")],cursor:null};};
+  mount(<PullRequestView repo={repo} tabId={tabId} number={1}/>);
+  await until(()=>!!button("Load more comments"),"comment continuation");button("Load more comments")!.click();
+  await until(()=>!!button("Retry comments"),"comment retry");assert(document.body.textContent?.includes("Comment one"),"Failed page discarded comments");button("Retry comments")!.click();
+  await until(()=>document.body.textContent?.includes("Comment two")??false,"comments recovered");
+  assert([...document.querySelectorAll('div')].filter(d=>d.textContent==="Comment one").length===1,"Duplicate comment after retry");
+});
+await test("S003 large commit panel ignores unrelated drafts settings and progress", async () => {
+  useStore.getState().setSettings({authorInitials:true});
+  useStore.getState().setUi(tabId,{selection:{type:"commit",sha:repo.commits[0].sha}});
+  handlers.commit_files=()=>Array.from({length:10000},(_,i)=>({path:`file-${i}.txt`,status:"M"}));
+  let commits=0;
+  mount(<div style={{height:600}}><React.Profiler id="commit-panel" onRender={()=>commits++}><RightPanel repo={repo} tabId={tabId}/></React.Profiler></div>);
+  await until(()=>document.body.textContent?.includes("file-0.txt")??false,"large commit files");await sleep(150);const before=commits;
+  for(let i=0;i<20;i++)flushSync(()=>useStore.getState().setDraft("/unrelated/repo",{summary:`draft ${i}`}));
+  flushSync(()=>useStore.getState().setSettings({autoFetchMin:37}));
+  flushSync(()=>useStore.setState({job:{id:"fixture",text:"Progress",percent:20},busy:"Fixture"}));await sleep(30);
+  assert(commits===before,`Large commit panel rendered ${commits-before} unrelated commits`);
+  results.push({id:"S003 commit panel profile",status:"measurement",unrelatedUpdates:22,renderCommits:commits-before});
+});
+await test("O033 JSON worker is registered and validates attached models", async () => {
+  mount(<MonacoFile file="fixture.json" value='{ "number": 1 }' readOnly wordWrap/>);await sleep(300);
+  const worker=await monaco.languages.json.getWorker();
+  const model=monaco.editor.getEditors()[0].getModel()!;const proxy=await worker(model.uri);
+  const diagnostics=await proxy.doValidation(model.uri.toString());assert(diagnostics.length===0,"Valid JSON rejected");
+  model.setValue('{ "number": }');const errors=await proxy.doValidation(model.uri.toString());assert(errors.length>0,"Invalid JSON was not validated");
+});
 const params=new URLSearchParams(location.search);
 const graphPreview=params.has("graphPreview");
 const preview=params.has("publishPreview")||graphPreview;
 if(graphPreview) {reset();repo.commits[0].summary="Adjustable commit-list columns";useStore.getState().setSettings({graphColumnWidths:{refs:200,graph:90,message:650}});mount(<div style={{height:500,width:1200}}><GraphView repo={repo} tabId={tabId}/></div>);await sleep(100);}
-else if(preview) {reset();await remotePanel();button("GitHub")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"preview");}
+else if(preview) {reset();await remotePanel();button("GitHub.com")!.click();await until(()=>!!button("Create remote and push branch")&&!button("Create remote and push branch")!.disabled,"preview");}
 else {root.unmount();queryClient.clear();document.body.innerHTML="";}
 const report=document.createElement("pre");report.id="verification-results";report.hidden=preview;report.textContent=JSON.stringify({results,passed:results.filter(result=>result.status==="passed").length,failed:results.filter(result=>result.status==="failed").length});document.body.append(report);

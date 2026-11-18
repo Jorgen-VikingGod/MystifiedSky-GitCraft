@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { issueIdentity } from "@/lib/hosting";
 import {
   Archive,
@@ -23,11 +24,11 @@ import {
 } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
-import { useStore, usePanelStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { act, confirmThen, openRepoPath, setHiddenMany, toggleHidden } from "@/lib/repo";
 import type { MenuEntry } from "./ui/menu";
 import { openWebLink } from "@/lib/weblinks";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import {
   addRemote,
@@ -56,7 +57,9 @@ type SectionKey = "lfs" | "gitflow" | "local" | "remote" | "worktrees" | "stashe
 
 /** Left panel: branches, remotes, worktrees, stashes, tags and the service sections. */
 export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undefined; tabId: string; onSelectSha: (sha: string) => void }) {
-  const s = usePanelStore();
+  const settings = useStore(useShallow((st) => ({ hidden: st.settings.hidden, solo: st.settings.solo, leftView: st.settings.leftView, showAgentsView: st.settings.showAgentsView })));
+  const setUi = useStore((st) => st.setUi);
+  const s = { settings, setUi };
   const [open, setOpen] = useState<Record<SectionKey, boolean>>({} as Record<SectionKey, boolean>);
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -212,7 +215,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
           onToggle={() => toggle("worktrees")}
           actions={repo && <SectionAction title="Add a new worktree" onClick={() => addWorktree(repo)} icon={<Plus size={13} />} />}
         >
-          {worktrees.map((w, i) => (
+          {worktrees.map((w) => (
             <CtxMenu
               key={w.path}
               items={() =>
@@ -220,7 +223,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
                   ? []
                   : [
                       { label: "Open worktree", onSelect: () => openRepoPath(w.path) },
-                      ...(i === 0
+                      ...(w.path === repo.worktrees[0]?.path
                         ? []
                         : [
                             w.locked
@@ -232,11 +235,11 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
                     ]
               }
             >
-              <Row indent={1} title={w.path} onDoubleClick={() => i > 0 && openRepoPath(w.path)}>
-                {i === 0 ? <Check size={13} className="text-good" /> : <Folder size={13} className="opacity-60" />}
+              <Row indent={1} title={w.path} onDoubleClick={() => openRepoPath(w.path)}>
+                {w.path === repo?.worktrees[0]?.path ? <Check size={13} className="text-good" /> : <Folder size={13} className="opacity-60" />}
                 <span className="truncate">{w.branch || w.path}</span>
                 {w.locked && <Lock size={11} className="text-warn shrink-0" />}
-                <span className="text-fg3 text-[11px] truncate">{i === 0 ? "main worktree" : w.path}</span>
+                <span className="text-fg3 text-[11px] truncate">{w.path === repo?.worktrees[0]?.path ? "main worktree" : w.path}</span>
               </Row>
             </CtxMenu>
           ))}
@@ -305,7 +308,9 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
 }
 
 function Shell({ children, tabId }: { children: ReactNode; tabId: string }) {
-  const s = usePanelStore();
+  const settings = useStore(useShallow((st) => ({ leftView: st.settings.leftView, showAgentsView: st.settings.showAgentsView })));
+  const setSettings = useStore((st) => st.setSettings);
+  const s = { settings, setSettings };
   void tabId;
   const view = s.settings.leftView;
   return (
@@ -401,17 +406,11 @@ function Row({
   className,
   title,
   action,
-}: {
-  children: ReactNode;
-  indent: number;
-  onClick?: () => void;
-  onDoubleClick?: () => void;
-  className?: string;
-  title?: string;
-  action?: ReactNode;
-}) {
+  ...rest
+}: Omit<React.ComponentProps<"div">, "onClick" | "onDoubleClick"> & { indent: number; action?: ReactNode; onClick?: React.MouseEventHandler<HTMLButtonElement>; onDoubleClick?: React.MouseEventHandler<HTMLButtonElement> }) {
   return (
     <div
+      {...rest}
       title={title}
       className={cn("group flex items-center gap-[7px] h-[24px] pr-3 text-[13px] text-fg hover:bg-hoverrow cursor-default", className)}
       style={{ paddingLeft: 12 + indent * 16 }}
@@ -420,8 +419,8 @@ function Row({
         <button
           type="button"
           onClick={(e) => {
-            if (onClick) onClick();
-            else if (e.detail === 0) onDoubleClick?.();
+            if (onClick) onClick(e);
+            else if (e.detail === 0) onDoubleClick?.(e);
           }}
           onDoubleClick={onDoubleClick}
           className="flex flex-1 min-w-0 self-stretch items-center gap-[7px] text-left cursor-default"
@@ -505,7 +504,7 @@ const SUB_STATE: Record<string, [string, string]> = {
 };
 
 function Submodules({ repo }: { repo: RepoView }) {
-  const q = useQuery({ queryKey: ["submodules", repo.path, repo.head_sha, JSON.stringify(repo.status)], queryFn: () => api.submodulesList(repo.path) });
+  const q = useQuery({ queryKey: ["submodules", repo.path, repo.head_sha, JSON.stringify(repo.status)], queryFn: ({ signal }) => api.submodulesList(repo.path, signal) });
   const list = q.data ?? repo.submodules.map((p) => ({ path: p, sha: "", state: "in-sync" as const, url: "" }));
   return (
     <>
@@ -532,7 +531,7 @@ function Submodules({ repo }: { repo: RepoView }) {
 
 /** GITFLOW: start features / releases / hotfixes and finish the ones in progress. */
 function GitflowSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; onToggle: () => void }) {
-  const q = useQuery({ queryKey: ["gitflow", repo.path, repo.refs.length], queryFn: () => api.gitflowConfig(repo.path) });
+  const q = useQuery({ queryKey: ["gitflow", repo.path, repo.refs.length], queryFn: ({ signal }) => api.gitflowConfig(repo.path, signal) });
   const c = q.data;
   if (!c?.initialized) return null;
   const kinds = [
@@ -579,8 +578,8 @@ function GitflowSection({ repo, open, onToggle }: { repo: RepoView; open: boolea
 
 /** LFS: tracked patterns and locked files. */
 function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; onToggle: () => void }) {
-  const q = useQuery({ queryKey: ["lfsInfo", repo.path], queryFn: () => api.lfsInfo(repo.path), staleTime: 30_000 });
-  const locks = useQuery({ queryKey: ["lfsLocks", repo.path], queryFn: () => api.lfsLocks(repo.path), enabled: open && !!q.data?.available, staleTime: 30_000 });
+  const q = useQuery({ queryKey: ["lfsInfo", repo.path], queryFn: ({ signal }) => api.lfsInfo(repo.path, signal), staleTime: 30_000 });
+  const locks = useQuery({ queryKey: ["lfsLocks", repo.path], queryFn: ({ signal }) => api.lfsLocks(repo.path, signal), enabled: open && !!q.data?.available, staleTime: 30_000 });
   const lfs = q.data;
   if (!lfs?.available || (!lfs.enabled && lfs.patterns.length === 0)) return null;
   return (
@@ -615,11 +614,18 @@ function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; o
 
 /** PULL REQUESTS and ISSUES from GitHub / GitLab for this repository's remote. */
 function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoView; tabId: string; prsOpen: boolean; issuesOpen: boolean; toggle: (k: SectionKey) => void }) {
-  const s = usePanelStore();
-  const remote = useQuery({ queryKey: ["remote", repo.path, repo.remotes.join()], queryFn: () => hosting.remote(repo.path), staleTime: Infinity });
+  const s = useStore(useShallow((st) => ({ setDialog: st.setDialog, setUi: st.setUi })));
+  const remote = useQuery({ queryKey: ["remote", repo.path, repo.remotes.join()], queryFn: ({ signal }) => hosting.remote(repo.path, signal), staleTime: Infinity });
   const on = !!remote.data;
-  const prs = useQuery({ queryKey: ["prs", repo.path, remote.data?.web], queryFn: () => hosting.prs(repo.path), enabled: on && prsOpen, staleTime: 60_000 });
-  const issues = useQuery({ queryKey: ["issues", repo.path, remote.data?.web], queryFn: () => hosting.issues(repo.path), enabled: on && issuesOpen, staleTime: 60_000 });
+  const prs = useInfiniteQuery({ queryKey: ["prsPages", repo.path, remote.data?.web], initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => hosting.prsPage(repo.path, pageParam, signal), getNextPageParam: (page) => page.cursor ?? undefined,
+    enabled: on && prsOpen, staleTime: 60_000 });
+  const pullRequests = useMemo(() => [...new Map((prs.data?.pages.flatMap((page) => page.items) ?? []).map((pr) => [pr.number, pr])).values()], [prs.data]);
+  const tracker = useStore((st) => st.settings.repoPrefs[repo.path]?.tracker);
+  const issues = useInfiniteQuery({ queryKey: ["issuesPages", repo.path, remote.data?.web, tracker], initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => hosting.issuesPage(repo.path, pageParam, signal), getNextPageParam: (page) => page.cursor ?? undefined,
+    enabled: on && issuesOpen, staleTime: 60_000 });
+  const issueRows = useMemo(() => [...new Map((issues.data?.pages.flatMap((page) => page.items) ?? []).map((issue) => [issueIdentity(issue), issue])).values()], [issues.data]);
   const service = remote.data?.provider === "gitlab" ? "GitLab" : "GitHub";
   const note = (q: { isLoading: boolean; isError: boolean; error: unknown }) =>
     !on ? (
@@ -639,7 +645,7 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
       <Section
         title={remote.data?.provider === "gitlab" ? "MERGE REQUESTS" : "PULL REQUESTS"}
         icon={<GitPullRequest size={14} />}
-        count={prs.data?.length ?? 0}
+        count={pullRequests.length ?? 0}
         open={prsOpen}
         onToggle={() => toggle("prs")}
         actions={
@@ -649,7 +655,7 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
         }
       >
         {note(prs)}
-        {prs.data?.map((p) => (
+        {pullRequests.map((p) => (
           <CtxMenu
             key={p.number}
             items={[
@@ -664,11 +670,13 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
             </Row>
           </CtxMenu>
         ))}
-        {on && prs.data?.length === 0 && <Note>No open pull requests.</Note>}
+        {prs.hasNextPage && <button className="pl-[30px] py-1 text-link text-[12px]" disabled={prs.isFetchingNextPage} onClick={() => prs.fetchNextPage()}>{prs.isFetchingNextPage ? "Loading more…" : "Load more pull requests"}</button>}
+        {prs.isFetchNextPageError && <Note>Could not load the next page. <button className="text-link" onClick={() => prs.fetchNextPage()}>Retry</button></Note>}
+        {on && !prs.isError && !prs.isLoading && pullRequests.length === 0 && <Note>No open pull requests.</Note>}
       </Section>
-      <Section title="ISSUES" icon={<CircleDot size={14} />} count={issues.data?.length} open={issuesOpen} onToggle={() => toggle("issues")}>
+      <Section title="ISSUES" icon={<CircleDot size={14} />} count={issueRows.length} open={issuesOpen} onToggle={() => toggle("issues")}>
         {note(issues)}
-        {issues.data?.map((i) => (
+        {issueRows.map((i) => (
           <CtxMenu
             key={issueIdentity(i)}
             items={[
@@ -684,7 +692,9 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
             </Row>
           </CtxMenu>
         ))}
-        {on && issues.data?.length === 0 && <Note>No open issues.</Note>}
+        {issues.hasNextPage && <button className="pl-[30px] py-1 text-link text-[12px]" disabled={issues.isFetchingNextPage} onClick={() => issues.fetchNextPage()}>{issues.isFetchingNextPage ? "Loading more…" : "Load more issues"}</button>}
+        {issues.isFetchNextPageError && <Note>Could not load the next page. <button className="text-link" onClick={() => issues.fetchNextPage()}>Retry</button></Note>}
+        {on && !issues.isError && !issues.isLoading && issueRows.length === 0 && <Note>No open issues.</Note>}
       </Section>
     </>
   );

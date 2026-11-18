@@ -1,3 +1,4 @@
+import { invokeRead } from "./api";
 // AI helpers use the selected local or hosted connection; patch files and agents remain local.
 import { invoke } from "@tauri-apps/api/core";
 import { invokeAi } from "./ai-connection";
@@ -34,7 +35,7 @@ export const ai = {
   compose: (path: string) => invokeAi<ComposedCommit[]>("ai_compose", { path }),
   savePatch: (path: string, shas: string[], name: string) => invoke<string | null>("save_patch", { path, shas, name }),
   pickPatch: () => invoke<string | null>("pick_patch_file"),
-  conflictCheck: (path: string, target?: string) => invoke<ConflictCheck>("conflict_check", { path, target: target ?? null }),
+  conflictCheck: (path: string, target?: string, signal?: AbortSignal) => invokeRead<ConflictCheck>("conflict_check", { path, target: target ?? null }, signal),
   agents: (path: string, paths: string[], claudeDir: string, codexDir: string) => invoke<AgentSession[]>("agent_sessions", { path, paths, claudeDir, codexDir }),
 };
 

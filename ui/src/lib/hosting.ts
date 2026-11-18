@@ -1,3 +1,4 @@
+import { invokeRead } from "./api";
 import { aiApi } from "./integrations";
 // GitHub / GitLab: pull requests, issues, Launchpad. Tokens stay in the OS credential store.
 import { invoke } from "@tauri-apps/api/core";
@@ -49,6 +50,7 @@ export function issueIdentity(issue: Issue): string {
 }
 
 export interface Comment {
+  id?: string;
   author: string;
   body: string;
   created: string;
@@ -71,22 +73,27 @@ export const hosting = {
     // A connected GitHub / GitLab account also signs Git in for HTTPS push, pull and fetch.
     if (name.endsWith("-token")) await syncGitCredentials();
   },
-  remote: (path: string) => invoke<RemoteRepo | null>("repo_remote", { path, gitlabHost: gh() }),
-  pr: (path: string, number: number) => invoke<PullRequest>("pr_details", { path, number, gitlabHost: gh() }),
-  checkoutPr: async (path: string, number: number) => {
-    const target = await invoke<{ url: string; reference: string; expected: string }>("pr_checkout_target", { path, number, gitlabHost: gh() });
+  remote: (path: string, signal?: AbortSignal) => invokeRead<RemoteRepo | null>("repo_remote", { path, gitlabHost: gh() }, signal),
+  pr: (path: string, number: number, signal?: AbortSignal) => invokeRead<PullRequest>("pr_details", { path, number, gitlabHost: gh() }, signal),
+  checkoutPr: async (path: string, number: number, signal?: AbortSignal) => {
+    const target = await invokeRead<{ url: string; reference: string; expected: string }>("pr_checkout_target", { path, number, gitlabHost: gh() }, signal);
     return act(path, { type: "checkoutPullRequest", ...target });
   },
-  prs: (path: string) => invoke<PullRequest[]>("list_prs", { path, gitlabHost: gh() }),
+  prsPage: (path: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: PullRequest[]; cursor: string | null}>("list_prs_page", { path, gitlabHost: gh(), cursor }, signal),
+  prs: (path: string, signal?: AbortSignal) => invokeRead<PullRequest[]>("list_prs", { path, gitlabHost: gh() }, signal),
   /** Issues from the repository's Issue Tracker preference (Jira, Trello, Azure Boards) or its hosting service. */
-  issues: (path: string) => invoke<Issue[]>("list_issues", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null }),
-  comments: (path: string, number: number) => invoke<Comment[]>("pr_comments", { path, gitlabHost: gh(), number }),
+  issuesPage: (path: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: Issue[]; cursor: string | null}>("list_issues_page", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null, cursor }, signal),
+  reposPage: (id: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: import("./integrations").HostedRepo[]; cursor: string | null}>("integration_repos_page", { id, cursor }, signal),
+  issues: (path: string, signal?: AbortSignal) => invokeRead<Issue[]>("list_issues", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null }, signal),
+  commentsPage: (path: string, number: number, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: Comment[]; cursor: string | null}>("pr_comments_page", {path, number, cursor, gitlabHost: gh()}, signal),
+  launchpadPage: (service: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: {pull_requests: PullRequest[]; issues: Issue[]; errors: string[]}; cursor: string | null}>("launchpad_page", {service, cursor}, signal),
+  comments: (path: string, number: number, signal?: AbortSignal) => invokeRead<Comment[]>("pr_comments", { path, gitlabHost: gh(), number }, signal),
   comment: (path: string, number: number, body: string) => invoke<void>("pr_comment", { path, gitlabHost: gh(), number, body }),
   create: (path: string, source: string, target: string, title: string, body: string, draft: boolean) =>
     invoke<PullRequest>("create_pr", { path, gitlabHost: gh(), source, target, title, body, draft }),
   cancelMerge: (path: string, number: number) => invoke<boolean>("cancel_pr_merge", { path, gitlabHost: useStore.getState().settings.gitlabHost ?? "", number }),
   merge: (path: string, number: number, method: string) => invoke<void>("merge_pr", { path, gitlabHost: gh(), number, method }),
-  launchpad: () => invoke<{ pull_requests: PullRequest[]; issues: Issue[]; errors: string[] }>("launchpad", { gitlabHost: gh() }),
+  launchpad: (signal?: AbortSignal) => invokeRead<{ pull_requests: PullRequest[]; issues: Issue[]; errors: string[] }>("launchpad", { gitlabHost: gh() }, signal),
   issueBranch: (number: number, title: string) => invoke<string>("issue_branch_name", { number, title }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   template: (path: string) => invoke<string | null>("pr_template", { path }),

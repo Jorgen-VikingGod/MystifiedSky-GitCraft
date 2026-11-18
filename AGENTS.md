@@ -4,7 +4,7 @@ This directory is the root of the public GitCraft app repository. Use its Git hi
 
 ## Track bugs and optimizations
 
-Use [BUGS_AND_OPTIMIZATIONS.md](BUGS_AND_OPTIMIZATIONS.md) as the active checklist. Check existing IDs before adding findings or starting a fix. Update each item's status as work progresses; mark it verified fixed only after checking the original failure and recording regression evidence and the fix commit (or uncommitted status). Preserve historical findings in AUDIT.md.
+Use [BUGS_AND_OPTIMIZATIONS.md](BUGS_AND_OPTIMIZATIONS.md) as a concise checklist of unresolved work only. Check existing IDs and Git history before adding findings or starting a fix; do not reuse retired IDs. Verify the original failure and record regression evidence in the fix commit or work summary, then remove completed entries. Keep pending validation concise. Do not accumulate completion checkpoints, rejected candidates or historical narratives in the checklist; Git preserves that history. Leave existing historical material in AUDIT.md unchanged unless requested.
 
 ## Maintain the changelog
 

@@ -5,18 +5,20 @@ import { useStore } from "@/lib/store";
 /** Gravatar address for an e-mail (SHA-256 of the trimmed, lower-case address). */
 const avatarCache = new Map<string, Promise<string>>();
 function gravatar(email: string, size: number): Promise<string> {
-  const key = `${email}|${size}`;
+  const key = `${email.trim().toLowerCase()}|${size}`;
   let p = avatarCache.get(key);
   if (!p) {
     p = crypto.subtle.digest("SHA-256", new TextEncoder().encode(email.trim().toLowerCase())).then((h) => {
       const hex = [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
       return `https://gravatar.com/avatar/${hex}?s=${size * 2}&d=404`;
     });
+    if (avatarCache.size >= 1024) avatarCache.delete(avatarCache.keys().next().value!);
     avatarCache.set(key, p);
   }
   return p;
 }
-const missing = new Set<string>();
+const missing = new Map<string, number>();
+const RETRY_AFTER = 60_000;
 
 /** GitCraft's own mark: two lanes joining, drawn with simple shapes. */
 export function AppMark({ size = 16 }: { size?: number }) {
@@ -35,14 +37,24 @@ export function Avatar({ name, email, size = 22 }: { name: string; email: string
   // UI Customization > "Display author initials ... instead of avatars" (off by default: avatars where the author has one).
   const initialsOnly = useStore((s) => s.settings.authorInitials);
   const [src, setSrc] = useState<string | null>(null);
+  const key = email.trim().toLowerCase();
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     setSrc(null);
-    if (!initialsOnly && email && !missing.has(email)) gravatar(email, size).then((u) => live && setSrc(u), () => undefined);
-    return () => {
-      live = false;
+    const load = () => {
+      if (initialsOnly || !key) return;
+      const delay = (missing.get(key) ?? 0) - Date.now();
+      if (delay > 0) { timer = setTimeout(() => setRetry((n) => n + 1), delay); return; }
+      missing.delete(key);
+      gravatar(key, size).then((u) => { if (live) setSrc(u); }, () => undefined);
     };
-  }, [email, size, initialsOnly]);
+    const online = () => { missing.delete(key); setRetry((n) => n + 1); };
+    load();
+    window.addEventListener("online", online);
+    return () => { live = false; clearTimeout(timer); window.removeEventListener("online", online); };
+  }, [key, size, initialsOnly, retry]);
   if (src)
     return (
       <img
@@ -53,7 +65,9 @@ export function Avatar({ name, email, size = 22 }: { name: string; email: string
         className="rounded-full shrink-0 object-cover"
         style={{ width: size, height: size }}
         onError={() => {
-          missing.add(email);
+          if (missing.size >= 1024) missing.delete(missing.keys().next().value!);
+          missing.set(key, Date.now() + RETRY_AFTER);
+          setRetry((n) => n + 1);
           setSrc(null);
         }}
       />

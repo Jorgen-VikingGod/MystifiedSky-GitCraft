@@ -59,7 +59,7 @@ try {
     writeFileSync(join(repository, `target/verification/${graphPreview ? 'graph-columns' : 'publish-preview'}.png`), Buffer.from(shot.result.data, 'base64'));
   }
   console.log(JSON.stringify(report, null, 2));
-  if (report.failed) process.exitCode = 1;
+  if (report.failed || errors.length) process.exitCode = 1;
 } finally {
   socket?.close(); child.kill(); await server.close();
   // Chrome owns this isolated directory until its shutdown has completed.

@@ -29,3 +29,17 @@ export function groupCommitRefs(refs: GitRef[]): RefGroup[] {
   }
   return refs.filter((r) => !used.has(r)).map((ref) => ({ ref, remote: paired.get(ref) }));
 }
+
+/** Buckets are owned by this computation; append each ref once, then sort once. */
+export function refsByCommit(refs: GitRef[], head: string | null, hidden: string[]): Map<string, GitRef[]> {
+  const result = new Map<string, GitRef[]>();
+  const excluded = new Set(hidden);
+  const order = (ref: GitRef) => ref.kind === "Local" && ref.name === head ? 0 : ref.kind === "Local" ? 1 : ref.kind === "Remote" ? 2 : 3;
+  for (const ref of refs) {
+    if (excluded.has(ref.full)) continue;
+    const bucket = result.get(ref.sha);
+    if (bucket) bucket.push(ref); else result.set(ref.sha, [ref]);
+  }
+  for (const bucket of result.values()) bucket.sort((a, b) => order(a) - order(b));
+  return result;
+}

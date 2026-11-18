@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { signingOptions } from "@/lib/signing-keys";
 import { invoke } from "@tauri-apps/api/core";
 import { sameFolder } from "@/lib/agents";
@@ -12,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { Area, Btn, H, Note, PathField, Row, Select, Text, Toggle, field } from "./controls";
 
 const useSet = () => {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ setSettings: st.setSettings, settings: st.settings, toast: st.toast })));
   return { set: s.settings, put: (p: Partial<Settings>) => s.setSettings(p), toast: s.toast };
 };
 
@@ -73,7 +74,7 @@ function ServicePane({
 }) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const acc = useQuery({ queryKey: ["accounts", null], queryFn: () => api.accountInfo(null) });
+  const acc = useQuery({ queryKey: ["accounts", null], queryFn: ({ signal }) => api.accountInfo(null, signal) });
   const ready = (svc.needs ?? []).every((k) => set.integrations[k].trim());
   const run = async (what: string, f: () => Promise<unknown>, ok: string) => {
     setBusy(what);
@@ -188,12 +189,12 @@ function ServicePane({
 }
 
 export function SigningSection() {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs, toast: st.toast })));
   const path = s.tabs.find((t) => t.id === s.activeId)?.path ?? null;
   const keys = ["gpg.program", "gpg.format", "user.signingkey", "commit.gpgsign", "tag.gpgSign", "gpg.ssh.program", "gpg.ssh.allowedSignersFile"];
-  const cfg = useQuery({ queryKey: ["gpgConfig"], queryFn: () => tools.configGet(null, "global", keys) });
-  const acc = useQuery({ queryKey: ["accounts", null], queryFn: () => api.accountInfo(null) });
-  const local = useQuery({ queryKey: ["gpgLocal", path], queryFn: () => tools.configGet(path, "local", ["gpg.ssh.allowedSignersFile"]), enabled: !!path });
+  const cfg = useQuery({ queryKey: ["gpgConfig"], queryFn: ({ signal }) => tools.configGet(null, "global", keys, signal) });
+  const acc = useQuery({ queryKey: ["accounts", null], queryFn: ({ signal }) => api.accountInfo(null, signal) });
+  const local = useQuery({ queryKey: ["gpgLocal", path], queryFn: ({ signal }) => tools.configGet(path, "local", ["gpg.ssh.allowedSignersFile"], signal), enabled: !!path });
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const c = cfg.data ?? {};

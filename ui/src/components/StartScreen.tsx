@@ -1,3 +1,5 @@
+import { useLaunchpad } from "@/lib/launchpad";
+import { useShallow } from "zustand/react/shallow";
 import { CircleDot, CloudDownload, ExternalLink, FolderOpen, GitPullRequest, Rocket, Search, SquarePlus } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { hosting } from "@/lib/hosting";
@@ -13,7 +15,7 @@ import { RELEASES_URL } from "@/lib/updates";
 /** "New Tab" screen: Repositories (Open / Clone / Create, search, Recent)
  *  on the left and integrations / resources on the right. */
 export function StartScreen() {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setDialog: st.setDialog, toast: st.toast }))), settings: useStore(useShallow((st) => ({ favorites: st.settings.favorites, recents: st.settings.recents, workspaces: st.settings.workspaces }))) };
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const recents = s.settings.recents.filter((r) => r.toLowerCase().includes(q.toLowerCase()));
@@ -146,11 +148,11 @@ function BigButton({ icon, label, title, onClick }: { icon: React.ReactNode; lab
 
 /** Launchpad: open pull requests and issues that involve you, across connected services. */
 export function LaunchpadScreen() {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ metrics: st.metrics, setDialog: st.setDialog }))), settings: useStore(useShallow((st) => ({ gitlabHost: st.settings.gitlabHost }))) };
   const units = s.metrics.time_units;
-  const q = useQuery({ queryKey: ["launchpad", s.settings.gitlabHost], queryFn: hosting.launchpad, refetchInterval: 5 * 60_000 });
-  const status = useQuery({ queryKey: ["hostingStatus", s.settings.gitlabHost], queryFn: hosting.status });
-  const connected = !!(status.data?.github || status.data?.gitlab);
+  const q = useLaunchpad();
+
+  const connected = q.connected;
   const since = (iso: string) => {
     const t = timeSince(Date.parse(iso) / 1000, units);
     return <span style={{ color: t.color }}>{t.text}</span>;
@@ -165,7 +167,7 @@ export function LaunchpadScreen() {
             {q.isFetching ? "Refreshing…" : "Refresh"}
           </button>
         </div>
-        {!connected && !status.isLoading && (
+        {!connected && !q.isLoading && (
           <div className="rounded border border-white/10 bg-panel p-4 text-[13px] text-fg2 mb-4">
             Connect GitHub or GitLab to see your pull requests and issues here.{" "}
             <button className="text-link hover:underline" onClick={() => s.setDialog({ kind: "accounts" })}>
@@ -173,7 +175,7 @@ export function LaunchpadScreen() {
             </button>
           </div>
         )}
-        {q.data?.errors.map((e) => (
+        {q.errors.map((e) => (
           <div key={e} className="text-[12px] text-[#ef7a76] mb-1">
             {e}
           </div>
@@ -205,6 +207,8 @@ export function LaunchpadScreen() {
             </button>
           ))}
         </div>
+        {q.isLoading && <div className="py-3 text-fg3">Loading connected services...</div>}
+        {q.hasNextPage && <button className="mt-3 text-link" disabled={q.isFetching} onClick={() => q.loadMore()}>{q.isFetching ? "Loading..." : "Load more results"}</button>}
       </div>
     </div>
   );

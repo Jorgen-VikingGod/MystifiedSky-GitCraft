@@ -1,7 +1,31 @@
 // Monaco (the code editor) bundled locally — no network needed.
-import * as monaco from "monaco-editor";
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import "monaco-editor/esm/vs/editor/browser/coreCommands.js";
+import "monaco-editor/esm/vs/editor/browser/widget/codeEditor/codeEditorWidget.js";
+import "monaco-editor/esm/vs/editor/browser/widget/diffEditor/diffEditor.contribution.js";
+import "monaco-editor/esm/vs/editor/contrib/clipboard/browser/clipboard.js";
+import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
+import "monaco-editor/esm/vs/editor/contrib/contextmenu/browser/contextmenu.js";
+import "monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js";
+import "monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js";
+import "monaco-editor/esm/vs/editor/contrib/comment/browser/comment.js";
+import "monaco-editor/esm/vs/editor/contrib/cursorUndo/browser/cursorUndo.js";
+import "monaco-editor/esm/vs/editor/contrib/indentation/browser/indentation.js";
+import "monaco-editor/esm/vs/editor/contrib/linesOperations/browser/linesOperations.js";
+import "monaco-editor/esm/vs/editor/contrib/lineSelection/browser/lineSelection.js";
+import "monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor.js";
+import "monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations.js";
+import "monaco-editor/esm/vs/editor/contrib/readOnlyMessage/browser/contribution.js";
+import "monaco-editor/esm/vs/editor/contrib/tokenization/browser/tokenization.js";
+import "monaco-editor/esm/vs/editor/contrib/longLinesHelper/browser/longLinesHelper.js";
+import "monaco-editor/esm/vs/editor/contrib/unicodeHighlighter/browser/unicodeHighlighter.js";
+import "monaco-editor/esm/vs/editor/contrib/fontZoom/browser/fontZoom.js";
+import "monaco-editor/esm/vs/base/browser/ui/codicons/codiconStyles.js";
+import "monaco-editor/esm/vs/basic-languages/monaco.contribution";
+import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import { registerEditorTheme } from "./editor-theme";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 
 declare global {
   interface Window {
@@ -9,8 +33,8 @@ declare global {
   }
 }
 
-// Syntax colouring only needs the basic editor worker.
-self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+// Basic grammars share the editor worker; JSON diagnostics use their own worker.
+self.MonacoEnvironment = { getWorker: (_module, label) => label === "json" ? new JsonWorker() : new EditorWorker() };
 
 // Dark theme with GitCraft's colours (added-line / deleted-line = green / red at 20 %).
 monaco.editor.defineTheme("gitcraft-dark", {

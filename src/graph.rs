@@ -22,6 +22,11 @@ pub struct GraphRow {
     pub color: u8,
     pub up: Vec<Seg>,
     pub down: Vec<Seg>,
+    /// Inclusive runs of straight lanes; colour is lane modulo GRAPH_COLORS.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub up_runs: Vec<[u16; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub down_runs: Vec<[u16; 2]>,
     pub merge: bool,
 }
 
@@ -141,17 +146,36 @@ impl LayoutCursor {
 
             let used = up.iter().chain(down.iter()).map(|s| s.from.max(s.to) + 1).max().unwrap_or(1).max(col as u16 + 1);
             out.width = out.width.max(used);
+            let up_runs = compact_straights(&mut up);
+            let down_runs = compact_straights(&mut down);
             out.rows.push(GraphRow {
                 col: col as u16,
                 color: (col % GRAPH_COLORS) as u8,
                 up,
                 down,
+                up_runs,
+                down_runs,
                 merge: c.parents.len() > 1,
             });
         }
         self.width = out.width;
         out
     }
+}
+
+fn compact_straights(segments: &mut Vec<Seg>) -> Vec<[u16; 2]> {
+    let mut lanes = Vec::new();
+    segments.retain(|s| {
+        if s.from == s.to && s.color == (s.from as usize % GRAPH_COLORS) as u8 { lanes.push(s.from); false } else { true }
+    });
+    lanes.sort_unstable(); lanes.dedup();
+    let mut runs: Vec<[u16; 2]> = Vec::new();
+    for lane in lanes {
+        if let Some(last) = runs.last_mut() { if last[1].checked_add(1) == Some(lane) { last[1] = lane; continue; } }
+        runs.push([lane, lane]);
+    }
+    segments.shrink_to_fit();
+    runs
 }
 
 fn alloc(lanes: &mut Vec<Option<String>>, from: usize) -> usize {
@@ -179,6 +203,18 @@ mod tests {
             summary: String::new(),
             body: String::new(),
         }
+    }
+
+    #[test]
+    fn wide_graph_encodes_passing_lanes_as_runs() {
+        let mut commits = Vec::new();
+        for level in 0..10 { for lane in 0..500 { commits.push(c(&format!("{level}-{lane}"), &[&if level == 9 { "root".into() } else { format!("{}-{lane}", level + 1) }])); } }
+        commits.push(c("root", &[]));
+        let now = std::time::Instant::now(); let graph = layout(&commits);
+        let retained: usize = graph.rows.iter().map(|row| row.up.len() + row.down.len() + row.up_runs.len() + row.down_runs.len()).sum();
+        assert!(retained < 25_000, "retained {retained}");
+        assert_eq!(graph.rows.len(), 5001);
+        eprintln!("wide graph: {retained} segment/run records, {} bytes JSON, {:?}", serde_json::to_vec(&graph).unwrap().len(), now.elapsed());
     }
 
     #[test]

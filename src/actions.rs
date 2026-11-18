@@ -1715,11 +1715,11 @@ mod tests {
         // Commit and compare; hide a branch from the graph.
         assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: false }).ok);
-        let files = crate::files::range_files(&d, &base, "HEAD");
+        let files = crate::files::range_files(&d, &base, "HEAD").unwrap();
         assert_eq!(files.len(), 2);
-        let st = crate::files::stats(&d, &[head(&d)]);
+        let st = crate::files::stats(&d, &[head(&d)]).unwrap();
         assert_eq!(st[0].files, 2);
-        let hist = crate::files::history(&d, "f.txt", 10);
+        let hist = crate::files::history(&d, "f.txt", 10).unwrap();
         assert_eq!(hist.len(), 2);
         let bl = crate::files::blame(&d, "f.txt", None).unwrap();
         assert_eq!(bl.len(), 4);

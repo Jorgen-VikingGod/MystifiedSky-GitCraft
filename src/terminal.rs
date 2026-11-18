@@ -114,6 +114,9 @@ pub fn take_utf8(buf: &mut Vec<u8>) -> String {
 }
 
 impl Terminals {
+    pub fn pending_output(&self) -> Vec<(u32, usize)> {
+        self.sessions.lock().unwrap().iter().map(|(id, session)| (*id, session.output.state.lock().unwrap().0)).collect()
+    }
     /// Start a shell in `cwd`. Output goes to `on_data`; `on_exit` runs when the shell ends.
     pub fn open(
         &self,

@@ -21,6 +21,7 @@ pub struct Jobs {
 struct Running {
     tree: crate::process_tree::ProcessTree,
     cancelled: AtomicBool,
+    pending_progress: AtomicBool,
 }
 
 /// The percentage at the end of a git progress line, if any ("...  45% (450/1000)").
@@ -36,32 +37,47 @@ struct ProgressOutput {
     pending: Vec<u8>,
     progress: Option<String>,
     stderr: String,
+    truncated: bool,
+    line_truncated: bool,
 }
 
+const OUTPUT_TAIL: usize = 64 * 1024;
+const PROGRESS_LINE: usize = 16 * 1024;
+fn append_tail(text: &mut String, value: &str) -> bool {
+    text.push_str(value);
+    if text.len() <= OUTPUT_TAIL { return false; }
+    let mut cut = text.len() - OUTPUT_TAIL;
+    while !text.is_char_boundary(cut) { cut += 1; }
+    text.drain(..cut);
+    true
+}
 impl ProgressOutput {
+    fn retain(&mut self, text: &str) {
+        self.truncated |= append_tail(&mut self.stderr, text);
+        self.truncated |= append_tail(&mut self.stderr, "\n");
+    }
     fn push(&mut self, bytes: &[u8]) -> Vec<String> {
         let mut updates = Vec::new();
         for &b in bytes {
             if b == b'\r' || b == b'\n' {
                 if !self.pending.is_empty() {
-                    let text = String::from_utf8_lossy(&self.pending).trim().to_string();
+                    let mut text = String::from_utf8_lossy(&self.pending).trim().to_string();
+                    if self.line_truncated { text.push_str(" [line truncated]"); self.truncated = true; self.line_truncated = false; }
                     self.pending.clear();
                     updates.push(text.clone());
                     if b == b'\r' {
                         self.progress = Some(text);
                     } else {
-                        self.stderr.push_str(&text);
-                        self.stderr.push('\n');
+                        self.retain(&text);
                         self.progress = None;
                     }
                 } else if b == b'\n' {
                     if let Some(text) = self.progress.take() {
-                        self.stderr.push_str(&text);
-                        self.stderr.push('\n');
+                        self.retain(&text);
                     }
                 }
             } else {
-                self.pending.push(b);
+                if self.pending.len() < PROGRESS_LINE { self.pending.push(b); } else { self.line_truncated = true; }
             }
         }
         updates
@@ -69,14 +85,14 @@ impl ProgressOutput {
 
     fn finish(mut self) -> String {
         if !self.pending.is_empty() {
-            self.stderr.push_str(&String::from_utf8_lossy(&self.pending));
-            self.stderr.push('\n');
-        } else if let Some(text) = self.progress.take() {
-            self.stderr.push_str(&text);
-            self.stderr.push('\n');
-        }
+            let mut text = String::from_utf8_lossy(&self.pending).into_owned();
+            if self.line_truncated { text.push_str(" [line truncated]"); self.truncated = true; }
+            self.retain(&text);
+        } else if let Some(text) = self.progress.take() { self.retain(&text); }
+        if self.truncated { self.stderr.insert_str(0, "[output truncated; diagnostic tail follows]\n"); }
         self.stderr
     }
+
 }
 
 impl Jobs {
@@ -97,13 +113,22 @@ impl Jobs {
             Ok(tree) => tree,
             Err(error) => { let _ = child.kill(); let _ = child.wait(); return GitOut::failed(&format!("Could not create a cancellable Git job: {error}")); }
         };
-        let running = Arc::new(Running { tree, cancelled: AtomicBool::new(false) });
+        let running = Arc::new(Running { tree, cancelled: AtomicBool::new(false), pending_progress: AtomicBool::new(false) });
         self.running.lock().unwrap().insert(id.to_string(), running.clone());
         let mut err_pipe = child.stderr.take().expect("stderr");
         let mut out_pipe = child.stdout.take().expect("stdout");
-        let (out_tx, out_rx) = mpsc::channel();
-        std::thread::spawn(move || { let mut text = String::new(); let _ = out_pipe.read_to_string(&mut text); let _ = out_tx.send(text); });
-        let (err_tx, err_rx) = mpsc::channel();
+        let (out_tx, out_rx) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut tail = Vec::new(); let mut bytes = [0; 4096]; let mut truncated = false;
+            loop { match out_pipe.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => { tail.extend_from_slice(&bytes[..n]); if tail.len() > OUTPUT_TAIL { tail.drain(..tail.len() - OUTPUT_TAIL); truncated = true; } }
+            } }
+            let mut text = String::from_utf8_lossy(&tail).into_owned();
+            if truncated { text.insert_str(0, "[output truncated; diagnostic tail follows]\n"); }
+            let _ = out_tx.send(text);
+        });
+        let (err_tx, err_rx) = mpsc::sync_channel(16);
         std::thread::spawn(move || {
             let mut bytes = [0; 1024];
             loop { match err_pipe.read(&mut bytes) { Ok(0) | Err(_) => break, Ok(n) => if err_tx.send(bytes[..n].to_vec()).is_err() { break; } } }
@@ -117,11 +142,12 @@ impl Jobs {
                 if at.elapsed() > Duration::from_secs(2) { break; }
             }
             match err_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(bytes) => for text in output.push(&bytes) { if let Some(listener) = &listener { listener(id, &git::redact_diagnostic(&text), percent(&text)); } },
+                Ok(bytes) => for text in output.push(&bytes) { if let Some(listener) = &listener { if !running.pending_progress.swap(true, Ordering::AcqRel) { listener(id, &git::redact_diagnostic(&text), percent(&text)); } } },
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {},
             }
         }
+        drop(err_rx);
         let mut stderr = output.finish();
         let status = loop {
             if running.cancelled.load(Ordering::Acquire) { cancelled_at.get_or_insert_with(Instant::now); }
@@ -143,6 +169,11 @@ impl Jobs {
         GitOut { ok, stdout, stderr }
     }
 
+    /// At most one progress event per running job can await renderer delivery.
+    pub fn acknowledge(&self, id: &str) {
+        if let Some(job) = self.running.lock().unwrap().get(id) { job.pending_progress.store(false, Ordering::Release); }
+    }
+
     /// Stop a running job. Returns false if it already finished.
     pub fn cancel(&self, id: &str) -> bool {
         let job = self.running.lock().unwrap().get(id).cloned();
@@ -156,6 +187,29 @@ impl Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_renderer_does_not_accumulate_progress_events() {
+        let jobs = Jobs::default(); let seen = Arc::new(Mutex::new(Vec::<String>::new())); let capture = seen.clone();
+        jobs.set_listener(Arc::new(move |_, text, _| capture.lock().unwrap().push(text.into())));
+        let result = jobs.run("slow-renderer", &std::env::temp_dir(), &["-c", "alias.output=!i=0; while [ $i -lt 5000 ]; do echo diagnostic-progress >&2; i=$((i+1)); done; echo fatal-final-diagnostic >&2; exit 1", "output"]);
+        assert!(!result.ok); assert!(result.stderr.contains("fatal-final-diagnostic")); assert!(result.stderr.contains("truncated"));
+        assert!(seen.lock().unwrap().len() <= 2, "Unacknowledged progress queued in renderer");
+        assert!(seen.lock().unwrap().last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn output_budgets_bound_lines_and_keep_final_errors() {
+        let mut output = ProgressOutput::default();
+        for _ in 0..16_384 { output.push(&[b'x'; 1024]); }
+        assert!(output.pending.len() <= PROGRESS_LINE);
+        output.push(b"\nfatal: final diagnostic\n");
+        let result = output.finish(); assert!(result.contains("truncated")); assert!(result.ends_with("fatal: final diagnostic\n"));
+        let mut output = ProgressOutput::default();
+        for _ in 0..16_384 { output.push(b"diagnostic line repeated many times\n"); }
+        assert!(output.stderr.len() <= OUTPUT_TAIL);
+        let result = output.finish(); assert!(result.len() < OUTPUT_TAIL + 100); assert!(result.contains("truncated"));
+    }
 
     #[test]
     fn reads_git_progress_percentages() {

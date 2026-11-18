@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { buildTree, type TreeNode } from "@/lib/file-tree";
 import { VirtualFileRows } from "./VirtualFileRows";
 import { useQuery } from "@tanstack/react-query";
@@ -20,7 +21,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Commit, FileChange, RepoView } from "@/lib/api";
 import { api, WORKDIR } from "@/lib/api";
-import { useStore, useTabUi, type DiffTarget, usePanelStore } from "@/lib/store";
+import { useStore, useTabUi, type DiffTarget } from "@/lib/store";
 import { act, confirmThen, copy, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { fileMenu } from "@/lib/menus";
 import { baseFor, dropCommits, headLine, openCherryPick, openRebase, squashCommits } from "@/lib/rewrite";
@@ -74,7 +75,7 @@ function SelectionPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
 
 function CommitSelection({ repo, tabId, sha }: {repo: RepoView; tabId: string; sha: string}) {
   const loaded = repo.commits.find(commit => commit.sha === sha);
-  const details = useQuery({ queryKey:["commitDetails",repo.path,sha], queryFn:()=>api.commitDetails(repo.path,sha), enabled:!loaded, staleTime:Infinity });
+  const details = useQuery({ queryKey:["commitDetails",repo.path,sha], queryFn:({ signal })=>api.commitDetails(repo.path,sha,signal), enabled:!loaded, staleTime:Infinity });
   const commit = loaded ?? details.data;
   return commit ? <CommitDetails repo={repo} tabId={tabId} commit={commit} /> : <div className="p-3 text-fg2">{details.isError ? String(details.error) : "Loading commit…"}</div>;
 }
@@ -92,7 +93,7 @@ function AiButton({ title, onClick }: { title: string; onClick: () => void }) {
 }
 
 function ViewSwitch() {
-  const s = usePanelStore();
+  const s = { ...useStore(useShallow((st) => ({ setSettings: st.setSettings }))), settings: useStore(useShallow((st) => ({ fileSort: st.settings.fileSort, fileView: st.settings.fileView }))) };
   const v = s.settings.fileView;
   return (
     <div className="flex items-center h-[38px] px-[8px] shrink-0">
@@ -210,9 +211,9 @@ function FileList({
 
 
 function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
-  const s = usePanelStore();
+  const s = { ...useStore(useShallow((st) => ({ metrics: st.metrics, setDraft: st.setDraft, setSettings: st.setSettings, setUi: st.setUi, toast: st.toast }))), settings: useStore(useShallow((st) => ({ fileSort: st.settings.fileSort, fileView: st.settings.fileView, pushAfterCommit: st.settings.pushAfterCommit, skipHooks: st.settings.skipHooks, spellcheck: st.settings.spellcheck, stripComments: st.settings.stripComments, useCommitTemplate: st.settings.useCommitTemplate, templateSummary: st.settings.templateSummary, templateDescription: st.settings.templateDescription }))) };
   const ui = useTabUi(tabId);
-  const draft = s.drafts[repo.path] ?? { summary: "", description: "", amend: false };
+  const draft = useStore((st) => st.drafts[repo.path]) ?? { summary: "", description: "", amend: false };
   const [tab, setTab] = useState<"commit" | "stash" | "patch">("commit");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [unstagedOpen, setUnstagedOpen] = useState(true);
@@ -594,9 +595,9 @@ function TabBtn({ active, onClick, children, title }: { active: boolean; onClick
 }
 
 function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: string; commit: Commit }) {
-  const s = usePanelStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi })));
   const ui = useTabUi(tabId);
-  const files = useQuery({ queryKey: ["commitFiles", repo.path, c.sha], queryFn: () => api.commitFiles(repo.path, c.sha), staleTime: Infinity });
+  const files = useQuery({ queryKey: ["commitFiles", repo.path, c.sha], queryFn: ({ signal }) => api.commitFiles(repo.path, c.sha, signal), staleTime: Infinity });
   const counts = useMemo(() => {
     const f = files.data ?? [];
     return { m: f.filter((x) => x.status === "M" || x.status === "R").length, a: f.filter((x) => x.status === "A").length, d: f.filter((x) => x.status === "D").length };
@@ -668,12 +669,12 @@ function FileQueryStatus({ query }: { query: { isLoading: boolean; isError: bool
 
 /** Two commits (or a commit and the working folder): the files that differ and their diffs. */
 function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string; from: string; to: string }) {
-  const s = usePanelStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi })));
   const ui = useTabUi(tabId);
   const n = s.metrics.sha_len;
   const files = useQuery({
     queryKey: ["range", repo.path, from, to, to === WORKDIR ? JSON.stringify(repo.status) : ""],
-    queryFn: () => api.rangeFiles(repo.path, from, to),
+    queryFn: ({ signal }) => api.rangeFiles(repo.path, from, to, signal),
   });
   const short = (x: string) => (x === WORKDIR ? "working folder" : x.slice(0, n));
   const close = () => s.setUi(tabId, { multi: [], compareWorkdir: null, diff: null });
@@ -705,7 +706,7 @@ function ComparePanel({ repo, tabId, from, to }: { repo: RepoView; tabId: string
 
 /** Three or more commits picked: what can be done with them together. */
 function MultiPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
-  const s = usePanelStore();
+  const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi })));
   const ui = useTabUi(tabId);
   const picked = repo.commits.filter((c) => ui.multi.includes(c.sha));
   const oldestFirst = [...picked].reverse().map((c) => c.sha);

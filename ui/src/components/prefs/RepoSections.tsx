@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { act, refresh } from "@/lib/repo";
@@ -8,14 +9,14 @@ import { Area, Btn, H, Note, PathField, Row, Select, Text, Toggle } from "./cont
 
 /** Per-repository preferences live in settings.repoPrefs[path]. */
 export function useRepoPrefs(path: string) {
-  const s = useStore();
+  const s = { ...useStore(useShallow((st) => ({ setSettings: st.setSettings }))), settings: useStore(useShallow((st) => ({ repoPrefs: st.settings.repoPrefs, conflictDetection: st.settings.conflictDetection }))) };
   const p: RepoPrefs = s.settings.repoPrefs[path] ?? {};
   const put = (patch: Partial<RepoPrefs>) => s.setSettings({ repoPrefs: { ...s.settings.repoPrefs, [path]: { ...p, ...patch } } });
   return { p, put, s };
 }
 
 export function GitflowSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["gitflowConfig", path], queryFn: () => api.gitflowConfig(path) });
+  const q = useQuery({ queryKey: ["gitflowConfig", path], queryFn: ({ signal }) => api.gitflowConfig(path, signal) });
   const c = q.data;
   return (
     <>
@@ -51,7 +52,7 @@ export function GitflowSection({ path }: { path: string }) {
 }
 
 export function HooksSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["hooksPath", path], queryFn: () => tools.configGet(path, "local", ["core.hooksPath"]) });
+  const q = useQuery({ queryKey: ["hooksPath", path], queryFn: ({ signal }) => tools.configGet(path, "local", ["core.hooksPath"], signal) });
   const toast = useStore((s) => s.toast);
   const value = q.data?.["core.hooksPath"] ?? "";
   return (
@@ -79,7 +80,7 @@ export function HooksSection({ path }: { path: string }) {
 }
 
 export function LfsSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["lfsInfo", path], queryFn: () => api.lfsInfo(path), staleTime: 30_000 });
+  const q = useQuery({ queryKey: ["lfsInfo", path], queryFn: ({ signal }) => api.lfsInfo(path, signal), staleTime: 30_000 });
   const i = q.data;
   const after = () => setTimeout(() => q.refetch(), 300);
   return (
@@ -203,8 +204,8 @@ export function IssueTrackerSection({ path }: { path: string }) {
 }
 
 export function SparseSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["sparseInfo", path], queryFn: () => api.sparseInfo(path) });
-  const s = useStore();
+  const q = useQuery({ queryKey: ["sparseInfo", path], queryFn: ({ signal }) => api.sparseInfo(path, signal) });
+  const s = useStore(useShallow((st) => ({ setDialog: st.setDialog })));
   return (
     <>
       <H>Sparse Checkout</H>
@@ -225,7 +226,7 @@ export function SparseSection({ path }: { path: string }) {
 }
 
 export function SubmodulesSection({ path }: { path: string }) {
-  const q = useQuery({ queryKey: ["submodulesList", path], queryFn: () => api.submodulesList(path) });
+  const q = useQuery({ queryKey: ["submodulesList", path], queryFn: ({ signal }) => api.submodulesList(path, signal) });
   const after = () => {
     void q.refetch();
     void refresh(path);

@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { saveProfileIdentity } from "@/lib/prefs";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -73,7 +74,7 @@ const REPO: Item[] = [
 
 /** Full-window Preferences: section list on the left, the section on the right. */
 export function PreferencesScreen({ onClose, section }: { onClose: () => void; section?: string }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ activeId: st.activeId, activeProfile: st.activeProfile, profiles: st.profiles, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path ?? "" : "";
   const [sel, setSel] = useState(section ?? "general");
@@ -115,7 +116,7 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
 }
 
 function ProfilesSection() {
-  const q = useQuery({ queryKey: ["accounts", null], queryFn: () => api.accountInfo(null) });
+  const q = useQuery({ queryKey: ["accounts", null], queryFn: ({ signal }) => api.accountInfo(null, signal) });
   const toast = useStore((s) => s.toast);
   const profiles = useStore((s) => s.profiles);
   const active = useStore((s) => s.activeProfile);

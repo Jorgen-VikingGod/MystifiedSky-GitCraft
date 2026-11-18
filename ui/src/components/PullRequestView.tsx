@@ -1,6 +1,7 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useShallow } from "zustand/react/shallow";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, GitPullRequest, CircleDot, X } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { RepoView } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { act, confirmThen } from "@/lib/repo";
@@ -18,12 +19,14 @@ function Since({ iso }: { iso: string }) {
 
 /** A pull request (merge request): description, comments, checkout, merge, comment. */
 export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId: string; number: number }) {
-  const s = useStore();
+  const s = useStore(useShallow((st) => ({ setUi: st.setUi, toast: st.toast })));
   const qc = useQueryClient();
-  const prs = useQuery({ queryKey: ["pr", repo.path, number], queryFn: () => hosting.pr(repo.path, number), staleTime: 60_000 });
+  const prs = useQuery({ queryKey: ["pr", repo.path, number], queryFn: ({ signal }) => hosting.pr(repo.path, number, signal), staleTime: 60_000 });
   const pr = prs.data;
-  const remote = useQuery({queryKey:["remote",repo.path],queryFn:()=>hosting.remote(repo.path),staleTime:60_000});
-  const comments = useQuery({ queryKey: ["prComments", repo.path, number], queryFn: () => hosting.comments(repo.path, number) });
+  const remote = useQuery({queryKey:["remote",repo.path],queryFn:({ signal })=>hosting.remote(repo.path, signal),staleTime:60_000});
+  const comments = useInfiniteQuery({ queryKey: ["prCommentsPages", repo.path, number], initialPageParam: null as string | null,
+    queryFn: ({pageParam, signal}) => hosting.commentsPage(repo.path, number, pageParam, signal), getNextPageParam: page => page.cursor ?? undefined });
+  const commentRows = useMemo(() => [...new Map((comments.data?.pages.flatMap(page => page.items) ?? []).map(c => [c.id || JSON.stringify([c.author,c.created,c.body]), c])).values()], [comments.data]);
   const [text, setText] = useState("");
   const [method, setMethod] = useState("merge");
   const [busy, setBusy] = useState(false);
@@ -59,6 +62,8 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
         await hosting.merge(repo.path, number, selectedMethod);
         s.toast(true, `Merged #${number}`);
         qc.invalidateQueries({ queryKey: ["prs", repo.path] });
+        qc.invalidateQueries({ queryKey: ["prsPages", repo.path] });
+        qc.invalidateQueries({ queryKey: ["launchpadPages"] });
         qc.invalidateQueries({ queryKey: ["pr", repo.path, number] });
         void act(repo.path, { type: "fetch" }, true);
         close();
@@ -115,8 +120,8 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
           <div className="rounded border border-white/10 bg-panel p-3 text-[13px] text-fg whitespace-pre-wrap break-words mb-4 select-text">{pr.body || <span className="text-fg3">No description.</span>}</div>
           <div className="text-[12px] font-semibold tracking-wider text-fg2 mb-2">COMMENTS</div>
           {comments.isLoading && <div className="text-fg3 text-[12.5px]">Loading comments…</div>}
-          {comments.data?.length === 0 && <div className="text-fg3 text-[12.5px] mb-2">No comments yet.</div>}
-          {comments.data?.map((c, i) => (
+          {!comments.isLoading && !comments.isError && commentRows.length === 0 && <div className="text-fg3 text-[12.5px] mb-2">No comments yet.</div>}
+          {commentRows.map((c, i) => (
             <div key={i} className="flex gap-2 mb-3">
               <Avatar name={c.author} email={c.author} size={24} />
               <div className="flex-1 min-w-0">
@@ -127,6 +132,8 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
               </div>
             </div>
           ))}
+          {comments.error && <div role="alert" className="text-bad">{String(comments.error)} <button onClick={() => comments.isFetchNextPageError ? comments.fetchNextPage() : comments.refetch()}>Retry comments</button> <button onClick={() => comments.refetch()}>Refresh comments</button></div>}
+          {comments.hasNextPage && <button className="text-link mb-3" disabled={comments.isFetching} onClick={() => comments.fetchNextPage()}>Load more comments</button>}
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -144,8 +151,8 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
 
 /** An issue: description, labels, create a branch for it. */
 export function IssueView({ repo, tabId, number }: { repo: RepoView; tabId: string; number: string | number }) {
-  const s = useStore();
-  const issues = useQuery({ queryKey: ["issues", repo.path], queryFn: () => hosting.issues(repo.path), staleTime: 60_000 });
+  const s = useStore(useShallow((st) => ({ setUi: st.setUi })));
+  const issues = useQuery({ queryKey: ["issues", repo.path], queryFn: ({ signal }) => hosting.issues(repo.path, signal), staleTime: 60_000 });
   const issue = typeof number === "string" ? issues.data?.find((i) => issueIdentity(i) === number) : issues.data?.filter((i) => i.number === number).filter((_, _index, all) => all.length === 1)[0];
   return (
     <div className="h-full flex flex-col bg-app min-w-0">

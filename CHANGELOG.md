@@ -10,6 +10,9 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- An opt-in renderer content-policy configuration and source inventory support packaged security testing before the policy is enabled by default.
+- Headless browser regressions now run in CI with downloadable reports and deterministic row, concurrency, and cache budgets.
+
 - Commit-list column dividers can be dragged or adjusted with the keyboard. Widths are remembered, wide layouts scroll horizontally, and individual or all column widths can be reset.
 
 - Add Remote now has URL, GitHub, GitLab, Bitbucket and Azure DevOps tabs. Connected accounts can create a hosted repository and push the current branch, with repository details, access selection, workspace/project selection where needed, and recovery after a partial failure.
@@ -31,6 +34,12 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - The bell in the tab bar is now a notification center: unread badge (50+ from fifty), All / Read / Unread filter, newest first with Today / Yesterday / date labels, mark as read or unread, remove, and Mark all as read / unread. Failed actions and available updates appear there. File > Sign Out removes the saved service sign-ins and shows "Successfully signed out". The status bar says "Connect an integration" until a service is connected, then "Select an integration" for repositories on a service you have not connected. The start screen gains Intro Tutorials and Documentation links.
 
 ### Changed
+
+- Blame previews enforce input/output limits and render measured visible rows, including wrapped lines. Saved agent sessions initially show five recent entries per worktree; expanded archives remain virtualized and searchable.
+- Worktree status reads prioritize visible cards and share four IPC slots. Session catalogs use a bounded incremental index with event updates and periodic recovery, and wide commit graphs transfer straight lanes as compact runs.
+- Git reads have deadlines, process-tree cancellation and a shared concurrency budget. Long Git jobs keep diagnostic tails with truncation notices and wait for renderer acknowledgements before sending further progress events.
+- Hosting requests reuse connections with request-specific credentials and interrupt stalled responses when their reader cancels. Pull requests, issues, comments, clone pickers and Launchpad load more results on demand. Launchpad providers arrive independently; failed continuations preserve displayed results and remain retryable. Azure Boards collections continue beyond fifty items.
+- Load fewer editor features while retaining basic language grammars, diff editing, search, folding and clipboard actions. Expensive panels and repository layouts subscribe to the store fields they use, avoiding unrelated draft and preference updates.
 
 - The main README screenshot shows the current desktop layout and commit history.
 
@@ -83,6 +92,15 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Hide the unavailable worktree WIP graph control until its data and rendering support are implemented.
 
 ### Fixed
+
+- Restore JSON language validation and detach editor models before disposal to avoid errors during rapid editor switches.
+- Cancel auxiliary repository reads and queued read locks; cancelled history loads report failure instead of returning an empty repository.
+
+- Preserve worktree identity and opening/actions when the worktree list is filtered. Restore branch-list row context menus by forwarding their trigger events and refs.
+- Report file-history and related collection read failures explicitly, with history retry instead of an empty-history message.
+- Retry temporarily unavailable avatars after a delay or reconnection, using normalized bounded caches.
+- Retry failed repository watcher registrations and serialize close/reopen operations. Watcher startup and shutdown run outside the shared map lock.
+- Publish editor saves from complete same-directory temporary files, retaining the original after write/replacement failure and preserving existing permissions and symlinks.
 
 - Make the mock AI server's accepted sockets blocking before timed reads, preventing intermittent macOS test failures on fragmented requests.
 

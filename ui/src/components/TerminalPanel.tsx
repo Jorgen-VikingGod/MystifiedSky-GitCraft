@@ -47,7 +47,7 @@ interface Tab {
 
 /** In-app terminal under the graph, with terminal tabs (Ctrl+` toggles it). */
 export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean }) {
-  const s = useStore(useShallow((s) => ({ settings: s.settings, setSettings: s.setSettings })));
+  const s = useStore(useShallow((s) => ({ terminalHeight: s.settings.terminalHeight, setSettings: s.setSettings })));
   const [tabs, setTabs] = useState<Tab[]>([{ key: 1, id: null, title: "Terminal 1" }]);
   const [active, setActive] = useState(1);
   useEffect(() => {
@@ -87,7 +87,7 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
   };
 
   return (
-    <div className="flex flex-col bg-black border-t border-white/15 shrink-0" style={{ height: s.settings.terminalHeight }}>
+    <div className="flex flex-col bg-black border-t border-white/15 shrink-0" style={{ height: s.terminalHeight }}>
       <div
         className="h-[4px] cursor-row-resize hover:bg-accent shrink-0"
         onPointerDown={(e) => {
@@ -131,6 +131,7 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
         {tabs.map((t) => (
           <TermView
             key={t.key}
+            sessionId={t.id}
             cwd={t.cwd ?? cwd}
             run={t.run}
             agentEnv={t.agentEnv}
@@ -144,7 +145,7 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
   );
 }
 
-function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: string; run?: string; agentEnv?: Record<string, string>; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
+function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: { sessionId: number | null; cwd: string; run?: string; agentEnv?: Record<string, string>; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
   // Preferences > In-App Terminal.
   const pref = useStore.getState().settings;
   const [focused, setFocused] = useState(true);
@@ -246,6 +247,8 @@ function TermView({ cwd, run, agentEnv, visible, onReady, onExit }: { cwd: strin
   return (
     <div
       ref={host}
+      data-terminal-session={sessionId ?? undefined}
+      data-terminal-visible={visible ? "true" : "false"}
       onFocusCapture={() => setFocused(true)}
       onBlurCapture={() => setFocused(false)}
       className={cn("absolute inset-0 pl-2 pt-1 transition-opacity", !visible && "invisible", dim && !focused && "opacity-60")}

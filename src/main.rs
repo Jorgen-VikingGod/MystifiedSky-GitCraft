@@ -11,6 +11,7 @@ mod ai_context;
 mod operation;
 mod pagination;
 mod process_tree;
+mod read_jobs;
 mod agents;
 mod ai_cli;
 mod ai_models;
@@ -42,12 +43,18 @@ use tauri::{Emitter, Manager, State};
 
 use metrics::INITIAL_COMMITS;
 
+struct WatchSlot {
+    read_id: String,
+    generation: Arc<()>,
+    watcher: Option<watch::RepoWatch>,
+}
+
 struct AppState {
     engine: Arc<Engine>,
     screenshot: Option<PathBuf>,
     /// Test aid: which screen `--screenshot` pictures (`--shot-view diff|split|history|start`).
     shot_view: Option<String>,
-    watchers: Mutex<HashMap<String, watch::RepoWatch>>,
+    watchers: Arc<Mutex<HashMap<String, WatchSlot>>>,
     terminals: terminal::Terminals,
 }
 
@@ -86,14 +93,14 @@ struct HistoryPage {
 }
 
 #[tauri::command]
-async fn history_page(path: String, cursor: HistoryCursor, max: Option<usize>) -> Result<HistoryPage, String> {
-    blocking(move || {
+async fn history_page(path: String, cursor: HistoryCursor, max: Option<usize>, read_id: Option<String>) -> Result<HistoryPage, String> {
+    blocking(move || read_jobs::scope(read_id, || {
         let mut cursor = cursor;
         let (commits, has_more) = git::history_page(Path::new(&path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000))?;
         let graph = cursor.layout.append(&commits);
         cursor.offset += commits.len();
         Ok(HistoryPage { commits, graph, has_more, history_cursor: has_more.then_some(cursor) })
-    }).await?
+    })).await?
 }
 
 fn err<E: ToString>(e: E) -> String {
@@ -104,15 +111,19 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tauri::async_runtime::spawn_blocking(f).await.map_err(err)
 }
 
+async fn read_blocking<T: Send + 'static>(id: Option<String>, f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    blocking(move || read_jobs::scope(id, f)).await
+}
+
 #[tauri::command]
 fn launch_options(state: State<'_, AppState>) -> LaunchOptions {
     LaunchOptions { screenshot: state.screenshot.is_some(), shot_view: state.shot_view.clone(), version: env!("CARGO_PKG_VERSION").to_string(), metrics: metrics::metrics() }
 }
 
 #[tauri::command]
-async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>, state: State<'_, AppState>) -> Result<RepoView, String> {
+async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>, state: State<'_, AppState>, read_id: Option<String>) -> Result<RepoView, String> {
     let engine = state.engine.clone();
-    blocking(move || {
+    blocking(move || read_jobs::scope(read_id, || {
         // Tabs saved by versions that turned /Users/x into \Users\x on macOS/Linux: restore the slashes.
         let path = if cfg!(not(windows)) && path.starts_with('\\') { path.replace('\\', "/") } else { path };
         let p = PathBuf::from(&path);
@@ -136,22 +147,22 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
             graph,
             history_cursor,
         })
-    })
+    }))
     .await?
 }
 
 #[tauri::command]
-async fn commit_details(path: String, sha: String) -> Result<git::Commit, String> {
-    blocking(move || {
+async fn commit_details(path: String, sha: String, read_id: Option<String>) -> Result<git::Commit, String> {
+    blocking(move || read_jobs::scope(read_id, || {
         let output = git::run(Path::new(&path), &["log", "--no-walk", "-1", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", &sha, "--"]);
         if !output.ok { return Err(output.message()); }
         git::parse_commits(&output.stdout).into_iter().next().ok_or_else(|| "The selected commit is no longer available.".into())
-    }).await?
+    })).await?
 }
 
 #[tauri::command]
-async fn commit_files(path: String, sha: String) -> Result<Vec<git::CommitFile>, String> {
-    blocking(move || {
+async fn commit_files(path: String, sha: String, read_id: Option<String>) -> Result<Vec<git::CommitFile>, String> {
+    blocking(move || read_jobs::scope(read_id, || {
         let dir = PathBuf::from(&path);
         let o = git::run(&dir, &["rev-list", "--parents", "-n1", &sha]);
         let parents: Vec<String> = o.stdout.split_whitespace().skip(1).map(|s| s.to_string()).collect();
@@ -165,7 +176,7 @@ async fn commit_files(path: String, sha: String) -> Result<Vec<git::CommitFile>,
             body: String::new(),
         };
         git::commit_file_entries(&dir, &c)
-    })
+    }))
     .await
 }
 
@@ -177,13 +188,14 @@ async fn file_diff(
     untracked: bool,
     parent: Option<String>,
     ignore_ws: Option<bool>,
+    read_id: Option<String>,
 ) -> Result<Vec<git::DiffLine>, String> {
-    blocking(move || git::file_diff_opts(Path::new(&path), &source, &file, untracked, parent.as_deref(), ignore_ws.unwrap_or(false))).await
+    blocking(move || read_jobs::scope(read_id, || git::file_diff_opts(Path::new(&path), &source, &file, untracked, parent.as_deref(), ignore_ws.unwrap_or(false)))).await
 }
 
 #[tauri::command]
-async fn file_versions(path: String, source: git::DiffSource, file: String, untracked: bool, parent: Option<String>, allow_large: Option<bool>) -> Result<files::FileVersions, String> {
-    blocking(move || files::versions_with_limit(Path::new(&path), &source, &file, parent.as_deref(), untracked, allow_large.unwrap_or(false))).await
+async fn file_versions(path: String, source: git::DiffSource, file: String, untracked: bool, parent: Option<String>, allow_large: Option<bool>, read_id: Option<String>) -> Result<files::FileVersions, String> {
+    blocking(move || read_jobs::scope(read_id, || files::versions_with_limit(Path::new(&path), &source, &file, parent.as_deref(), untracked, allow_large.unwrap_or(false)))).await
 }
 
 #[tauri::command]
@@ -196,38 +208,38 @@ async fn save_file(path: String, file: String, content: String, expected: Option
 }
 
 #[tauri::command]
-async fn file_history(path: String, file: String) -> Result<Vec<files::HistoryEntry>, String> {
-    blocking(move || files::history(Path::new(&path), &file, metrics::FILE_HISTORY_MAX)).await
+async fn file_history(path: String, file: String, read_id: Option<String>) -> Result<Vec<files::HistoryEntry>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::history(Path::new(&path), &file, metrics::FILE_HISTORY_MAX))).await?
 }
 
 #[tauri::command]
-async fn blame(path: String, file: String, rev: Option<String>) -> Result<Vec<files::BlameLine>, String> {
-    blocking(move || files::blame(Path::new(&path), &file, rev.as_deref())).await?
+async fn blame(path: String, file: String, rev: Option<String>, read_id: Option<String>) -> Result<Vec<files::BlameLine>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::blame(Path::new(&path), &file, rev.as_deref()))).await?
 }
 
 #[tauri::command]
-async fn commit_stats(path: String, shas: Vec<String>) -> Result<Vec<files::Stats>, String> {
-    blocking(move || files::stats(Path::new(&path), &shas)).await
+async fn commit_stats(path: String, shas: Vec<String>, read_id: Option<String>) -> Result<Vec<files::Stats>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::stats(Path::new(&path), &shas))).await?
 }
 
 #[tauri::command]
-async fn range_files(path: String, from: String, to: String) -> Result<Vec<git::FileChange>, String> {
-    blocking(move || files::range_files(Path::new(&path), &from, &to)).await
+async fn range_files(path: String, from: String, to: String, read_id: Option<String>) -> Result<Vec<git::FileChange>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::range_files(Path::new(&path), &from, &to))).await?
 }
 
 #[tauri::command]
-async fn tracked_files(path: String) -> Result<Vec<String>, String> {
-    blocking(move || files::tracked_files(Path::new(&path))).await
+async fn tracked_files(path: String, read_id: Option<String>) -> Result<Vec<String>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::tracked_files(Path::new(&path)))).await?
 }
 
 #[tauri::command]
 async fn read_ssh_public_key(path: String) -> Result<String, String> { blocking(move || accounts::read_public_key(&path)).await? }
 
 #[tauri::command]
-async fn rebase_plan(path: String, base: String) -> Result<serde_json::Value, String> {
-    blocking(move || {
+async fn rebase_plan(path: String, base: String, read_id: Option<String>) -> Result<serde_json::Value, String> {
+    read_blocking(read_id, move || {
         let dir = Path::new(&path);
-        let lock = operation::lock_for(dir); let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = operation::lock_for(dir); let _guard = read_jobs::lock(&lock)?;
         let expected = rewrite::plan_state(dir, &base)?;
         let commits = rewrite::rebase_commits(dir, &base)?;
         Ok(serde_json::json!({ "expected": expected, "commits": commits }))
@@ -235,46 +247,46 @@ async fn rebase_plan(path: String, base: String) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
-async fn rebase_commits(path: String, base: String) -> Result<Vec<git::Commit>, String> {
-    blocking(move || rewrite::rebase_commits(Path::new(&path), &base)).await?
+async fn rebase_commits(path: String, base: String, read_id: Option<String>) -> Result<Vec<git::Commit>, String> {
+    read_blocking(read_id, move || rewrite::rebase_commits(Path::new(&path), &base)).await?
 }
 
 #[tauri::command]
-async fn conflict_info(path: String, file: String) -> Result<rewrite::ConflictInfo, String> {
-    blocking(move || rewrite::conflict_info(Path::new(&path), &file)).await
+async fn conflict_info(path: String, file: String, read_id: Option<String>) -> Result<rewrite::ConflictInfo, String> {
+    read_blocking(read_id, move || rewrite::conflict_info(Path::new(&path), &file)).await
 }
 
 #[tauri::command]
-async fn gitflow_config(path: String) -> Result<manage::GitflowConfig, String> {
-    blocking(move || manage::gitflow_config(Path::new(&path))).await
+async fn gitflow_config(path: String, read_id: Option<String>) -> Result<manage::GitflowConfig, String> {
+    read_blocking(read_id, move || manage::gitflow_config(Path::new(&path))).await
 }
 
 #[tauri::command]
-async fn cleanup_list(path: String) -> Result<Vec<manage::CleanupBranch>, String> {
-    blocking(move || manage::cleanup_list(Path::new(&path))).await
+async fn cleanup_list(path: String, read_id: Option<String>) -> Result<Vec<manage::CleanupBranch>, String> {
+    read_blocking(read_id, move || manage::cleanup_list(Path::new(&path))).await
 }
 
 #[tauri::command]
-async fn remotes_list(path: String) -> Result<Vec<manage::Remote>, String> {
-    blocking(move || manage::remotes(Path::new(&path))).await
+async fn remotes_list(path: String, read_id: Option<String>) -> Result<Vec<manage::Remote>, String> {
+    read_blocking(read_id, move || manage::remotes(Path::new(&path))).await
 }
 
 #[tauri::command]
-async fn submodules_list(path: String) -> Result<Vec<manage::Submodule>, String> {
-    blocking(move || manage::submodules(Path::new(&path))).await
+async fn submodules_list(path: String, read_id: Option<String>) -> Result<Vec<manage::Submodule>, String> {
+    read_blocking(read_id, move || manage::submodules(Path::new(&path))).await
 }
 
 #[tauri::command]
-async fn lfs_locks(path: String) -> Result<Vec<manage::LfsLock>, String> { blocking(move || manage::lfs_locks(Path::new(&path))).await? }
+async fn lfs_locks(path: String, read_id: Option<String>) -> Result<Vec<manage::LfsLock>, String> { read_blocking(read_id, move || manage::lfs_locks(Path::new(&path))).await? }
 
 #[tauri::command]
-async fn lfs_info(path: String) -> Result<manage::LfsInfo, String> {
-    blocking(move || manage::lfs_info(Path::new(&path))).await
+async fn lfs_info(path: String, read_id: Option<String>) -> Result<manage::LfsInfo, String> {
+    read_blocking(read_id, move || manage::lfs_info(Path::new(&path))).await
 }
 
 #[tauri::command]
-async fn sparse_info(path: String) -> Result<manage::SparseInfo, String> {
-    blocking(move || manage::sparse_info(Path::new(&path))).await
+async fn sparse_info(path: String, read_id: Option<String>) -> Result<manage::SparseInfo, String> {
+    read_blocking(read_id, move || manage::sparse_info(Path::new(&path))).await
 }
 
 #[tauri::command]
@@ -283,14 +295,14 @@ fn gitignore_templates() -> Vec<String> {
 }
 
 #[tauri::command]
-async fn account_info(path: Option<String>) -> Result<accounts::AccountInfo, String> {
-    blocking(move || accounts::info(Path::new(&path.unwrap_or_else(|| ".".into())))).await
+async fn account_info(path: Option<String>, read_id: Option<String>) -> Result<accounts::AccountInfo, String> {
+    read_blocking(read_id, move || accounts::info(Path::new(&path.unwrap_or_else(|| ".".into())))).await
 }
 
 #[tauri::command]
-async fn push_review(path: String) -> Result<actions::PushReview, String> {
-    blocking(move || {
-        let dir=Path::new(&path);let lock=operation::lock_for(dir);let _guard=lock.lock().unwrap_or_else(|error|error.into_inner());
+async fn push_review(path: String, read_id: Option<String>) -> Result<actions::PushReview, String> {
+    read_blocking(read_id, move || {
+        let dir=Path::new(&path);let lock=operation::lock_for(dir);let _guard=read_jobs::lock(&lock)?;
         actions::push_review(dir)
     }).await?
 }
@@ -402,23 +414,28 @@ fn set_secret(name: String, value: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn repo_remote(path: String, gitlab_host: String) -> Result<Option<hosting::RemoteRepo>, String> {
-    blocking(move || remote_of(&path, &gitlab_host).ok()).await
+async fn repo_remote(path: String, gitlab_host: String, read_id: Option<String>) -> Result<Option<hosting::RemoteRepo>, String> {
+    read_blocking(read_id, move || remote_of(&path, &gitlab_host).ok()).await
 }
 
 #[tauri::command]
-async fn list_prs(path: String, gitlab_host: String) -> Result<Vec<hosting::PullRequest>, String> {
-    blocking(move || hosting::pull_requests(&remote_of(&path, &gitlab_host)?)).await?
+async fn list_prs_page(path: String, gitlab_host: String, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::PullRequest>>, String> {
+    blocking(move || read_jobs::scope(read_id, || hosting::pull_requests_page(&remote_of(&path, &gitlab_host)?, cursor.as_deref()))).await?
 }
 
 #[tauri::command]
-async fn pr_details(path: String, gitlab_host: String, number: u64) -> Result<hosting::PullRequest, String> {
-    blocking(move || hosting::pull_request(&remote_of(&path, &gitlab_host)?, number)).await?
+async fn list_prs(path: String, gitlab_host: String, read_id: Option<String>) -> Result<Vec<hosting::PullRequest>, String> {
+    read_blocking(read_id, move || hosting::pull_requests(&remote_of(&path, &gitlab_host)?)).await?
 }
 
 #[tauri::command]
-async fn pr_checkout_target(path: String, gitlab_host: String, number: u64) -> Result<hosting::PrCheckout, String> {
-    blocking(move || {
+async fn pr_details(path: String, gitlab_host: String, number: u64, read_id: Option<String>) -> Result<hosting::PullRequest, String> {
+    read_blocking(read_id, move || hosting::pull_request(&remote_of(&path, &gitlab_host)?, number)).await?
+}
+
+#[tauri::command]
+async fn pr_checkout_target(path: String, gitlab_host: String, number: u64, read_id: Option<String>) -> Result<hosting::PrCheckout, String> {
+    read_blocking(read_id, move || {
         let remote = remote_of(&path, &gitlab_host)?;
         hosting::pr_checkout(&remote, &hosting::pull_request(&remote, number)?)
     }).await?
@@ -426,8 +443,16 @@ async fn pr_checkout_target(path: String, gitlab_host: String, number: u64) -> R
 
 /// Issues for a repository: from its own issue tracker choice (Preferences > Issue Tracker), else its host.
 #[tauri::command]
-async fn list_issues(path: String, gitlab_host: String, tracker: Option<hosting::Tracker>) -> Result<Vec<hosting::Issue>, String> {
-    blocking(move || match tracker.filter(|t| !t.kind.is_empty()) {
+async fn list_issues_page(path: String, gitlab_host: String, tracker: Option<hosting::Tracker>, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::Issue>>, String> {
+    blocking(move || read_jobs::scope(read_id, || pagination::one_page(cursor, || match tracker.filter(|t| !t.kind.is_empty()) {
+        Some(t) => hosting::tracker_issues(&t, false),
+        None => hosting::issues(&remote_of(&path, &gitlab_host)?),
+    }))).await?
+}
+
+#[tauri::command]
+async fn list_issues(path: String, gitlab_host: String, tracker: Option<hosting::Tracker>, read_id: Option<String>) -> Result<Vec<hosting::Issue>, String> {
+    read_blocking(read_id, move || match tracker.filter(|t| !t.kind.is_empty()) {
         Some(t) => hosting::tracker_issues(&t, false),
         None => hosting::issues(&remote_of(&path, &gitlab_host)?),
     })
@@ -472,8 +497,13 @@ async fn integration_sign_in(id: String, method: String) -> Result<String, Strin
 }
 
 #[tauri::command]
-async fn integration_repos(id: String) -> Result<Vec<hosting::HostedRepo>, String> {
-    blocking(move || hosting::repositories(&id)).await?
+async fn integration_repos_page(id: String, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::HostedRepo>>, String> {
+    blocking(move || read_jobs::scope(read_id, || pagination::one_page(cursor, || hosting::repositories(&id)))).await?
+}
+
+#[tauri::command]
+async fn integration_repos(id: String, read_id: Option<String>) -> Result<Vec<hosting::HostedRepo>, String> {
+    read_blocking(read_id, move || hosting::repositories(&id)).await?
 }
 
 #[tauri::command]
@@ -504,8 +534,18 @@ fn integration_ssh_page(id: String) -> String {
 }
 
 #[tauri::command]
-async fn pr_comments(path: String, gitlab_host: String, number: u64) -> Result<Vec<hosting::Comment>, String> {
-    blocking(move || hosting::comments(&remote_of(&path, &gitlab_host)?, number)).await?
+async fn pr_comments_page(path: String, gitlab_host: String, number: u64, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::Comment>>, String> {
+    blocking(move || read_jobs::scope(read_id, || pagination::one_page(cursor, || hosting::comments(&remote_of(&path, &gitlab_host)?, number)))).await?
+}
+
+#[tauri::command]
+async fn launchpad_page(service: String, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<hosting::Launchpad>, String> {
+    blocking(move || read_jobs::scope(read_id, || hosting::launchpad_page(&service, cursor.as_deref()))).await?
+}
+
+#[tauri::command]
+async fn pr_comments(path: String, gitlab_host: String, number: u64, read_id: Option<String>) -> Result<Vec<hosting::Comment>, String> {
+    read_blocking(read_id, move || hosting::comments(&remote_of(&path, &gitlab_host)?, number)).await?
 }
 
 #[tauri::command]
@@ -532,8 +572,8 @@ async fn merge_pr(path: String, gitlab_host: String, number: u64, method: String
 }
 
 #[tauri::command]
-async fn launchpad(gitlab_host: String) -> Result<hosting::Launchpad, String> {
-    blocking(move || hosting::launchpad(&gitlab_host)).await
+async fn launchpad(gitlab_host: String, read_id: Option<String>) -> Result<hosting::Launchpad, String> {
+    read_blocking(read_id, move || hosting::launchpad(&gitlab_host)).await
 }
 
 #[tauri::command]
@@ -632,14 +672,14 @@ async fn pick_patch_file() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn conflict_check(path: String, target: Option<String>) -> Result<extras::ConflictCheck, String> {
-    blocking(move || extras::conflict_check(Path::new(&path), target.as_deref())).await
+async fn conflict_check(path: String, target: Option<String>, read_id: Option<String>) -> Result<extras::ConflictCheck, String> {
+    read_blocking(read_id, move || extras::conflict_check(Path::new(&path), target.as_deref())).await
 }
 
 /// Just the file lists (one `git status`), for staging and working-folder edits.
 #[tauri::command]
-async fn repo_status(path: String) -> Result<git::WorkStatus, String> {
-    blocking(move || git::try_status(Path::new(&path))).await?
+async fn repo_status(path: String, read_id: Option<String>) -> Result<git::WorkStatus, String> {
+    blocking(move || read_jobs::scope(read_id, || git::try_status(Path::new(&path)))).await?
 }
 
 /// Hand the tokens of connected services to Git (HTTPS push / pull / fetch / clone).
@@ -649,8 +689,8 @@ async fn sync_git_credentials(gitlab_host: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn remote_auth(path: String, gitlab_host: String) -> Result<hosting::RemoteAuth, String> {
-    blocking(move || hosting::remote_auth(Path::new(&path), &gitlab_host)).await
+async fn remote_auth(path: String, gitlab_host: String, read_id: Option<String>) -> Result<hosting::RemoteAuth, String> {
+    read_blocking(read_id, move || hosting::remote_auth(Path::new(&path), &gitlab_host)).await
 }
 
 /// Preferences that change how Git runs: executable, SSH key / agent, extended logging.
@@ -665,8 +705,8 @@ async fn tool_versions(gpg_program: String) -> Result<prefs::Versions, String> {
 }
 
 #[tauri::command]
-async fn git_config_get(path: Option<String>, scope: String, keys: Vec<String>) -> Result<HashMap<String, String>, String> {
-    blocking(move || prefs::config_get(path.as_deref().map(Path::new), &scope, &keys)).await
+async fn git_config_get(path: Option<String>, scope: String, keys: Vec<String>, read_id: Option<String>) -> Result<HashMap<String, String>, String> {
+    read_blocking(read_id, move || prefs::config_get(path.as_deref().map(Path::new), &scope, &keys)).await
 }
 
 #[tauri::command]
@@ -758,8 +798,8 @@ async fn conflict_sample() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn last_commit_message(path: String) -> Result<(String, String), String> {
-    blocking(move || git::last_commit_message(Path::new(&path))).await
+async fn last_commit_message(path: String, read_id: Option<String>) -> Result<(String, String), String> {
+    read_blocking(read_id, move || git::last_commit_message(Path::new(&path))).await
 }
 
 #[tauri::command]
@@ -920,8 +960,8 @@ fn reveal_file(path: String, file: String) -> Result<(), String> {
 
 /// File menu "Copy file contents to clipboard": the working copy, or the file as it was in `rev`.
 #[tauri::command]
-async fn file_text(path: String, file: String, rev: Option<String>) -> Result<String, String> {
-    blocking(move || files::file_text(Path::new(&path), &file, rev.as_deref())).await?
+async fn file_text(path: String, file: String, rev: Option<String>, read_id: Option<String>) -> Result<String, String> {
+    read_blocking(read_id, move || files::file_text(Path::new(&path), &file, rev.as_deref())).await?
 }
 
 fn settings_file() -> PathBuf {
@@ -955,24 +995,60 @@ fn save_settings(settings: serde_json::Value, state: State<'_, AppState>) -> Res
     std::fs::rename(pending, f).map_err(err)
 }
 
-/// Watch a repository and tell the window when something changed (rules in src/watch.rs).
 #[tauri::command]
-fn watch_repo(path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let mut w = state.watchers.lock().unwrap();
-    if w.contains_key(&path) {
-        return Ok(());
-    }
-    let key = path.clone();
-    let watcher = watch::start(Path::new(&path), move |full| {
-        let _ = app.emit("repo-changed", serde_json::json!({ "path": key, "full": full }));
-    })?;
-    w.insert(path, watcher);
-    Ok(())
+fn desktop_validation_state(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    if state.screenshot.is_none() || state.shot_view.as_deref() != Some("validation") { return Err("Desktop validation mode is not active".into()); }
+    let watchers = state.watchers.lock().unwrap();
+    Ok(serde_json::json!({"read_slots": read_jobs::active_count(), "watchers": watchers.len(), "pending_watches": watchers.values().filter(|s| s.watcher.is_none()).count(), "terminals": state.terminals.pending_output()}))
 }
 
 #[tauri::command]
-fn unwatch_repo(path: String, state: State<'_, AppState>) {
-    state.watchers.lock().unwrap().remove(&path);
+fn desktop_validation_accounts(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    if state.screenshot.is_none() || state.shot_view.as_deref() != Some("validation") { return Err("Desktop validation mode is not active".into()); }
+    Ok(serde_json::json!({"gitlab": hosting::secret_get("gitlab-token").is_some(), "gitlab_self": hosting::secret_get("gitlab-self-token").is_some()}))
+}
+
+#[tauri::command]
+fn acknowledge_job(id: String, state: State<'_, AppState>) { state.engine.jobs.acknowledge(&id); }
+
+#[tauri::command]
+fn cancel_read(id: String) { read_jobs::cancel(&id); }
+
+/// Watch a repository and tell the window when something changed (rules in src/watch.rs).
+#[tauri::command]
+async fn watch_repo(path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let generation = Arc::new(());
+    static NEXT_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let read_id = format!("watch-{}", NEXT_WATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let watchers = state.watchers.clone();
+    {
+        let mut map = watchers.lock().unwrap();
+        if map.contains_key(&path) { return Ok(()); }
+        map.insert(path.clone(), WatchSlot { read_id: read_id.clone(), generation: generation.clone(), watcher: None });
+    }
+    blocking(move || {
+        let key = path.clone();
+        let result = read_jobs::scope(Some(read_id), || watch::start(Path::new(&path), move |full| {
+            let _ = app.emit("repo-changed", serde_json::json!({ "path": key, "full": full }));
+        }));
+        let mut map = watchers.lock().unwrap();
+        if !map.get(&path).is_some_and(|slot| Arc::ptr_eq(&slot.generation, &generation)) {
+            drop(map);
+            drop(result); // stop a superseded watcher outside the map lock
+            return Ok(());
+        }
+        match result {
+            Ok(watcher) => { map.get_mut(&path).unwrap().watcher = Some(watcher); Ok(()) }
+            Err(error) => { map.remove(&path); Err(error) }
+        }
+    }).await?
+}
+
+#[tauri::command]
+async fn unwatch_repo(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let removed = state.watchers.lock().unwrap().remove(&path);
+    if let Some(slot) = &removed { if slot.watcher.is_none() { read_jobs::cancel(&slot.read_id); } }
+    blocking(move || drop(removed)).await
 }
 
 /// Called by the window once it has drawn about 120 frames in --screenshot mode.
@@ -1013,7 +1089,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Mutex::new(HashMap::new()), terminals: terminal::Terminals::default() })
+        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Arc::new(Mutex::new(HashMap::new())), terminals: terminal::Terminals::default() })
         .setup(move |app| {
             // Long jobs report progress to the window ("job-progress" events).
             let handle = app.handle().clone();
@@ -1035,7 +1111,7 @@ fn main() {
                     let _ = win.center();
                 }
             }
-            if let Some(out) = screenshot.clone() {
+            if let Some(out) = screenshot.clone().filter(|_| !args.windows(2).any(|a| a[0] == "--shot-view" && a[1] == "validation")) {
                 // Safety net: take the picture anyway if the page never reports ready.
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -1100,10 +1176,14 @@ fn main() {
             hosting_status,
             set_secret,
             repo_remote,
+            list_prs_page,
             list_prs,
             pr_details,
             pr_checkout_target,
+            list_issues_page,
             list_issues,
+            pr_comments_page,
+            launchpad_page,
             pr_comments,
             pr_comment,
             create_pr,
@@ -1114,6 +1194,7 @@ fn main() {
             set_integration_config,
             integration_statuses,
             integration_sign_in,
+            integration_repos_page,
             integration_repos,
             publish_targets,
             publish_repository,
@@ -1156,6 +1237,10 @@ fn main() {
             file_text,
             load_settings,
             save_settings,
+            desktop_validation_state,
+            desktop_validation_accounts,
+            acknowledge_job,
+            cancel_read,
             watch_repo,
             unwatch_repo,
             screenshot_ready
