@@ -57,6 +57,8 @@ jobs:
         run: node --test scripts/changelog-release.test.mjs
       - name: Test browser protocol dispatch
         run: node --test scripts/cdp-messages.test.mjs
+      - name: Test desktop harness path boundaries
+        run: node --test scripts/desktop-harness-paths.test.mjs
       - name: Test native Git operations
         run: cargo test --locked -- --test-threads=1
 
@@ -73,7 +75,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - uses: browser-actions/setup-chrome@v1
+      - uses: browser-actions/setup-chrome@c785b87e244131f27c9f19c1a33e2ead956ab7ce # v1
         id: chrome
       - run: npm --prefix ui ci --ignore-scripts
       - name: Exercise components and resource budgets

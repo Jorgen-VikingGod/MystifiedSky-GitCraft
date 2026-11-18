@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Security
 
+- Restrict desktop verification to local debug/release builds and safe report names, refuse artifact paths outside the checkout, and use explicit Windows tool paths. Pin the browser setup action to an immutable commit.
+
 - Validate browser-debugging response IDs and registered callback types before dispatch. Review and document the vendored GLib scanning false positives without excluding them from future scans.
 
 ### Added
@@ -92,6 +94,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Hide the unavailable worktree WIP graph control until its data and rendering support are implemented.
 
 ### Fixed
+
+- Keep agent session catalogs current when the configured directory uses an aliased path, including macOS temporary directories.
 
 - Restore JSON language validation and detach editor models before disposal to avoid errors during rapid editor switches.
 - Cancel auxiliary repository reads and queued read locks; cancelled history loads report failure instead of returning an empty repository.

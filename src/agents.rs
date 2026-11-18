@@ -206,6 +206,10 @@ struct CatalogIndex {
 impl CatalogIndex {
     fn new(root: PathBuf) -> Self {
         use notify_debouncer_mini::notify::{self, Watcher};
+        // Native events use the resolved path (notably /private/var on macOS).
+        // Discovery and event keys must share that identity, including removals
+        // whose paths can no longer be canonicalized after the file disappears.
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let (send, events) = std::sync::mpsc::sync_channel(1024);
         let dirty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let overflow = dirty.clone();
@@ -249,6 +253,9 @@ impl CatalogIndex {
             return;
         }
         let paths: std::collections::HashSet<_> = events.into_iter().flat_map(|e| e.paths).collect();
+        self.apply_paths(paths);
+    }
+    fn apply_paths(&mut self, paths: std::collections::HashSet<PathBuf>) {
         for path in paths {
             if path.is_dir() && !path.is_symlink() {
                 let mut files = Vec::new(); jsonl_files(&path, 3, &mut files);
@@ -320,6 +327,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn wait_for_catalog(index: &mut CatalogIndex, roots: &[String], stage: &str, matches: impl Fn(&[AgentSession]) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches(&index.sessions(roots)) { return; }
+            assert!(std::time::Instant::now() < deadline, "catalog event timed out: {stage}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn catalog_events_use_the_same_canonical_identity_as_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("alias")).unwrap();
+        let directory = temp.path().join("sessions"); fs::create_dir(&directory).unwrap();
+        let file = directory.join("session.jsonl");
+        fs::write(&file, r#"{"type":"session_meta","payload":{"id":"original","cwd":"/index"}}"#).unwrap();
+        // An unresolved alias differs lexically, just as /var and /private/var
+        // do in macOS temp directories. Inject native-style events deterministically.
+        let alias = temp.path().join("alias/../sessions");
+        let mut index = CatalogIndex::new(alias);
+        let canonical = directory.canonicalize().unwrap();
+        assert_eq!(index.root, canonical);
+        let canonical_file = canonical.join("session.jsonl");
+        let scans = index.scans;
+        fs::write(&file, r#"{"type":"session_meta","payload":{"id":"changed","cwd":"/index"}}"#).unwrap();
+        index.apply_paths([canonical_file.clone()].into_iter().collect());
+        assert_eq!(index.entries[&canonical_file].0.as_ref().unwrap().id, "changed");
+        fs::remove_file(file).unwrap();
+        index.apply_paths([canonical_file].into_iter().collect());
+        assert!(index.entries.is_empty());
+        assert_eq!(index.scans, scans, "canonical events must not need a recovery scan");
+    }
+
     #[test]
     fn catalog_index_avoids_idle_probes_and_tracks_append_create_remove_and_overflow() {
         let temp = tempfile::tempdir().unwrap();
@@ -332,20 +372,19 @@ mod tests {
         assert_eq!(index.probes, probes); assert_eq!(index.scans, scans);
         let changed = temp.path().join("0.jsonl");
         fs::write(&changed, r#"{"type":"session_meta","payload":{"id":"changed","cwd":"/index"}}"#).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !index.sessions(&roots).iter().any(|s| s.id == "changed") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        wait_for_catalog(&mut index, &roots, "modified file", |items| items.iter().any(|s| s.id == "changed"));
         assert!(index.probes - probes < 10, "changed file caused a full catalog scan");
         {
             use std::io::Write;
             let mut file = fs::OpenOptions::new().append(true).open(&changed).unwrap();
             writeln!(file, "\n{}", json!({"type":"event_msg","payload":{"type":"user_message","message":"Appended session title"}})).unwrap();
         }
-        while !index.sessions(&roots).iter().any(|s| s.id == "changed" && s.title == "Appended session title") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        wait_for_catalog(&mut index, &roots, "appended message", |items| items.iter().any(|s| s.id == "changed" && s.title == "Appended session title"));
         fs::remove_file(changed).unwrap();
-        while index.sessions(&roots).len() != 4199 { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        wait_for_catalog(&mut index, &roots, "removed file", |items| items.len() == 4199);
         fs::create_dir(temp.path().join("new")).unwrap();
         fs::write(temp.path().join("new/created.jsonl"), r#"{"type":"session_meta","payload":{"id":"created","cwd":"/index"}}"#).unwrap();
-        while !index.sessions(&roots).iter().any(|s| s.id == "created") { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(20)); }
+        wait_for_catalog(&mut index, &roots, "created nested file", |items| items.iter().any(|s| s.id == "created"));
         index.dirty.store(true, std::sync::atomic::Ordering::Release); assert_eq!(index.sessions(&roots).len(), 4200);
         assert!(index.scans > scans); assert!(index.bytes <= INDEX_BYTES);
         eprintln!("catalog: {probes} initial probes, zero idle probes, {} retained bytes", index.bytes);

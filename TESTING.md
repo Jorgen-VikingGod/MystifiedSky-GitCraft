@@ -86,8 +86,21 @@ Build the production renderer, then a release executable with the optional polic
 ```powershell
 npm --prefix ui run build
 ./ui/node_modules/.bin/tauri.cmd build --no-bundle --config tauri.csp.conf.json
-node scripts/verify-desktop.mjs target/release/gitcraft.exe csp
+node scripts/verify-desktop.mjs release csp
 ```
+
+The first argument selects `release` (default) or `debug` in this checkout's
+`target` directory; the former `target/release/gitcraft.exe` and
+`target/debug/gitcraft.exe` spellings are also accepted. Arbitrary executable
+paths are rejected. The optional report tag is limited to 1–48 ASCII letters,
+digits, underscores and hyphens, starting with a letter or digit. Artifact
+junctions pointing outside the checkout are refused. Install Git for Windows
+under Program Files; the harness uses explicit Git, PowerShell and system tool
+paths and gives the app a restricted process search path.
+
+Run `node --test scripts/desktop-harness-paths.test.mjs` to check the executable
+allowlist, traversal rejection, junction boundaries and Windows PATH isolation.
+This suite also runs in the Windows, macOS and Linux CI matrix.
 
 The Windows harness uses WebView2's loopback debugging endpoint and an explicit
 `--screenshot ... --shot-view validation` startup mode. It creates disposable

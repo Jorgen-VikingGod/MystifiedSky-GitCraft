@@ -447,7 +447,7 @@ await test("B100 filtered linked worktrees keep identity and open", async () => 
   assert(menu("Remove worktree")!.hasAttribute("data-disabled"), "Locked removal enabled");
 });
 await test("B101 history failure retry and real empty state", async () => {
-  handlers.file_history = () => Promise.reject("fixture unreadable object");
+  handlers.file_history = () => Promise.reject(new Error("fixture unreadable object"));
   mount(<HistoryView repo={repo} tabId={tabId} file="a.txt" mode="history" sha={null}/>);
   await until(() => !!button("Retry"), "history error retry");
   assert(!document.body.textContent?.includes("No commits touch this file"), "Error rendered as empty history");
