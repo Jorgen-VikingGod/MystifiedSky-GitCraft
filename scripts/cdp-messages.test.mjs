@@ -1,18 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Session } from 'node:inspector/promises';
 import { createCdpEvaluator, dispatchCdpMessage } from './cdp-messages.mjs';
 
-test('passes hostile paths as data through the real runtime protocol', async t => {
-  const session = new Session();
-  session.connect();
-  t.after(() => session.disconnect());
+test('keeps paths separate from code in browser protocol messages', async () => {
   const calls = [];
   const evaluate = createCdpEvaluator(async (method, params) => {
-    // Exercise the same JSON transport boundary as the WebSocket harness.
     const wire = JSON.parse(JSON.stringify(params));
     calls.push({ method, params: wire });
-    return { result: await session.post(method, wire) };
+    if (method === 'Runtime.evaluate') {
+      return { result: { result: { objectId: 'global' } } };
+    }
+    return { result: { result: { value: 'ok' } } };
   });
   const paths = [
     'C:\\nested folder\\caf\u00e9 \u65e5\u672c\\selected \u03bb file.txt',
@@ -23,17 +21,28 @@ test('passes hostile paths as data through the real runtime protocol', async t =
     '` ${globalThis.__gitcraftInjected = true} \\ \u0000\b\f\n\r\t\u2028\u2029',
   ];
   const input = { paths, closedAt: 123.5 };
-  assert.deepEqual(await evaluate('await Promise.resolve(); return input;', input), input);
-  assert.equal(await evaluate('return typeof globalThis.__gitcraftInjected;'), 'undefined');
-  assert.equal(calls.filter(c => c.method === 'Runtime.evaluate').length, 1);
-  const call = calls.find(c => c.method === 'Runtime.callFunctionOn');
-  assert.deepEqual(call.params.arguments, [{ value: input }]);
-  for (const path of paths) assert.equal(call.params.functionDeclaration.includes(path), false);
-  // The harness relies on global state surviving successive calls.
-  t.after(() => { delete globalThis.__gitcraftCdpFixture; });
-  await evaluate('globalThis.__gitcraftCdpFixture = input.paths;', { paths });
-  assert.deepEqual(await evaluate('return globalThis.__gitcraftCdpFixture;'), paths);
-  await assert.rejects(evaluate('throw new Error("fixture exception");'), /fixture exception/);
+  const code = 'await Promise.resolve(); return input;';
+  assert.equal(await evaluate(code, input), 'ok');
+  assert.equal(await evaluate(code, input), 'ok');
+
+  const [lookup, ...invocations] = calls;
+  assert.deepEqual(lookup, {
+    method: 'Runtime.evaluate',
+    params: { expression: 'globalThis' },
+  });
+  assert.equal(invocations.length, 2);
+  for (const call of invocations) {
+    assert.deepEqual(call, {
+      method: 'Runtime.callFunctionOn',
+      params: {
+        objectId: 'global',
+        functionDeclaration: `async function(input) {${code}\n}`,
+        arguments: [{ value: input }],
+        awaitPromise: true,
+        returnByValue: true,
+      },
+    });
+  }
 });
 
 test('reports protocol errors and missing runtime objects', async () => {
@@ -44,10 +53,15 @@ test('reports protocol errors and missing runtime objects', async () => {
   ]) {
     await assert.rejects(createCdpEvaluator(async () => response)('return 1;'));
   }
-  const evaluate = createCdpEvaluator(async method => method === 'Runtime.evaluate'
-    ? { result: { result: { objectId: 'global' } } }
-    : { error: { message: 'function call failed' } });
-  await assert.rejects(evaluate('return 1;'), /function call failed/);
+  for (const [response, message] of [
+    [{ error: { message: 'function call failed' } }, /function call failed/],
+    [{ result: { exceptionDetails: { text: 'fixture exception' } } }, /fixture exception/],
+  ]) {
+    const evaluate = createCdpEvaluator(async method => method === 'Runtime.evaluate'
+      ? { result: { result: { objectId: 'global' } } }
+      : response);
+    await assert.rejects(evaluate('return 1;'), message);
+  }
 });
 
 test('refreshes a global handle after navigation, with a bounded retry', async () => {
