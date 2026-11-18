@@ -63,6 +63,24 @@ test('release notes list the Unreleased entries by category', () => {
   assert.equal(releaseNotes('# C\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n'), '');
 });
 
+test('queued releases exclude already published bullets even when main still lists them', () => {
+  const baseline = shipped.replace('### Added', '### Changed').replace('continued on a second line.', '  continued on a second line.');
+  const newNotes = releaseNotes(current, baseline);
+  assert.equal(newNotes, '### Added\n\n- Third feature, added after the release.\n');
+  assert.equal(releaseNotes(shipped, baseline), '');
+  const archived = recordRelease({ current, shipped: current, previousChangelog: baseline, version: '0.1.7', repo: 'o/r', date: '2026-11-14' });
+  const section = archived.split('## [0.1.7] - 2026-11-14\n\n')[1].split('\n## [0.1.5]')[0];
+  assert.equal(section.trim(), newNotes.trim());
+});
+
+test('release notes include a new bullet only once even if listed in multiple categories', () => {
+  const duplicate = shipped.replace('- A fix.', '- A fix.\n- First feature.');
+  assert.equal(releaseNotes(duplicate), [
+    '### Added', '', '- First feature.', '', '- Second feature,',
+    '  continued on a second line.', '', '### Fixed', '', '- A fix.', '',
+  ].join('\n'));
+});
+
 test('category headings and trailing whitespace accept long inputs without backtracking', () => {
   assert.deepEqual(parseEntries(`### Fixed${' '.repeat(100000)}\n\n- Kept.`), { Fixed: ['- Kept.'] });
   const current = `# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Kept.\n\n[old]: https://example.test/old\n${' '.repeat(100000)}`;
