@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Security
 
+- Pass desktop verification paths as browser-protocol arguments so they cannot become executable JavaScript.
+
 - Restrict desktop verification to local debug/release builds and safe report names, refuse artifact paths outside the checkout, and use explicit Windows tool paths. Pin the browser setup action to an immutable commit.
 
 - Validate browser-debugging response IDs and registered callback types before dispatch. Review and document the vendored GLib scanning false positives without excluding them from future scans.

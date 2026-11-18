@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, existsSync } from 
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:net';
 import { desktopOptions, containedPath, artifactDirectory, windowsTools } from './desktop-harness-paths.mjs';
-import { dispatchCdpMessage } from './cdp-messages.mjs';
+import { createCdpEvaluator, dispatchCdpMessage } from './cdp-messages.mjs';
 if (process.platform !== 'win32') throw new Error('This WebView2 harness runs on Windows. Other desktop webviews need their native validation lane.');
 const repository = resolve(import.meta.dirname, '..');
 const options = desktopOptions(process.argv.slice(2), repository);
@@ -31,7 +31,7 @@ const child=spawn(executable,['--screenshot',join(run,'desktop.png'),'--shot-vie
 let log='';child.stdout.on('data',b=>log+=b);child.stderr.on('data',b=>log+=b);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));let socket;const report={tag,fixtureCommits:50000,checks:[],exceptions:[],memory:[]};
 let send;
-async function evaluate(code){const response=await send('Runtime.evaluate',{expression:`(async()=>{${code}})()`,awaitPromise:true,returnByValue:true});if(response.error||response.result?.exceptionDetails)throw new Error(JSON.stringify(response.error??response.result.exceptionDetails));return response.result?.result?.value;}
+const evaluate=createCdpEvaluator((method,params)=>send(method,params));
 async function until(code,label,timeout=30_000){const started=Date.now();while(Date.now()-started<timeout){if(await evaluate(`return !!(${code});`))return;await sleep(50);}throw new Error(`Timed out: ${label}`);}
 async function check(id,fn){const started=Date.now();try{const data=await fn();report.checks.push({id,status:'passed',milliseconds:Date.now()-started,...(data??{})});}catch(error){report.checks.push({id,status:'failed',error:String(error)});throw error;}}
 function powershell(code,extra={}){return execFileSync(tools.powershell,['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();$ProgressPreference='SilentlyContinue';"+code,'utf16le').toString('base64')],{encoding:'utf8',windowsHide:true,env:{...process.env,...extra},timeout:20_000}).trim();}
@@ -45,8 +45,8 @@ try{
  send=(method,params={})=>new Promise((r,j)=>{const id=++sequence;const timer=setTimeout(()=>{pending.delete(id);j(new Error(`CDP ${method} timed out`));},90_000);pending.set(id,value=>{clearTimeout(timer);r(value);});socket.send(JSON.stringify({id,method,params}));});
  await send('Runtime.enable');await send('Page.enable');
  await until('window.__gitcraftVerification','isolated validation startup');
- await evaluate(`window.v=window.__gitcraftVerification; window.fixture=${JSON.stringify(fixture)}; window.violations=[]; document.addEventListener('securitypolicyviolation',e=>violations.push({directive:e.violatedDirective,blocked:e.blockedURI})); v.store.getState().setSettings({authorInitials:true,autoUpdate:false,autoFetchMin:0,lazyLoad:false,initialCommits:2000});`);
- await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:${JSON.stringify(tools.git)},sshUseAgent:true}});`);
+ await evaluate(`window.v=window.__gitcraftVerification; window.fixture=input.fixture; window.violations=[]; document.addEventListener('securitypolicyviolation',e=>violations.push({directive:e.violatedDirective,blocked:e.blockedURI})); v.store.getState().setSettings({authorInitials:true,autoUpdate:false,autoFetchMin:0,lazyLoad:false,initialCommits:2000});`,{fixture});
+ await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:input.gitPath,sshUseAgent:true}});`,{gitPath:tools.git});
  report.accountAvailability=await evaluate(`return await v.invoke('desktop_validation_accounts');`);
  await check('O001 native 50000-commit loading',async()=>{
   const result=await evaluate(`const started=performance.now();await v.openRepoPath(fixture);window.path=v.store.getState().tabs.find(t=>t.id===v.store.getState().activeId).path;return {initialMs:performance.now()-started,commits:v.repoData(path).commits.length};`);
@@ -79,7 +79,7 @@ try{
   return {...result,...await evaluate(`return {restoredMs:performance.now()-actionStarted,commits:v.repoData(path).commits.length,selection:v.store.getState().ui[tabId].selection.sha===selected};`)};
  });
  await check('O034 concurrent native watcher startup close and late completion',async()=>{
-  return evaluate(`const paths=${JSON.stringify(watchPaths)};window.changed=[];const stop=await v.listen('repo-changed',e=>changed.push(e.payload.path));const started=performance.now();const first=v.api.watchRepo(paths[0]);const second=v.api.watchRepo(paths[1]);await new Promise(r=>setTimeout(r,10));const closing=performance.now();await v.api.unwatchRepo(paths[0]);const closeMs=performance.now()-closing;await Promise.all([first,second]);await v.api.unwatchRepo(paths[1]);stop();return {closeMs,totalMs:performance.now()-started,state:await v.invoke('desktop_validation_state')};`);
+  return evaluate(`const paths=input.watchPaths;window.changed=[];const stop=await v.listen('repo-changed',e=>changed.push(e.payload.path));const started=performance.now();const first=v.api.watchRepo(paths[0]);const second=v.api.watchRepo(paths[1]);await new Promise(r=>setTimeout(r,10));const closing=performance.now();await v.api.unwatchRepo(paths[0]);const closeMs=performance.now()-closing;await Promise.all([first,second]);await v.api.unwatchRepo(paths[1]);stop();return {closeMs,totalMs:performance.now()-started,state:await v.invoke('desktop_validation_state')};`,{watchPaths});
  });
  await check('O013 visible and hidden native terminals',async()=>{
   memory('before-terminals');
@@ -101,25 +101,25 @@ try{
   const windows=()=>JSON.parse(powershell(`$shell=New-Object -ComObject Shell.Application; $items=@(foreach($w in $shell.Windows()){try{[pscustomobject]@{hwnd=[long]$w.HWND;folder=[string]$w.Document.Folder.Self.Path;selected=@($w.Document.SelectedItems() | ForEach-Object {[string]$_.Path})}}catch{}}); ConvertTo-Json -Depth 4 -Compress -InputObject $items`)||'[]');
   const before=new Set(windows().map(w=>w.hwnd));
   try {
-   await evaluate(`await v.api.revealFile(${JSON.stringify(folder)},${JSON.stringify('selected \u03bb file.txt')});`);
+   await evaluate(`await v.api.revealFile(input.folder,input.file);`,{folder,file:'selected \u03bb file.txt'});
    let selected=[];for(let n=0;n<12;n++){selected=windows().filter(w=>w.selected.some(p=>p.toLowerCase()===file.toLowerCase()));if(selected.length)break;await sleep(150);}
    if(!selected.length)throw new Error('Explorer did not select the exact Unicode file');
    const unc='\\\\localhost\\'+file[0]+'$'+file.slice(2);const available=powershell(`Test-Path -LiteralPath '${unc.replaceAll("'", "''")}' -ErrorAction SilentlyContinue`)==='True';
-   let uncSelected=false;if(available){await evaluate(`await v.api.revealFile(${JSON.stringify('\\\\localhost\\'+folder[0]+'$'+folder.slice(2))},${JSON.stringify('selected \u03bb file.txt')});`);for(let n=0;n<12;n++){uncSelected=windows().some(w=>w.selected.some(p=>p.toLowerCase()===unc.toLowerCase()));if(uncSelected)break;await sleep(150);}if(!uncSelected)throw new Error('Explorer did not select the UNC item');}
+   let uncSelected=false;if(available){await evaluate(`await v.api.revealFile(input.folder,input.file);`,{folder:'\\\\localhost\\'+folder[0]+'$'+folder.slice(2),file:'selected \u03bb file.txt'});for(let n=0;n<12;n++){uncSelected=windows().some(w=>w.selected.some(p=>p.toLowerCase()===unc.toLowerCase()));if(uncSelected)break;await sleep(150);}if(!uncSelected)throw new Error('Explorer did not select the UNC item');}
    return {selected:true,uncAvailable:available,uncSelected};
   }finally{for(const w of windows()){if(!before.has(w.hwnd)&&w.folder.toLowerCase().endsWith(folder.slice(2).toLowerCase()))powershell(`$shell=New-Object -ComObject Shell.Application;foreach($w in $shell.Windows()){if([long]$w.HWND -eq ${w.hwnd}){$w.Quit()}}`);}}
  });
  await check('O035 native superseded reads and closed tab cleanup',async()=>{
   const realGit=tools.git;const wrapper=join(run,'slow-git.cmd'), marker=join(run,'read-ready'),late=join(run,'read-late');
   writeFileSync(wrapper,`@echo off\r\nif "%~1"=="log" goto slow\r\nif "%~1"=="--literal-pathspecs" if "%~2"=="log" goto slow\r\n"${realGit}" %*\r\nexit /b %errorlevel%\r\n:slow\r\necho ready>"${marker}"\r\n"${tools.ping}" -n 31 127.0.0.1 >nul\r\necho leaked>"${late}"\r\n`);
-  await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:${JSON.stringify(wrapper)},sshUseAgent:true}});window.controllers=Array.from({length:12},()=>new AbortController());window.reads=controllers.map(c=>v.api.openRepo(path,500,undefined,c.signal).then(()=>({ok:true}),error=>({ok:false,error:String(error)})));`);
+  await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:input.gitPath,sshUseAgent:true}});window.controllers=Array.from({length:12},()=>new AbortController());window.reads=controllers.map(c=>v.api.openRepo(path,500,undefined,c.signal).then(()=>({ok:true}),error=>({ok:false,error:String(error)})));`,{gitPath:wrapper});
   for(let i=0;i<200&&!existsSync(marker);i++)await sleep(25);if(!existsSync(marker))throw new Error('Slow native Git helper did not start');
   const result=await evaluate(`const start=performance.now();controllers.forEach(c=>c.abort());const readsDone=await Promise.all(reads);return {cancelMs:performance.now()-start,rejected:readsDone.filter(r=>!r.ok).length};`);
   await until('(await v.invoke("desktop_validation_state")).read_slots===0','read slots released');
   await evaluate(`v.store.getState().setUi(tabId,{history:{file:'tracked.txt',mode:'history',sha:null}});`);await sleep(250);
   const close=await evaluate(`const start=performance.now();v.store.getState().closeTab(tabId);return {closedAt:start};`);await until('(await v.invoke("desktop_validation_state")).read_slots===0','closed tab read release');
-  const closeMs=await evaluate(`return performance.now()-${close.closedAt};`);
-  await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:${JSON.stringify(tools.git)},sshUseAgent:true}});`);
+  const closeMs=await evaluate(`return performance.now()-input.closedAt;`,{closedAt:close.closedAt});
+  await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:input.gitPath,sshUseAgent:true}});`,{gitPath:tools.git});
   if(existsSync(late))throw new Error('Cancelled helper survived to write');if(result.rejected!==12)throw new Error('A cancelled slow read succeeded');return {...result,closeMs};
  });
  const violations=await evaluate('return violations;');report.violations=violations;if(violations.length)throw new Error('Content-policy violations: '+JSON.stringify(violations));
