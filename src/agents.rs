@@ -74,10 +74,14 @@ fn title_from(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-static PARSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn parse_count() -> usize { PARSES.with(std::cell::Cell::get) }
 fn parse_session(file: &Path, agent: &str, fallback: Option<&str>) -> Option<AgentSession> {
     #[cfg(test)]
-    PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PARSES.with(|count| count.set(count.get() + 1));
     let meta = fs::metadata(file).ok()?;
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     // A corrupt or enormous log cannot allocate unbounded memory. Partial JSON lines are ignored.
@@ -392,19 +396,18 @@ mod tests {
 
     #[test]
     fn repeated_4200_file_scans_and_new_repository_scopes_do_not_reparse() {
-        use std::sync::atomic::Ordering;
         let temp = tempfile::tempdir().unwrap(); let roots = vec!["/catalog".into()];
         for i in 0..4200 {
             let file = temp.path().join(format!("session-{i}.jsonl"));
             fs::write(&file, format!(r#"{{"type":"session_meta","payload":{{"id":"id-{i}","cwd":"/catalog/topic"}}}}"#)).unwrap();
             assert!(read_session(&file, "codex", &roots, None).is_some());
         }
-        let before = PARSES.load(Ordering::Relaxed);
+        let before = parse_count();
         for _ in 0..2 { for i in 0..4200 {
             let file = temp.path().join(format!("session-{i}.jsonl"));
             assert_eq!(read_session(&file, "codex", &["/catalog/topic".into()], None).unwrap().path, "/catalog/topic");
         } }
-        assert_eq!(PARSES.load(Ordering::Relaxed) - before, 0);
+        assert_eq!(parse_count() - before, 0);
     }
 
     #[test]
