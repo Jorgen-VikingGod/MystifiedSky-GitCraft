@@ -57,11 +57,13 @@ fn append_context(output: &mut String, text: &str) -> bool {
 
 fn bounded_patch(dir: &std::path::Path, args: &[&str], limit: usize) -> Result<(String, bool), String> {
     use std::io::Read;
-    let mut child = crate::git::git_cmd(dir).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let mut command = crate::git::git_cmd(dir);
+    command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    let (mut child, tree) = crate::process_tree::ProcessTree::spawn(&mut command).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     let read = child.stdout.take().unwrap().take(limit as u64 + 1).read_to_end(&mut bytes);
     let truncated = bytes.len() > limit;
-    if truncated || read.is_err() { let _ = child.kill(); }
+    if truncated || read.is_err() { tree.kill(); let _ = child.kill(); }
     let status = child.wait().map_err(|e| e.to_string())?;
     read.map_err(|e| e.to_string())?;
     if !status.success() && !truncated { return Err("Could not read the selected changes for AI context.".into()); }

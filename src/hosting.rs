@@ -314,8 +314,7 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
         request.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28")
     } else { request.header("Accept", "application/json") };
     if let Some(body) = body { request = request.json(&body); }
-    // Dropping the async request interrupts connect/header/body waits. No detached
-    // per-request thread remains alive after its consumer cancels.
+    // Dropping the request interrupts connect, header, body and DNS waits.
     tauri::async_runtime::block_on(async {
         let operation = async {
             let _slot = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(8)).acquire().await.map_err(|_| "HTTP scheduler closed".to_string())?;
@@ -361,11 +360,44 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
     })
 }
 
+// Keep native DNS (including system VPN and split-DNS settings) off the async
+// runtime. A cancelled request releases its waiter, but the slot stays occupied
+// until the OS lookup finishes, so stalled lookups cannot accumulate threads.
+struct SystemDnsResolver(std::sync::Arc<tokio::sync::Semaphore>);
+
+impl SystemDnsResolver {
+    async fn lookup(
+        slots: std::sync::Arc<tokio::sync::Semaphore>,
+        lookup: impl FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
+    ) -> Result<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>> {
+        let permit = slots.acquire_owned().await?;
+        let (complete, result) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new().name("gitcraft-dns".into()).spawn(move || {
+            let _permit = permit;
+            let _ = complete.send(lookup());
+        })?;
+        Ok(result.await??)
+    }
+}
+
+impl reqwest::dns::Resolve for SystemDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        use std::net::ToSocketAddrs;
+        let hostname = name.as_str().to_owned();
+        Box::pin(Self::lookup(self.0.clone(), move || {
+            Ok(Box::new((hostname.as_str(), 0).to_socket_addrs()?))
+        }))
+    }
+}
+
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static TRANSPORT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     TRANSPORT.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP transport")
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(SystemDnsResolver(std::sync::Arc::new(tokio::sync::Semaphore::new(8))))
+            .build().expect("HTTP transport")
     })
 }
 
@@ -853,28 +885,64 @@ mod http_safety_tests {
     }
 
     #[test]
+    fn cancelled_dns_wait_does_not_free_a_running_lookup_slot() {
+        tauri::async_runtime::block_on(async {
+            let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (finish, release) = std::sync::mpsc::channel();
+            let task = tokio::spawn(SystemDnsResolver::lookup(slots.clone(), move || {
+                let _ = started.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+                Ok(Box::new(std::iter::empty()))
+            }));
+            tokio::time::timeout(Duration::from_secs(3), ready).await.unwrap().unwrap();
+            task.abort();
+            assert!(task.await.is_err());
+            assert!(slots.clone().try_acquire_owned().is_err());
+            finish.send(()).unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(3), slots.acquire()).await.unwrap().is_ok());
+        });
+    }
+
+    #[test]
     fn transport_reuses_connections_without_reusing_credentials_and_reconnects() {
         use std::io::BufRead;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let address = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for count in [5, 1] {
-                let (stream, _) = listener.accept().unwrap(); stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            let mut connections = 0;
+            while requests.len() < 6 {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
                 let mut reader = std::io::BufReader::new(stream);
-                for _ in 0..count {
+                connections += 1;
+                while requests.len() < 6 {
                     let mut request = String::new();
-                    loop { let mut line = String::new(); assert!(reader.read_line(&mut line).unwrap() > 0); if line == "\r\n" { break; } request.push_str(&line); }
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" { break; }
+                        request.push_str(&line);
+                    }
+                    if request.is_empty() { break; }
+                    assert_eq!(line, "\r\n", "truncated HTTP headers");
                     requests.push(request);
-                    reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+                    let close = requests.len() == 5;
+                    let extra = if close { "Connection: close\r\n" } else { "" };
+                    write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n{extra}\r\n{{}}").unwrap();
+                    if close { break; }
                 }
             }
-            requests
+            (requests, connections)
         });
         for index in 0..6 {
             let token = format!("fixture-account-{index}");
             assert!(http_page("GET", &format!("http://{address}/collection"), &Auth::Bearer(token), None).is_ok());
         }
-        for (index, request) in worker.join().unwrap().iter().enumerate() {
+        let (requests, connections) = worker.join().unwrap();
+        assert!((2..requests.len()).contains(&connections), "transport did not both reuse and reopen a connection");
+        for (index, request) in requests.iter().enumerate() {
             assert!(request.contains(&format!("Bearer fixture-account-{index}")));
             assert_eq!(request.to_ascii_lowercase().matches("authorization:").count(), 1);
         }

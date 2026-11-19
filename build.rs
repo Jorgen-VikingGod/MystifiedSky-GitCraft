@@ -1,5 +1,46 @@
-use std::path::Path;
+use std::{env, path::Path};
+#[cfg(not(windows))]
+use std::path::PathBuf;
 use std::process::Command;
+
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
+
+fn npm_in(bin: &Path) -> Option<Command> {
+    let npm = bin.join(NPM);
+    let node = bin.join(if cfg!(windows) { "node.exe" } else { "node" });
+    if !bin.is_absolute() || !npm.is_file() || !node.is_file() { return None; }
+    let path = env::var_os("PATH").unwrap_or_default();
+    let path = env::join_paths(std::iter::once(bin.to_owned()).chain(env::split_paths(&path))).ok()?;
+    let mut command = Command::new(npm);
+    command.env("PATH", path);
+    Some(command)
+}
+
+fn npm_command() -> Option<Command> {
+    let mut npm = Command::new(NPM);
+    if npm.arg("--version").output().is_ok_and(|output| output.status.success()) {
+        return Some(Command::new(NPM));
+    }
+
+    #[cfg(windows)]
+    return env::var_os("NVM_SYMLINK").and_then(|bin| npm_in(Path::new(&bin)));
+
+    #[cfg(not(windows))]
+    {
+        if let Some(active) = env::var_os("NVM_BIN").and_then(|bin| npm_in(Path::new(&bin))) {
+            return Some(active);
+        }
+        let nvm_dir = env::var_os("NVM_DIR").map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".nvm")))?;
+        let output = Command::new("/bin/sh")
+            .args(["-c", r#". "$NVM_DIR/nvm.sh" --no-use && nvm use --silent default >/dev/null && printf '%s' "$NVM_BIN""#])
+            .env("NVM_DIR", nvm_dir)
+            .output().ok()?;
+        if !output.status.success() { return None; }
+        let bin = std::str::from_utf8(&output.stdout).ok()?;
+        npm_in(Path::new(bin))
+    }
+}
 
 // Windows cannot replace an executable while a preview is running. Renaming it
 // keeps that preview alive and frees Cargo's output path for the next build.
@@ -65,7 +106,7 @@ fn main() {
     prepare_windows_output();
 
     // Rebuild the React front end when its sources change, so a plain `cargo build`
-    // always embeds the current UI. If npm isn't available the existing ui/dist is used.
+    // always embeds the current UI. A prebuilt ui/dist is used when dependencies are absent.
     println!("cargo:rerun-if-changed=ui/src");
     println!("cargo:rerun-if-changed=ui/index.html");
     println!("cargo:rerun-if-changed=ui/package.json");
@@ -74,8 +115,11 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/tsconfig.json");
     let ui = Path::new("ui");
     if ui.join("node_modules").exists() {
-        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        match Command::new(npm).args(["run", "build"]).current_dir(ui).status() {
+        for key in ["PATH", "NVM_DIR", "NVM_BIN", "NVM_SYMLINK"] {
+            println!("cargo:rerun-if-env-changed={key}");
+        }
+        let mut npm = npm_command().expect("Could not find npm. Open a shell with Node.js 22.12 or later or select an NVM default before building.");
+        match npm.args(["run", "build"]).current_dir(ui).status() {
             Ok(s) if s.success() => {}
             Ok(s) => {
                 panic!("front-end build failed ({s}); refusing to embed an outdated ui/dist");

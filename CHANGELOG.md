@@ -39,6 +39,11 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Fixed
 
 - Show the first bad bisect commit on newer Git versions.
+- Close repository windows independently, save their drafts, and stop their terminals. Stop managed subprocesses on app exit.
+- Find build tools in the active or default installation when a desktop editor omits them from PATH.
+- Preview merge conflicts with the minimum supported Git version and show filenames as they appear in the repository.
+- Report an empty stash without changing the staging area.
+- Limit concurrent DNS lookups for hosting integrations and retry briefly when the signing executable is busy.
 - Let the newer release continue when GitHub blocks tagging a queued build that used an older workflow.
 - Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
 - Poll file changes on network folders that lack reliable file notifications.

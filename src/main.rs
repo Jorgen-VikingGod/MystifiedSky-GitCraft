@@ -373,42 +373,44 @@ fn cancel_job(id: String, state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, agent_env: Option<HashMap<String, String>>, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
-    let a1 = app.clone();
-    let a2 = app.clone();
+fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, agent_env: Option<HashMap<String, String>>, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<u32, String> {
+    let output_window = window.clone();
+    let exit_window = window.clone();
     state.terminals.open(
+        window.label(),
+        || window.app_handle().get_webview_window(window.label()).is_some(),
         shell.as_deref().unwrap_or(""),
         &cwd,
         cols,
         rows,
         agent_env.as_ref(),
         std::sync::Arc::new(move |id, data| {
-            let _ = a1.emit("term-data", serde_json::json!({ "id": id, "data": data }));
+            let _ = output_window.emit_to(tauri::EventTarget::webview_window(output_window.label()), "term-data", serde_json::json!({ "id": id, "data": data }));
         }),
         std::sync::Arc::new(move |id| {
-            let _ = a2.emit("term-exit", id);
+            let _ = exit_window.emit_to(tauri::EventTarget::webview_window(exit_window.label()), "term-exit", id);
         }),
     )
 }
 
 #[tauri::command]
-fn term_write(id: u32, data: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.terminals.write(id, &data)
+fn term_write(id: u32, data: String, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    state.terminals.write(window.label(), id, &data)
 }
 
 #[tauri::command]
-fn term_ack(id: u32, bytes: usize, state: State<'_, AppState>) {
-    state.terminals.acknowledge(id, bytes);
+fn term_ack(id: u32, bytes: usize, window: tauri::WebviewWindow, state: State<'_, AppState>) {
+    state.terminals.acknowledge(window.label(), id, bytes);
 }
 
 #[tauri::command]
-fn term_resize(id: u32, cols: u16, rows: u16, state: State<'_, AppState>) -> Result<(), String> {
-    state.terminals.resize(id, cols, rows)
+fn term_resize(id: u32, cols: u16, rows: u16, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    state.terminals.resize(window.label(), id, cols, rows)
 }
 
 #[tauri::command]
-fn term_close(id: u32, state: State<'_, AppState>) {
-    state.terminals.close(id)
+fn term_close(id: u32, window: tauri::WebviewWindow, state: State<'_, AppState>) {
+    state.terminals.close(window.label(), id)
 }
 
 /// The hosting service of a repository's origin (or first) remote, if it's GitHub or GitLab.
@@ -1451,6 +1453,7 @@ fn main() {
         .on_window_event(|window, event| {
             if !matches!(event, tauri::WindowEvent::Destroyed) { return; }
             let Some(state) = window.try_state::<AppState>() else { return; };
+            state.terminals.close_window(window.label());
             let mut watchers = state.watchers.lock().unwrap_or_else(|error| error.into_inner());
             let stale: Vec<_> = watchers.keys().filter(|(label, _)| label == window.label()).cloned().collect();
             let removed: Vec<_> = stale.into_iter().filter_map(|key| watchers.remove(&key)).collect();
@@ -1647,8 +1650,14 @@ fn main() {
             unwatch_repo,
             screenshot_ready
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running GitCraft");
+        .build(tauri::generate_context!())
+        .expect("error while building GitCraft")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                process_tree::shutdown();
+                app.state::<AppState>().terminals.close_all();
+            }
+        });
 }
 
 #[cfg(test)]

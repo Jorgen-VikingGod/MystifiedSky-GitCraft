@@ -876,8 +876,9 @@ impl Engine {
                     Action::StashUntracked { .. } => crate::files::stash_untracked(dir, &msg),
                     _ => self.git(dir, &["stash", "push", "--include-untracked", "-m", &msg]),
                 };
-                // A stash with no local changes is reported as an error, not as success.
-                if o.ok && o.stdout.trim() == STASH_NOTHING {
+                // GitCraft runs Git with English diagnostics. Inspect this
+                // invocation's result even if another process updates refs/stash.
+                if o.ok && o.stdout.lines().any(|line| line.trim() == STASH_NOTHING) {
                     return ActionResult { ok: false, message: STASH_NOTHING.into() };
                 }
                 done(o, "Stashed changes")
