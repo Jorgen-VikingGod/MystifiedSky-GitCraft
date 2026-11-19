@@ -871,13 +871,14 @@ impl Engine {
                 }
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
                 let msg = stash_message(message, &branch);
+                let previous_stash = self.rev(dir, "refs/stash");
                 let o = match action {
                     Action::StashKeepIndex { .. } => self.git(dir, &["stash", "push", "--include-untracked", "--keep-index", "-m", &msg]),
                     Action::StashUntracked { .. } => crate::files::stash_untracked(dir, &msg),
                     _ => self.git(dir, &["stash", "push", "--include-untracked", "-m", &msg]),
                 };
                 // A stash with no local changes is reported as an error, not as success.
-                if o.ok && o.stdout.trim() == STASH_NOTHING {
+                if o.ok && self.rev(dir, "refs/stash") == previous_stash {
                     return ActionResult { ok: false, message: STASH_NOTHING.into() };
                 }
                 done(o, "Stashed changes")

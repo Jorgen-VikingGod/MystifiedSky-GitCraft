@@ -103,15 +103,11 @@ impl Jobs {
     /// Runs git, reporting each progress line as (job id, text, percent). Can be cancelled by id.
     pub fn run(&self, id: &str, dir: &Path, args: &[&str]) -> GitOut {
         let mut cmd = git::git_command(dir, args);
-        crate::process_tree::prepare(&mut cmd);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return GitOut { ok: false, stdout: String::new(), stderr: format!("Could not start git: {e}") },
-        };
-        let tree = match crate::process_tree::ProcessTree::attach(&child) {
-            Ok(tree) => tree,
-            Err(error) => { let _ = child.kill(); let _ = child.wait(); return GitOut::failed(&format!("Could not create a cancellable Git job: {error}")); }
+        let (mut child, tree) = match crate::process_tree::ProcessTree::spawn(&mut cmd) {
+            Ok(process) => process,
+            Err(crate::process_tree::StartError::Tree(error)) => return GitOut::failed(&format!("Could not create a cancellable Git job: {error}")),
+            Err(error) => return GitOut::failed(&format!("Could not start git: {error}")),
         };
         let running = Arc::new(Running { tree, cancelled: AtomicBool::new(false), pending_progress: AtomicBool::new(false) });
         self.running.lock().unwrap().insert(id.to_string(), running.clone());

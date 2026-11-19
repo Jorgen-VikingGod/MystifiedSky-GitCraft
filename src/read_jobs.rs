@@ -69,8 +69,17 @@ pub fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String>
     }
 }
 pub fn has_context() -> bool { CONTEXT.with(|c| c.borrow().is_some()) }
-fn budget() -> &'static (Mutex<usize>, std::sync::Condvar) { static BUDGET: OnceLock<(Mutex<usize>, std::sync::Condvar)> = OnceLock::new(); BUDGET.get_or_init(Default::default) }
-pub fn active_count() -> usize { *budget().0.lock().unwrap_or_else(|error| error.into_inner()) }
+#[derive(Default)]
+struct ReadBudget {
+    active: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+fn budget() -> &'static ReadBudget {
+    static BUDGET: OnceLock<ReadBudget> = OnceLock::new();
+    BUDGET.get_or_init(Default::default)
+}
+pub fn active_count() -> usize { *budget().active.lock().unwrap_or_else(|error| error.into_inner()) }
 fn stopped(context: &Context) -> bool { *context.cancelled.borrow() || Instant::now() >= context.deadline }
 pub struct ReadOutput { pub ok: bool, pub stdout: Vec<u8>, pub stderr: Vec<u8> }
 impl ReadOutput { fn failed(error: &str) -> Self { Self { ok: false, stdout: vec![], stderr: error.as_bytes().to_vec() } } }
@@ -89,25 +98,35 @@ pub fn run_bounded(command: Command, input: Option<Vec<u8>>, timeout: Duration, 
 }
 
 pub fn run_bytes(command: Command, limit: usize, input: Option<Vec<u8>>) -> ReadOutput {
+    run_with_budget(command, limit, input, budget())
+}
+
+fn run_with_budget(command: Command, limit: usize, input: Option<Vec<u8>>, budget: &ReadBudget) -> ReadOutput {
     let context = CONTEXT.with(|c| c.borrow().clone()).unwrap_or_else(|| Context { cancelled: tokio::sync::watch::channel(false).0, deadline: Instant::now() + Duration::from_secs(120) });
-    let (lock, changed) = budget();
-    let mut count = lock.lock().unwrap_or_else(|error| error.into_inner());
-    while *count >= 8 && !stopped(&context) { count = changed.wait_timeout(count, Duration::from_millis(20)).unwrap_or_else(|error| error.into_inner()).0; }
+    let mut count = budget.active.lock().unwrap_or_else(|error| error.into_inner());
+    while *count >= 8 && !stopped(&context) { count = budget.changed.wait_timeout(count, Duration::from_millis(20)).unwrap_or_else(|error| error.into_inner()).0; }
     if stopped(&context) { return ReadOutput::failed("Git read cancelled or timed out"); }
     *count += 1; drop(count);
-    struct Permit;
-    impl Drop for Permit { fn drop(&mut self) { let (lock, changed) = budget(); *lock.lock().unwrap_or_else(|error| error.into_inner()) -= 1; changed.notify_one(); } }
-    let _permit = Permit;
+    struct Permit<'a>(&'a ReadBudget);
+    impl Drop for Permit<'_> {
+        fn drop(&mut self) {
+            *self.0.active.lock().unwrap_or_else(|error| error.into_inner()) -= 1;
+            self.0.changed.notify_one();
+        }
+    }
+    let _permit = Permit(budget);
     execute(command, limit, input, &context, "Git read cancelled or timed out")
 }
 
 fn execute(mut command: Command, limit: usize, input: Option<Vec<u8>>, context: &Context, timeout: &'static str) -> ReadOutput {
     if stopped(context) { return ReadOutput::failed(timeout); }
-    crate::process_tree::prepare(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if input.is_some() { command.stdin(Stdio::piped()); } else { command.stdin(Stdio::null()); }
-    let mut child = match command.spawn() { Ok(child) => child, Err(error) => return ReadOutput::failed(&format!("Could not start git: {error}")) };
-    let tree = match crate::process_tree::ProcessTree::attach(&child) { Ok(tree) => tree, Err(error) => { let _ = child.kill(); let _ = child.wait(); return ReadOutput::failed(&error); } };
+    let (mut child, tree) = match crate::process_tree::ProcessTree::spawn(&mut command) {
+        Ok(process) => process,
+        Err(crate::process_tree::StartError::Tree(error)) => return ReadOutput::failed(&error),
+        Err(error) => return ReadOutput::failed(&format!("Could not start git: {error}")),
+    };
     let overflow = Arc::new(AtomicBool::new(false));
     fn reader(mut pipe: impl Read + Send + 'static, limit: usize, overflow: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || { let mut bytes = Vec::new(); let _ = (&mut pipe).take(limit as u64 + 1).read_to_end(&mut bytes); if bytes.len() > limit { overflow.store(true, Ordering::Release); bytes.truncate(limit); } bytes })
@@ -146,21 +165,23 @@ mod tests {
     #[test]
     fn eight_read_processes_are_the_limit_and_mutations_still_run() {
         let dir = tempfile::tempdir().unwrap(); let mut workers = Vec::new();
+        let budget = Arc::new(ReadBudget::default());
         for i in 0..12 {
             let path = dir.path().to_owned();
+            let budget = budget.clone();
             workers.push(std::thread::spawn(move || scope(Some(format!("budget-read-{i}")), || {
                 let mut command = crate::git::git_cmd(&path);
                 command.args(["-c", &format!("alias.busy=!echo ready > helper-{i}; sleep 30"), "busy"]);
-                run(command, 4096, None)
+                run_with_budget(command, 4096, None, &budget)
             })));
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         while std::fs::read_dir(dir.path()).unwrap().count() < 8 { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
-        assert_eq!(active_count(), 8); assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8);
+        assert_eq!(*budget.active.lock().unwrap(), 8); assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8);
         let started = Instant::now(); assert!(crate::git::run(dir.path(), &["init"]).ok); assert!(started.elapsed() < Duration::from_secs(5));
         for i in 0..12 { cancel(&format!("budget-read-{i}")); }
         for worker in workers { assert!(!worker.join().unwrap().ok); }
-        assert_eq!(active_count(), 0);
+        assert_eq!(*budget.active.lock().unwrap(), 0);
     }
 
     #[test]

@@ -87,17 +87,14 @@ fn rename_limit(dir: &Path) -> u32 {
 /// similarity defaults to 50%, and the candidate limit follows rename_limit above.
 /// Use for previews and merges so personal merge.renames settings cannot make them disagree.
 pub fn merge_args(dir: &Path, command: &str, args: &[&str]) -> Vec<String> {
-    let mut out = vec![
-        "-c".into(),
-        "merge.renames=true".into(),
-        "-c".into(),
-        format!("merge.renameLimit={}", rename_limit(dir)),
-        command.into(),
-        "-X".into(),
-        format!("find-renames={MERGE_RENAME_THRESHOLD}%"),
-    ];
-    out.extend(args.iter().map(|s| (*s).to_string()));
+    let mut out = merge_config(dir);
+    out.extend([command.into(), "-X".into(), format!("find-renames={MERGE_RENAME_THRESHOLD}%")]);
+    out.extend(args.iter().map(|s| (*s).to_owned()));
     out
+}
+
+fn merge_config(dir: &Path) -> Vec<String> {
+    vec!["-c".into(), "merge.renames=true".into(), "-c".into(), format!("merge.renameLimit={}", rename_limit(dir))]
 }
 
 #[derive(Serialize)]
@@ -332,17 +329,21 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
     let Some(target) = target.map(|s| s.to_string()).or_else(|| default_target(dir)) else {
         return ConflictCheck { note: Some("No target branch to compare with.".into()), ..Default::default() };
     };
-    let args = merge_args(dir, "merge-tree", &["--write-tree", "--name-only", "--no-messages", "HEAD", &target]);
+    let mut args = merge_config(dir);
+    // Git 2.38 supports merge-tree. Its default similarity threshold is
+    // already 50%, matching the threshold passed explicitly to git merge.
+    args.extend(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", "--", "HEAD", &target].map(str::to_owned));
     let o = git::run(dir, &args.iter().map(String::as_str).collect::<Vec<_>>());
-    // Exit 0 = clean, 1 = conflicts (first line is the tree id, then the conflicted paths).
+    // Exit 0 means clean. On conflict, Git emits the tree ID followed by NUL-delimited paths.
     if o.ok {
         return ConflictCheck { target, ..Default::default() };
     }
-    let lines: Vec<&str> = o.stdout.lines().collect();
-    if lines.first().map(|l| matches!(l.len(), 40 | 64) && l.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false) {
-        let mut files: Vec<String> = lines[1..].iter().filter(|l| !l.trim().is_empty()).map(|s| s.to_string()).collect();
-        files.dedup();
-        return ConflictCheck { target, files, note: None };
+    if let Some((tree, paths)) = o.stdout.split_once('\0') {
+        if matches!(tree.len(), 40 | 64) && tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let files: Vec<String> = paths.split_terminator('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect();
+            let note = files.is_empty().then(|| "Git reported a merge conflict without naming a file.".into());
+            return ConflictCheck { target, files, note };
+        }
     }
     ConflictCheck { target, files: vec![], note: Some(o.message()) }
 }
@@ -362,19 +363,19 @@ mod tests {
         g(&["config", "user.name", "T"]);
         g(&["config", "user.email", "t@e.x"]);
         g(&["config", "commit.gpgsign", "false"]);
-        fs::write(d.join("a.txt"), "base\n").unwrap();
+        fs::write(d.join(" café.txt"), "base\n").unwrap();
         g(&["add", "-A"]);
         g(&["commit", "-q", "-m", "base"]);
         g(&["checkout", "-q", "-b", "side"]);
-        fs::write(d.join("a.txt"), "side\n").unwrap();
+        fs::write(d.join(" café.txt"), "side\n").unwrap();
         g(&["commit", "-q", "-am", "side change"]);
         let side = git::run(&d, &["rev-parse", "HEAD"]).stdout.trim().to_string();
         g(&["checkout", "-q", "main"]);
         // A clean comparison, then a conflicting one.
         assert!(conflict_check(&d, Some("side")).files.is_empty());
-        fs::write(d.join("a.txt"), "main\n").unwrap();
+        fs::write(d.join(" café.txt"), "main\n").unwrap();
         g(&["commit", "-q", "-am", "main change"]);
-        assert_eq!(conflict_check(&d, Some("side")).files, vec!["a.txt".to_string()]);
+        assert_eq!(conflict_check(&d, Some("side")).files, vec![" café.txt".to_string()]);
 
         // Personal email settings must not override the default subject rules.
         g(&["config", "format.subjectPrefix", "CUSTOM"]);
@@ -395,7 +396,7 @@ mod tests {
         assert!(apply_patch_file(&d, &pf, &|a: &[&str]| git::run(&d, a)).ok);
         assert_eq!(git::run(&d, &["log", "-1", "--format=%s"]).stdout.trim(), "side change");
         // Patch of uncommitted work.
-        fs::write(d.join("a.txt"), "wip\n").unwrap();
+        fs::write(d.join(" café.txt"), "wip\n").unwrap();
         assert!(String::from_utf8(make_patch(&d, &[]).unwrap()).unwrap().contains("+wip"));
         let _ = fs::remove_file(&pf);
         let _ = fs::remove_dir_all(&d);

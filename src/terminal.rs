@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct Session {
+    owner: String,
     writer: std::sync::mpsc::SyncSender<Vec<u8>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Box<dyn Child + Send + Sync>,
@@ -129,6 +130,7 @@ impl Terminals {
     /// Start a shell in `cwd`. Output goes to `on_data`; `on_exit` runs when the shell ends.
     pub fn open(
         &self,
+        owner: &str,
         shell: &str,
         cwd: &str,
         cols: u16,
@@ -164,7 +166,7 @@ impl Terminals {
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let input = input_queue(writer);
         let output = Arc::new(OutputFlow::default());
-        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).insert(id, Session { writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
+        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).insert(id, Session { owner: owner.into(), writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
         let sessions = self.sessions.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -197,30 +199,54 @@ impl Terminals {
         Ok(id)
     }
 
-    pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
+    fn session_value<T>(&self, owner: &str, id: u32, value: impl FnOnce(&Session) -> T) -> Option<T> {
+        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id)
+            .filter(|session| session.owner == owner).map(value)
+    }
+
+    pub fn write(&self, owner: &str, id: u32, data: &str) -> Result<(), String> {
         if data.len() > 256 * 1024 { return Err("Paste at most 256 KB at a time into the terminal.".into()); }
-        let writer = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).ok_or("That terminal has closed")?.writer.clone();
+        let writer = self.session_value(owner, id, |session| session.writer.clone()).ok_or("That terminal has closed")?;
         writer.try_send(data.as_bytes().to_vec()).map_err(|_| "Terminal input is busy or closed. Wait before sending more input.".into())
     }
 
-    pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-        let master = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).ok_or("That terminal has closed")?.master.clone();
+    pub fn resize(&self, owner: &str, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+        let master = self.session_value(owner, id, |session| session.master.clone()).ok_or("That terminal has closed")?;
         let result = master.lock().unwrap_or_else(|error| error.into_inner()).resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string());
         result
     }
 
-    pub fn acknowledge(&self, id: u32, bytes: usize) {
-        let output = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).map(|s| s.output.clone());
+    pub fn acknowledge(&self, owner: &str, id: u32, bytes: usize) {
+        let output = self.session_value(owner, id, |session| session.output.clone());
         if let Some(output) = output { output.acknowledge(bytes); }
     }
 
-    pub fn close(&self, id: u32) {
-        let session = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).remove(&id);
-        if let Some(mut sess) = session {
-            sess.output.close();
-            let _ = sess.child.kill();
-            std::thread::spawn(move || { let _ = sess.child.wait(); });
-        }
+    pub fn close(&self, owner: &str, id: u32) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|error| error.into_inner());
+        let removed = sessions.get(&id).is_some_and(|session| session.owner == owner)
+            .then(|| sessions.remove(&id)).flatten();
+        drop(sessions);
+        if let Some(session) = removed { Self::stop(session); }
+    }
+
+    pub fn close_window(&self, label: &str) {
+        self.close_matching(|session| session.owner == label);
+    }
+
+    pub fn close_all(&self) {
+        self.close_matching(|_| true);
+    }
+
+    fn close_matching(&self, matches: impl Fn(&Session) -> bool) {
+        let removed: Vec<_> = self.sessions.lock().unwrap_or_else(|error| error.into_inner())
+            .extract_if(|_, session| matches(session)).map(|(_, session)| session).collect();
+        for session in removed { Self::stop(session); }
+    }
+
+    fn stop(mut session: Session) {
+        session.output.close();
+        let _ = session.child.kill();
+        std::thread::spawn(move || { let _ = session.child.wait(); });
     }
 }
 
@@ -303,13 +329,30 @@ mod tests {
     }
 
     #[test]
+    fn closing_one_window_preserves_other_terminal_sessions() {
+        let terminals = Terminals::default();
+        let directory = std::env::temp_dir();
+        let open = |owner| terminals.open(owner, "", &directory.to_string_lossy(), 80, 24, None,
+            Arc::new(|_, _| {}), Arc::new(|_| {})).unwrap();
+        let first = open("first");
+        let second = open("second");
+        assert!(terminals.resize("first", second, 80, 24).is_err());
+        terminals.close("first", second);
+        terminals.close_window("first");
+        assert!(terminals.resize("first", first, 80, 24).is_err());
+        assert!(terminals.resize("second", second, 80, 24).is_ok());
+        terminals.close_all();
+        assert!(terminals.pending_output().is_empty());
+    }
+
+    #[test]
     fn runs_a_shell_command() {
         let t = Arc::new(Terminals::default());
         let out = Arc::new(Mutex::new(String::new()));
         let o2 = out.clone();
         let ack = t.clone();
         let id = t
-            .open("", &std::env::temp_dir().to_string_lossy(), 80, 24, None, Arc::new(move |id, s| { o2.lock().unwrap().push_str(&s); ack.acknowledge(id, s.len()); }), Arc::new(|_| {}))
+            .open("main", "", &std::env::temp_dir().to_string_lossy(), 80, 24, None, Arc::new(move |id, s| { o2.lock().unwrap().push_str(&s); ack.acknowledge("main", id, s.len()); }), Arc::new(|_| {}))
             .unwrap();
         // Like xterm.js does in the app: answer the console's "where is the cursor?" request.
         let mut answered = false;
@@ -317,12 +360,12 @@ mod tests {
         for _ in 0..200 {
             let got = out.lock().unwrap().clone();
             if !answered && got.contains("\x1b[6n") {
-                t.write(id, "\x1b[1;1R").unwrap();
+                t.write("main", id, "\x1b[1;1R").unwrap();
                 answered = true;
             }
             if !sent && (answered || got.len() > 20) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                t.write(id, "echo gitcraft-terminal-ok\r").unwrap();
+                t.write("main", id, "echo gitcraft-terminal-ok\r").unwrap();
                 sent = true;
             }
             if got.matches("gitcraft-terminal-ok").count() >= 2 {
@@ -330,7 +373,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        t.close(id);
+        t.close("main", id);
         let got = out.lock().unwrap().clone();
         assert!(got.contains("gitcraft-terminal-ok"), "terminal output was: {:?}", got.chars().take(600).collect::<String>());
     }

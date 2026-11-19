@@ -647,26 +647,18 @@ fn cli_error(agent: Agent, out: &Output) -> String {
 }
 
 fn run(agent: Agent, cmd: &mut Command, input: &str, timeout: Duration) -> Result<Output, String> {
-    crate::process_tree::prepare(cmd);
-    let mut child = cmd
-        .stdin(if input.is_empty() {
+    cmd.stdin(if input.is_empty() {
             Stdio::null()
         } else {
             Stdio::piped()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                agent.install_error()
-            } else {
-                format!("GitCraft could not start {}.", agent.name())
-            }
-        })?;
-    let tree = crate::process_tree::ProcessTree::attach(&child).inspect_err(|_error| {
-        let _ = child.kill();
-        let _ = child.wait();
+        .stderr(Stdio::piped());
+    use crate::process_tree::{ProcessTree, StartError};
+    let (mut child, tree) = ProcessTree::spawn(cmd).map_err(|error| match error {
+        StartError::Spawn(error) if error.kind() == std::io::ErrorKind::NotFound => agent.install_error(),
+        StartError::Spawn(_) => format!("GitCraft could not start {}.", agent.name()),
+        other => other.to_string(),
     })?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
