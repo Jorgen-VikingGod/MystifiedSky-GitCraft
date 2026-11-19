@@ -31,7 +31,9 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
-- Update native dialogs, file watching, terminal links, and the tools used to build and publish GitCraft.
+- Build the desktop interface with a faster bundler.
+- Update the libraries for native file dialogs, file watching, and terminal links.
+- Pin the actions used to build, test, and publish release artifacts.
 
 ### Fixed
 
