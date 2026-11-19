@@ -796,11 +796,13 @@ await test("S003 large commit panel ignores unrelated drafts settings and progre
   results.push({id:"S003 commit panel profile",status:"measurement",unrelatedUpdates:22,renderCommits:commits-before});
 });
 await test("O033 JSON worker is registered and validates attached models", async () => {
-  mount(<MonacoFile file="fixture.json" value='{ "number": 1 }' readOnly wordWrap/>);await sleep(300);
-  const worker=await monaco.languages.json.getWorker();
-  const model=monaco.editor.getEditors()[0].getModel()!;const proxy=await worker(model.uri);
-  const diagnostics=await proxy.doValidation(model.uri.toString());assert(diagnostics.length===0,"Valid JSON rejected");
-  model.setValue('{ "number": }');const errors=await proxy.doValidation(model.uri.toString());assert(errors.length>0,"Invalid JSON was not validated");
+  mount(<MonacoFile file="fixture.json" value='{ "number": }' readOnly wordWrap/>);
+  await until(() => !!monaco.editor.getEditors()[0]?.getModel(), "JSON model mounted");
+  const model = monaco.editor.getEditors()[0].getModel()!;
+  const markers = () => monaco.editor.getModelMarkers({ resource: model.uri });
+  await until(() => markers().some(marker => marker.severity === monaco.MarkerSeverity.Error), "invalid JSON reported");
+  model.setValue('{ "number": 1 }');
+  await until(() => markers().length === 0, "valid JSON diagnostics cleared");
 });
 const params=new URLSearchParams(location.search);
 const graphPreview=params.has("graphPreview");

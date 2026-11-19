@@ -29,6 +29,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Choose a pull request template when the repository has multiple templates. Set pull mode, rebase autostash, and recursive submodule updates per repository.
 - Highlight changed words in hunk diffs. Blame can use or bypass ignored revisions, and commit history shows canonical names from the repository's mailmap.
 
+### Changed
+
+- Build the desktop interface with a faster bundler.
+- Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
+- Update the libraries for native file dialogs, file watching, and terminal links.
+- Pin the actions used to build, test, and publish release artifacts.
+
 ### Fixed
 
 - Show the first bad bisect commit on newer Git versions.

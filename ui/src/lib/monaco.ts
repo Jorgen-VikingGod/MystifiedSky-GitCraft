@@ -1,31 +1,32 @@
 // Monaco (the code editor) bundled locally — no network needed.
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
-import "monaco-editor/esm/vs/editor/browser/coreCommands.js";
-import "monaco-editor/esm/vs/editor/browser/widget/codeEditor/codeEditorWidget.js";
-import "monaco-editor/esm/vs/editor/browser/widget/diffEditor/diffEditor.contribution.js";
-import "monaco-editor/esm/vs/editor/contrib/clipboard/browser/clipboard.js";
-import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
-import "monaco-editor/esm/vs/editor/contrib/contextmenu/browser/contextmenu.js";
-import "monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js";
-import "monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js";
-import "monaco-editor/esm/vs/editor/contrib/comment/browser/comment.js";
-import "monaco-editor/esm/vs/editor/contrib/cursorUndo/browser/cursorUndo.js";
-import "monaco-editor/esm/vs/editor/contrib/indentation/browser/indentation.js";
-import "monaco-editor/esm/vs/editor/contrib/linesOperations/browser/linesOperations.js";
-import "monaco-editor/esm/vs/editor/contrib/lineSelection/browser/lineSelection.js";
-import "monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor.js";
-import "monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations.js";
-import "monaco-editor/esm/vs/editor/contrib/readOnlyMessage/browser/contribution.js";
-import "monaco-editor/esm/vs/editor/contrib/tokenization/browser/tokenization.js";
-import "monaco-editor/esm/vs/editor/contrib/longLinesHelper/browser/longLinesHelper.js";
-import "monaco-editor/esm/vs/editor/contrib/unicodeHighlighter/browser/unicodeHighlighter.js";
-import "monaco-editor/esm/vs/editor/contrib/fontZoom/browser/fontZoom.js";
-import "monaco-editor/esm/vs/base/browser/ui/codicons/codiconStyles.js";
-import "monaco-editor/esm/vs/basic-languages/monaco.contribution";
-import "monaco-editor/esm/vs/language/json/monaco.contribution";
+import * as monaco from "monaco-editor/editor";
+import "monaco-editor/editor/browser/coreCommands";
+import "monaco-editor/features/codeEditor/register";
+import "monaco-editor/features/diffEditor/register";
+import "monaco-editor/features/clipboard/register";
+import "monaco-editor/features/find/register";
+import "monaco-editor/features/contextmenu/register";
+import "monaco-editor/features/folding/register";
+import "monaco-editor/features/documentSymbols/register";
+import "monaco-editor/features/bracketMatching/register";
+import "monaco-editor/features/comment/register";
+import "monaco-editor/features/cursorUndo/register";
+import "monaco-editor/features/indentation/register";
+import "monaco-editor/features/linesOperations/register";
+import "monaco-editor/features/lineSelection/register";
+import "monaco-editor/features/multicursor/register";
+import "monaco-editor/features/wordOperations/register";
+import "monaco-editor/features/readOnlyMessage/register";
+import "monaco-editor/features/tokenization/register";
+import "monaco-editor/features/longLinesHelper/register";
+import "monaco-editor/features/unicodeHighlighter/register";
+import "monaco-editor/features/fontZoom/register";
+import "monaco-editor/features/codicon/register";
+import "monaco-editor/basic-languages/monaco.contribution";
+import "monaco-editor/language/json/monaco.contribution";
 import { registerEditorTheme } from "./editor-theme";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
+import EditorWorker from "monaco-editor/editor/editor.worker?worker";
+import JsonWorker from "monaco-editor/language/json/json.worker?worker";
 
 declare global {
   interface Window {
