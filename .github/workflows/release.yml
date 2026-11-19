@@ -146,7 +146,7 @@ jobs:
           node ui/node_modules/@tauri-apps/cli/tauri.js build --ci \
             "${configs[@]}" --target "$TARGET" --bundles "$BUNDLES" -- --locked
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: |
