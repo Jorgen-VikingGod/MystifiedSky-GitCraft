@@ -228,7 +228,24 @@ jobs:
           if [[ -n "${release:-}" ]]; then
             gh release edit "$tag" --notes-file release-notes.md
           else
-            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --notes-file release-notes.md
+            if ! created=$(gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --notes-file release-notes.md 2>&1); then
+              printf '%s\n' "$created" >&2
+              case "$created" in
+                *'HTTP 403: Resource not accessible by integration'*|*'HTTP 404:'*) ;;
+                *) exit 1 ;;
+              esac
+              # The workflow token cannot tag an older commit with different workflow files.
+              git fetch --no-tags origin refs/heads/main
+              if git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- .github/workflows/; then
+                exit 1
+              else
+                diff_status=$?
+                [[ "$diff_status" == 1 ]] || exit "$diff_status"
+              fi
+              echo "::notice::Skipping $tag because main has a newer release workflow."
+              exit 0
+            fi
+            printf '%s\n' "$created"
           fi
           gh release upload "$tag" release-assets/* --clobber
 

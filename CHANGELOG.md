@@ -39,6 +39,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Fixed
 
 - Show the first bad bisect commit on newer Git versions.
+- Let the newer release continue when GitHub blocks tagging a queued build that used an older workflow.
 - Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
 - Poll file changes on network folders that lack reliable file notifications.
 
