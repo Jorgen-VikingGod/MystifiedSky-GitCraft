@@ -294,7 +294,7 @@ function useStartup() {
       startBackendSync();
       startPersistence();
       await getCurrentWindow().onCloseRequested(preferenceCloseGuard(
-        () => getCurrentWindow().close(),
+        api.exit,
         error => useStore.getState().toast(false, "Could not save preferences before closing: " + String(error)),
       ));
       setSettingsLoaded(true);

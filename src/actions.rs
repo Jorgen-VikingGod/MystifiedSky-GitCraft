@@ -682,6 +682,11 @@ impl Engine {
                 if !unmerged.stdout.is_empty() || ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-merge","rebase-apply","sequencer"].iter().any(|state|self.in_progress(dir,state)) {
                     return done(git::GitOut::failed("Finish or abort the current merge, rebase or replay before stashing. Its conflict state was kept."), "");
                 }
+                let status = self.git(dir, &["status", "--porcelain=v1", "--untracked-files=all"]);
+                if !status.ok { return done(status, ""); }
+                if status.stdout.trim().is_empty() {
+                    return ActionResult { ok: false, message: STASH_NOTHING.into() };
+                }
                 // Stage everything (new files too), then `stash push` without --include-untracked, named by stash_message.
                 let add = self.git(dir, &["add", "-A"]);
                 if !add.ok {
@@ -689,12 +694,7 @@ impl Engine {
                 }
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
                 let msg = stash_message(&message, &branch);
-                let o = self.git(dir, &["stash", "push", "-m", &msg]);
-                // A stash with no local changes is reported as an error, not as success.
-                if o.ok && o.stdout.trim() == STASH_NOTHING {
-                    return ActionResult { ok: false, message: STASH_NOTHING.into() };
-                }
-                done(o, "Stashed changes")
+                done(self.git(dir, &["stash", "push", "-m", &msg]), "Stashed changes")
             }
             Action::StashPop { index, .. } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
             Action::StashApply { index, .. } => done(self.git(dir, &["stash", "apply", "-q", &format!("stash@{{{index}}}")]), "Applied stash"),

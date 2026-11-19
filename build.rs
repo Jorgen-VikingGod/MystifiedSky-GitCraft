@@ -1,5 +1,26 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn npm() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    if Command::new(name).arg("--version").output().is_ok() {
+        return Some(name.into());
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME")?;
+        let versions = Path::new(&home).join(".nvm/versions/node");
+        let mut candidates: Vec<_> = std::fs::read_dir(versions).ok()?
+            .flatten()
+            .map(|entry| entry.path().join("bin/npm"))
+            .filter(|path| path.is_file())
+            .collect();
+        candidates.sort();
+        return candidates.pop();
+    }
+    #[cfg(windows)]
+    None
+}
 
 // Windows cannot replace an executable while a preview is running. Renaming it
 // keeps that preview alive and frees Cargo's output path for the next build.
@@ -74,8 +95,13 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/tsconfig.json");
     let ui = Path::new("ui");
     if ui.join("node_modules").exists() {
-        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        match Command::new(npm).args(["run", "build"]).current_dir(ui).status() {
+        let npm = npm().unwrap_or_else(|| panic!("could not find npm in PATH or NVM; refusing to embed an outdated ui/dist"));
+        let mut command = Command::new(&npm);
+        if let Some(bin) = npm.parent() {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            command.env("PATH", std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path))).expect("valid tool PATH"));
+        }
+        match command.args(["run", "build"]).current_dir(ui).status() {
             Ok(s) if s.success() => {}
             Ok(s) => {
                 panic!("front-end build failed ({s}); refusing to embed an outdated ui/dist");

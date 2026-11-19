@@ -169,9 +169,31 @@ pub fn http_page(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> R
     })
 }
 
+/// Keep libc DNS lookups off Tokio's blocking pool, whose shutdown waits for them.
+/// Dropping the receiving future cancels the request without joining the detached
+/// resolver thread; process shutdown reclaims it with the rest of the process.
+struct DetachedDnsResolver;
+impl reqwest::dns::Resolve for DetachedDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let hostname = name.as_str().to_owned();
+        Box::pin(async move {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                use std::net::ToSocketAddrs;
+                let result = (hostname.as_str(), 0_u16)
+                    .to_socket_addrs()
+                    .map(|addresses| Box::new(addresses) as reqwest::dns::Addrs)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                let _ = result_tx.send(result);
+            });
+            result_rx.await.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+        })
+    }
+}
+
 fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) -> Result<HttpPage, String> {
     crate::read_jobs::check()?;
-    let context = crate::read_jobs::context();
+    let context = Some(crate::read_jobs::context().unwrap_or_else(crate::read_jobs::detached_context));
     let url = match auth {
         Auth::Query(k, t) => format!("{url}{}key={}&token={}", if url.contains('?') { "&" } else { "?" }, crate::hosting_api::q(k), crate::hosting_api::q(t)),
         _ => url.to_string(),
@@ -180,7 +202,11 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
     static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     let agent = TRANSPORT.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().expect("HTTP transport")
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(DetachedDnsResolver)
+            .build()
+            .expect("HTTP transport")
     });
     let mut request = agent.request(method.parse().map_err(|_| "Invalid HTTP method")?, &url)
         .header("User-Agent", "GitCraft").timeout(std::time::Duration::from_secs(30));
@@ -194,8 +220,7 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
         request.header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28")
     } else { request.header("Accept", "application/json") };
     if let Some(body) = body { request = request.json(&body); }
-    // Dropping the async request interrupts connect/header/body waits. No detached
-    // per-request thread remains alive after its consumer cancels.
+    // Dropping the async request interrupts connect/header/body and DNS waits.
     tauri::async_runtime::block_on(async {
         let mut operation = Box::pin(async {
             let _slot = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(8)).acquire().await.map_err(|_| "HTTP scheduler closed".to_string())?;
@@ -209,6 +234,7 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
                 if bytes.len() + chunk.len() > 10 * 1024 * 1024 { return Err("The hosting response exceeded its 10 MB budget; narrow the query.".into()); }
                 bytes.extend_from_slice(&chunk);
             }
+
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let value = if text.trim().is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text.clone())) };
             if status >= 400 {
@@ -645,23 +671,33 @@ mod http_safety_tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for count in [5, 1] {
+            let mut connections = 0;
+            while requests.len() < 6 {
                 let (stream, _) = listener.accept().unwrap(); stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
                 let mut reader = std::io::BufReader::new(stream);
-                for _ in 0..count {
+                connections += 1;
+                while requests.len() < 6 {
                     let mut request = String::new();
-                    loop { let mut line = String::new(); assert!(reader.read_line(&mut line).unwrap() > 0); if line == "\r\n" { break; } request.push_str(&line); }
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap() == 0 { break; }
+                        if line == "\r\n" { break; }
+                        request.push_str(&line);
+                    }
+                    if request.is_empty() { break; }
                     requests.push(request);
                     reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
                 }
             }
-            requests
+            (requests, connections)
         });
         for index in 0..6 {
             let token = format!("fixture-account-{index}");
             assert!(http_page("GET", &format!("http://{address}/collection"), &Auth::Bearer(token), None).is_ok());
         }
-        for (index, request) in worker.join().unwrap().iter().enumerate() {
+        let (requests, connections) = worker.join().unwrap();
+        assert!(connections < requests.len(), "transport did not reuse a connection");
+        for (index, request) in requests.iter().enumerate() {
             assert!(request.contains(&format!("Bearer fixture-account-{index}")));
             assert_eq!(request.to_ascii_lowercase().matches("authorization:").count(), 1);
         }

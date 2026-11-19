@@ -323,6 +323,14 @@ fn cancel_job(id: String, state: State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
+fn exit_app(app: tauri::AppHandle, state: State<'_, AppState>) {
+    read_jobs::cancel_all();
+    state.engine.jobs.cancel_all();
+    state.terminals.close_all();
+    app.exit(0);
+}
+
+#[tauri::command]
 fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, agent_env: Option<HashMap<String, String>>, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<u32, String> {
     let a1 = app.clone();
     let a2 = app.clone();
@@ -1213,6 +1221,7 @@ fn main() {
             push_review,
             generate_ssh_key,
             cancel_job,
+            exit_app,
             lfs_info,
             lfs_locks,
             sparse_info,

@@ -210,6 +210,15 @@ impl Terminals {
             std::thread::spawn(move || { let _ = sess.child.wait(); });
         }
     }
+
+    pub fn close_all(&self) {
+        let sessions: Vec<_> = self.sessions.lock().unwrap().drain().map(|(_, session)| session).collect();
+        for mut session in sessions {
+            session.output.close();
+            let _ = session.child.kill();
+            std::thread::spawn(move || { let _ = session.child.wait(); });
+        }
+    }
 }
 
 #[cfg(test)]

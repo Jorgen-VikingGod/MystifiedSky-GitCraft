@@ -33,14 +33,12 @@ export function startPersistence() {
 /** Prevent duplicate close requests until the latest preference snapshot is durable. */
 export function preferenceCloseGuard(close: () => Promise<void>, report: (error: unknown) => void) {
   let closing = false;
-  let allowClose = false;
   return (event: { preventDefault: () => void }) => {
-    if (allowClose && !hasUnsavedPreferences()) return;
     event.preventDefault();
     if (closing) return;
     closing = true;
-    void flushPersistence().then(() => { closing = false; allowClose = true; return close(); }).catch(error => {
-      closing = false; allowClose = false; report(error);
+    void flushPersistence().then(() => close()).catch(error => {
+      closing = false; report(error);
     });
   };
 }

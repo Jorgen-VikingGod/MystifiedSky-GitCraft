@@ -160,6 +160,18 @@ pub fn config_get(dir: Option<&Path>, scope: &str, keys: &[String]) -> HashMap<S
 
 /// gpg --quick-gen-key: "a 4096 bit key with the name and email in your current profile that expires in 2 years"
 /// (GPGPreferences-GpgGenerateKeyHelp). Returns the new key's fingerprint.
+fn spawn_gpg(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    for attempt in 0..20 {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(26) && attempt < 19 => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 pub fn gpg_generate(program: &str, name: &str, email: &str, passphrase: &str) -> Result<String, String> {
     if name.trim().is_empty() || email.trim().is_empty() {
         return Err("Set your name and email (Profiles or Accounts) first.".into());
@@ -176,7 +188,7 @@ pub fn gpg_generate(program: &str, name: &str, email: &str, passphrase: &str) ->
     if passphrase.contains(['\r', '\n']) { return Err("A GPG passphrase cannot contain line breaks.".into()); }
     use std::io::Write;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = c.spawn().map_err(|e| format!("Could not start {program}: {e}"))?;
+    let mut child = spawn_gpg(&mut c).map_err(|e| format!("Could not start {program}: {e}"))?;
     if let Some(mut input) = child.stdin.take() { input.write_all(format!("{passphrase}\n").as_bytes()).map_err(|e| e.to_string())?; }
     let o = child.wait_with_output().map_err(|e| e.to_string())?;
     if !o.status.success() {
@@ -184,12 +196,13 @@ pub fn gpg_generate(program: &str, name: &str, email: &str, passphrase: &str) ->
     }
     let mut l = std::process::Command::new(program);
     l.args(["--list-secret-keys", "--with-colons", &uid]);
+    l.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         l.creation_flags(0x0800_0000);
     }
-    let out = l.output().map_err(|e| e.to_string())?;
+    let out = spawn_gpg(&mut l).map_err(|e| e.to_string())?.wait_with_output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let fpr = text.lines().filter_map(|x| x.strip_prefix("fpr:::::::::")).last().map(|f| f.trim_end_matches(':').to_string());
     fpr.ok_or_else(|| "The key was created but could not be found afterwards.".into())

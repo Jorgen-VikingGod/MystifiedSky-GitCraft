@@ -405,6 +405,7 @@ export function invokeRead<T>(command: string, args: Record<string, unknown>, si
 }
 
 export const api = {
+  exit: () => invoke<void>("exit_app"),
   launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
   repoStatus: (path: string, signal?: AbortSignal) => invokeRead<RepoView["status"]>("repo_status", { path }, signal),
   openRepo: (path: string, max?: number, view?: RefView, signal?: AbortSignal) => invokeRead<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }, signal),

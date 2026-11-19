@@ -45,5 +45,19 @@ it("coalesces repeated close requests, retries failure and waits for edits durin
   guard({preventDefault});guard({preventDefault});await vi.waitFor(()=>expect(finish).toBeTypeOf("function"));
   useStore.getState().setSettings({rememberTabs:true});finish();await vi.waitFor(()=>expect(close).toHaveBeenCalledTimes(1));
   expect(save).toHaveBeenCalledTimes(3);const count=preventDefault.mock.calls.length;guard({preventDefault});
-  expect(preventDefault).toHaveBeenCalledTimes(count);stop();
+  expect(preventDefault).toHaveBeenCalledTimes(count + 1);stop();
+});
+
+it("invokes app exit after saving even while background work remains stalled", async () => {
+  vi.useFakeTimers();
+  const save=vi.spyOn(api,"saveSettings").mockResolvedValue(undefined);
+  const backgroundWork = new Promise<void>(() => {});
+  const stop=startPersistence();
+  useStore.getState().setSettings({ rememberTabs:false });
+  const close=vi.fn(async () => { expect(backgroundWork).toBeInstanceOf(Promise); });
+  const guard=preferenceCloseGuard(close, vi.fn());
+  guard({ preventDefault: vi.fn() });
+  await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  expect(save).toHaveBeenCalledTimes(1);
+  stop();
 });

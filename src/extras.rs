@@ -211,7 +211,58 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
         files.dedup();
         return ConflictCheck { target, files, note: None };
     }
+    if let Some(result) = isolated_conflict_check(dir, &target) {
+        return result;
+    }
     ConflictCheck { target, files: vec![], note: Some(o.message()) }
+}
+
+fn isolated_conflict_check(dir: &Path, target: &str) -> Option<ConflictCheck> {
+    let head = git::run(dir, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    if !head.ok { return None; }
+    let target_ref = format!("{target}^{{commit}}");
+    let merged = git::run(dir, &["rev-parse", "--verify", &target_ref]);
+    if !merged.ok { return None; }
+    let objects = git::run(dir, &["rev-parse", "--git-path", "objects"]);
+    if !objects.ok {
+        return Some(ConflictCheck { target: target.into(), note: Some(objects.message()), ..Default::default() });
+    }
+    let objects = Path::new(objects.stdout.trim());
+    let objects = if objects.is_absolute() { objects.to_owned() } else { dir.join(objects) };
+    let Ok(temp) = tempfile::tempdir() else {
+        return Some(ConflictCheck { target: target.into(), note: Some("Could not create an isolated merge workspace.".into()), ..Default::default() });
+    };
+    let format = git::run(dir, &["rev-parse", "--show-object-format"]);
+    if !format.ok {
+        return Some(ConflictCheck { target: target.into(), note: Some(format.message()), ..Default::default() });
+    }
+    let init_arg = format!("--object-format={}", format.stdout.trim());
+    let init = git::run(temp.path(), &["init", "-q", &init_arg]);
+    if !init.ok {
+        return Some(ConflictCheck { target: target.into(), note: Some(init.message()), ..Default::default() });
+    }
+    let alternate = objects.to_string_lossy();
+    let env = [("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate.as_ref())];
+    let checkout = git::run_env(temp.path(), &["checkout", "-q", "--detach", head.stdout.trim()], &env);
+    if !checkout.ok {
+        return Some(ConflictCheck { target: target.into(), note: Some(checkout.message()), ..Default::default() });
+    }
+    let args = merge_args(dir, "merge", &["--no-commit", "--no-ff", merged.stdout.trim()]);
+    let result = git::run_env(temp.path(), &args.iter().map(String::as_str).collect::<Vec<_>>(), &env);
+    if result.ok {
+        return Some(ConflictCheck { target: target.into(), ..Default::default() });
+    }
+    let unmerged = git::run_env(temp.path(), &["diff", "--name-only", "-z", "--diff-filter=U"], &env);
+    if !unmerged.ok {
+        return Some(ConflictCheck { target: target.into(), note: Some(unmerged.message()), ..Default::default() });
+    }
+    let mut files: Vec<String> = unmerged.stdout.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect();
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return Some(ConflictCheck { target: target.into(), note: Some(result.message()), ..Default::default() });
+    }
+    Some(ConflictCheck { target: target.into(), files, note: None })
 }
 
 #[cfg(test)]

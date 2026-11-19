@@ -10,6 +10,12 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Conflict previews work with older Git versions, stashing clean worktrees reports the same result regardless of Git's output language, and GPG key generation tolerates transient executable-busy errors.
+
+- Desktop builds find npm installed by NVM even when the IDE does not inherit the shell's PATH.
+
+- Closing GitCraft now saves preferences and exits promptly even when background network work is stalled.
+
 - Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.
 
 ## [0.1.29] - 2026-11-18

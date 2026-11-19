@@ -182,6 +182,14 @@ impl Jobs {
             None => false,
         }
     }
+
+    pub fn cancel_all(&self) {
+        let jobs: Vec<_> = self.running.lock().unwrap().values().cloned().collect();
+        for job in jobs {
+            job.cancelled.store(true, Ordering::Release);
+            job.tree.kill();
+        }
+    }
 }
 
 #[cfg(test)]
