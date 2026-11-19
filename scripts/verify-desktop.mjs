@@ -64,7 +64,16 @@ try{
   if(!editor.hasFind||!editor.hasClipboard)throw new Error('Editor shortcut actions missing');memory('after-first-editor');return {...result,...editor};
  });
  await check('S004 packaged IPC workers and image sources',async()=>{
-  return evaluate(`const preview=await v.api.fileVersions(path,{kind:'Unstaged'},'preview.png',true,null,false);if(!preview.new_image)throw new Error('Native image preview missing');await new Promise((resolve,reject)=>{const image=new Image();image.onload=resolve;image.onerror=reject;image.src=preview.new_image;});const json=editorApi.monaco.editor.createModel('{"a":1}','json');const host=document.createElement('div');host.style.cssText='width:400px;height:150px';document.body.append(host);const jsonEditor=editorApi.monaco.editor.create(host,{model:json});try{await new Promise(r=>setTimeout(r,300));const worker=await editorApi.monaco.languages.json.getWorker();const proxy=await worker(json.uri);await proxy.doValidation(json.uri.toString());}finally{jsonEditor.setModel(null);jsonEditor.dispose();json.dispose();host.remove();}v.store.getState().setDialog({kind:'prefs'});return {dataImage:true,jsonWorker:true,violations:[...violations]};`);
+  const result = await evaluate(`const preview=await v.api.fileVersions(path,{kind:'Unstaged'},'preview.png',true,null,false);if(!preview.new_image)throw new Error('Native image preview missing');await new Promise((resolve,reject)=>{const image=new Image();image.onload=resolve;image.onerror=reject;image.src=preview.new_image;});window.jsonModel=editorApi.monaco.editor.createModel('{"a":}','json');window.jsonHost=document.createElement('div');jsonHost.style.cssText='width:400px;height:150px';document.body.append(jsonHost);window.jsonEditor=editorApi.monaco.editor.create(jsonHost,{model:jsonModel});window.jsonMarkers=()=>editorApi.monaco.editor.getModelMarkers({resource:jsonModel.uri});return {dataImage:true};`);
+  try {
+    await until('jsonMarkers().some(marker => marker.severity === editorApi.monaco.MarkerSeverity.Error)', 'invalid JSON reported');
+    await evaluate(`jsonModel.setValue('{"a":1}');`);
+    await until('jsonMarkers().length === 0', 'valid JSON diagnostics cleared');
+  } finally {
+    await evaluate('jsonEditor.dispose();jsonModel.dispose();jsonHost.remove();');
+  }
+  const violations = await evaluate("v.store.getState().setDialog({kind:'prefs'});return [...window.violations];");
+  return {...result,jsonWorker:true,violations};
  });
  await evaluate(`v.store.getState().setDialog(null);v.store.getState().setUi(tabId,{diff:null});`);
  await check('S004 preferences avatars and native updater configuration',async()=>{

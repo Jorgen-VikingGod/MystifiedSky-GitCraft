@@ -32,6 +32,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Changed
 
 - Build the desktop interface with a faster bundler.
+- Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
 - Update the libraries for native file dialogs, file watching, and terminal links.
 - Pin the actions used to build, test, and publish release artifacts.
 
