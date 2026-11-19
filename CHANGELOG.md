@@ -31,6 +31,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Show the first bad bisect commit on newer Git versions.
 - Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
 - Poll file changes on network folders that lack reliable file notifications.
 

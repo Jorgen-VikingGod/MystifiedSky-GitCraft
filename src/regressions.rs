@@ -57,7 +57,10 @@ fn feature_bisect_reports_first_bad_and_restores_branch() {
         let result = engine.perform(&repo, Action::Bisect { mode: "bad".into(), commit: Some(head(dir)), good: None });
         assert!(result.ok, "{}", result.message);
     }
-    let first = git::bisect_progress(&dir.join(".git")).unwrap().first_bad.unwrap();
+    let first = git::bisect_progress(&dir.join(".git")).unwrap().first_bad.unwrap_or_else(|| {
+        let log = git::run(dir, &["bisect", "log"]);
+        panic!("GitCraft did not recognize the completed bisect:\n{}", log.stdout);
+    });
     assert_eq!(git::run(dir, &["log", "-1", "--format=%s", &first]).stdout.trim(), "first bad");
     assert!(engine.perform(&repo, Action::Bisect { mode: "reset".into(), commit: None, good: None }).ok);
     assert_eq!(head(dir), bad);

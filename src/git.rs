@@ -105,9 +105,28 @@ pub fn bisect_progress(gitdir: &Path) -> Option<BisectProgress> {
     let tested = text.lines().filter(|line| {
         ["git bisect good ", "git bisect bad ", "git bisect skip "].iter().any(|prefix| line.starts_with(prefix))
     }).count();
-    let first_bad = text.lines().filter_map(|line| line.strip_prefix("# first bad commit: [")
-        .and_then(|line| line.split_once(']')).map(|(sha, _)| sha)).rfind(|sha| matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).map(str::to_owned);
+    let first_bad = bisect_first_bad(&text).map(str::to_owned);
     Some(BisectProgress { tested, first_bad })
+}
+
+fn bisect_first_bad(log: &str) -> Option<&str> {
+    log.lines().rev().find_map(|line| {
+        let entry = line.strip_prefix("# first bad commit: [")
+            .or_else(|| line.strip_prefix("# first 'bad' commit: ["))?;
+        let (sha, _) = entry.split_once(']')?;
+        (matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(sha)
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn bisect_recognizes_completion_in_old_and_new_git_logs() {
+    let sha1 = "a".repeat(40);
+    let sha256 = "b".repeat(64);
+    assert_eq!(bisect_first_bad(&format!("# first bad commit: [{sha1}] Subject\n")), Some(sha1.as_str()));
+    assert_eq!(bisect_first_bad(&format!("# first 'bad' commit: [{sha256}] Subject\r\n")), Some(sha256.as_str()));
+    assert_eq!(bisect_first_bad(&format!("# possible first 'bad' commit: [{sha1}] Subject\n")), None);
+    assert_eq!(bisect_first_bad("# first 'bad' commit: [123] Incomplete\n"), None);
 }
 
 /// One finished git command, kept for the activity log.
