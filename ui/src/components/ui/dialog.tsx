@@ -1,3 +1,4 @@
+import { useText } from "@/lib/locale";
 import * as D from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { useRef, type ReactNode } from "react";
@@ -24,6 +25,7 @@ export function Dialog({
   sidebar?: ReactNode;
   drawerLeft?: number;
 }) {
+  const t = useText();
   const content = useRef<HTMLDivElement>(null);
   return (
     <D.Root open={open} onOpenChange={(o) => !o && onClose()}>
@@ -43,8 +45,8 @@ export function Dialog({
           }}
         >
           <div className="flex items-center h-10 px-4 border-b border-line">
-            <D.Title className="text-[14px] font-semibold text-white flex-1">{title}</D.Title>
-            <D.Close aria-label="Close dialog" className="text-fg2 hover:text-white">
+            <D.Title className="text-[14px] font-semibold text-white flex-1">{t(title)}</D.Title>
+            <D.Close aria-label={t("Close dialog")} className="text-fg2 hover:text-white">
               <X size={16} />
             </D.Close>
           </div>
@@ -64,9 +66,10 @@ export function Dialog({
 }
 
 export function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+  const t = useText();
   return (
     <label className={cn("flex flex-col gap-1 mb-3", className)}>
-      <span className="text-[12px] text-fg2">{label}</span>
+      <span className="text-[12px] text-fg2">{t(label)}</span>
       {children}
     </label>
   );

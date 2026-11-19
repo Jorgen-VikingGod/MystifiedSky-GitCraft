@@ -51,9 +51,15 @@ export interface GraphRow {
   merge: boolean;
 }
 
+export interface FileHistoryCursor {
+  tip: string;
+  offset: number;
+}
+
 export interface HistoryCursor {
   revs: string[];
   offset: number;
+  filter?: HistoryFilter;
   layout: { lanes: (string | null)[]; pinned_next: string | null; pinned: boolean; width: number };
 }
 export interface HistoryPage {
@@ -77,6 +83,7 @@ export interface RepoView {
   head_branch: string | null;
   head_sha: string;
   status: { unstaged: FileChange[]; staged: FileChange[]; conflicted: boolean };
+  bisect?: { tested: number; first_bad: string | null } | null;
   state_note: string | null;
   has_more: boolean;
   merge_msg: string | null;
@@ -106,6 +113,7 @@ export interface FileVersions {
   new_image: string | null;
   encoding: string;
   editable: boolean;
+  lockable?: boolean;
 }
 
 export interface HistoryEntry extends Commit {
@@ -129,7 +137,15 @@ export interface Stats {
   deleted: number;
 }
 
+export interface HistoryFilter {
+  author?: string;
+  path?: string;
+  text?: string;
+  mode?: "text" | "regex";
+}
+
 export interface RefView {
+  filter?: HistoryFilter;
   hidden: string[];
   solo: string[];
   pinned?: string | null;
@@ -139,7 +155,7 @@ export interface RefView {
 export type PatchOp = "stage" | "unstage" | "discard";
 
 /** The four interactive rebase actions. */
-export type Step = "pick" | "reword" | "squash" | "drop";
+export type Step = "pick" | "reword" | "squash" | "fixup" | "edit" | "exec" | "drop";
 
 export interface TodoItem {
   action: Step;
@@ -175,7 +191,7 @@ export interface LfsInfo {
   version: string;
   enabled: boolean;
   patterns: string[];
-  locks: { id: string; path: string; owner: string }[];
+  locks: { id: string; path: string; owner: string; ours: boolean }[];
 }
 
 /** Clone dialog options: see clone_repo in the Rust back end. */
@@ -188,6 +204,8 @@ export interface CloneOptions {
   sparse?: boolean;
   sparse_paths?: string[];
   blobless?: boolean;
+  folder_name?: string;
+  initialize_submodules?: boolean;
 }
 
 export interface InitOptions {
@@ -209,6 +227,8 @@ export interface GitflowConfig {
 }
 
 export interface CleanupBranch {
+  patch_equivalent?: boolean;
+  upstream_gone?: boolean;
   name: string;
   time: number;
   upstream: string;
@@ -265,7 +285,8 @@ export type Action =
   | { type: "unstageAll" }
   | { type: "discard"; paths: string[] }
   | { type: "discardAll" }
-  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean; stripComments?: boolean }
+  | { type: "restoreDiscard"; reference: string }
+  | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean; stripComments?: boolean; signOff?: boolean }
   | { type: "checkout"; target: string }
   | { type: "checkoutRemote"; remoteBranch: string }
   | { type: "checkoutPullRequest"; url: string; reference: string; expected: string }
@@ -278,12 +299,13 @@ export type Action =
   | { type: "pushTag"; name: string; remote: string }
   | { type: "deleteRemoteTag"; name: string; remote: string }
   | { type: "fetch" }
-  | { type: "pull"; mode: string }
+  | { type: "pull"; mode: string; autostash?: boolean }
   | { type: "push"; force: boolean; lease?: boolean; review?: PushReview }
   | { type: "pushBranch"; branch: string }
   | { type: "skipRebase" }
-  | { type: "interactiveRebase"; base: string; items: TodoItem[]; expected: RebaseState }
-  | { type: "interactiveCherryPick"; items: TodoItem[] }
+  | { type: "createFixup"; target: string }
+  | { type: "interactiveRebase"; base: string; items: TodoItem[]; expected: RebaseState; skipHooks?: boolean }
+  | { type: "interactiveCherryPick"; items: TodoItem[]; skipHooks?: boolean }
   | { type: "takeSide"; paths: string[]; side: "ours" | "theirs" }
   | { type: "markResolved"; paths: string[] }
   | { type: "markConflicted"; paths: string[] }
@@ -293,6 +315,9 @@ export type Action =
   | { type: "stashRename"; index: number; expected?: string; message: string }
   | { type: "autoFetch"; prune: boolean }
   | { type: "fetchRemote"; remote: string }
+  | { type: "bisect"; mode: "start" | "good" | "bad" | "skip" | "reset"; commit?: string; good?: string }
+  | { type: "maintainRepository"; task: "gc" | "commitGraph" }
+  | { type: "fetchHistory"; remote: string; mode: "deepen" | "unshallow" | "objects" }
   | { type: "remoteEdit"; name: string; newName: string; url: string; pushUrl: string }
   | { type: "remoteRemove"; name: string }
   | { type: "worktreeAdd"; path: string; branch: string; newBranch: boolean; start: string | null }
@@ -313,7 +338,7 @@ export type Action =
   | { type: "mergeSquash"; branch: string }
   | { type: "externalDiff"; file: string; staged: boolean; tool: string }
   | { type: "externalMerge"; file: string; tool: string }
-  | { type: "lfsTrack"; pattern: string }
+  | { type: "lfsTrack"; pattern: string; lockable?: boolean }
   | { type: "lfsUntrack"; pattern: string }
   | { type: "lfsPull" }
   | { type: "lfsLock"; path: string }
@@ -323,9 +348,10 @@ export type Action =
   | { type: "sparseDisable" }
   | { type: "gitflowStart"; kind: string; name: string }
   | { type: "gitflowFinish"; kind: string; name: string; keep: boolean; tagMessage: string }
-  | { type: "stash"; message: string }
-  | { type: "stashPop"; index: number; expected?: string }
-  | { type: "stashApply"; index: number; expected?: string }
+  | { type: "stash" | "stashKeepIndex" | "stashUntracked"; message: string }
+  | { type: "stashHunk"; file: string; hunk: number; lines: number[] | null; expected: DiffLine[] }
+  | { type: "stashPop"; index: number; expected?: string; withoutIndex?: boolean }
+  | { type: "stashApply"; index: number; expected?: string; withoutIndex?: boolean }
   | { type: "stashDrop"; index: number; expected?: string }
   | { type: "cherryPick"; sha: string; mainline?: number }
   | { type: "revert"; sha: string; mainline?: number }
@@ -405,17 +431,33 @@ export function invokeRead<T>(command: string, args: Record<string, unknown>, si
 }
 
 export const api = {
+  openRepositoryWindow: (path: string) => invoke<void>("open_repository_window", { path }),
+  takeLaunchPaths: () => invoke<({ kind: "repository"; path: string } | { kind: "clone"; url: string })[]>("take_launch_paths"),
   launchOptions: () => invoke<{ screenshot: boolean; shot_view: string | null; version: string; metrics: Metrics }>("launch_options"),
   repoStatus: (path: string, signal?: AbortSignal) => invokeRead<RepoView["status"]>("repo_status", { path }, signal),
   openRepo: (path: string, max?: number, view?: RefView, signal?: AbortSignal) => invokeRead<RepoView>("open_repo", { path, max: max ?? null, view: view ?? null }, signal),
   historyPage: (path: string, cursor: HistoryCursor, max = 2000, signal?: AbortSignal) => invokeRead<HistoryPage>("history_page", { path, cursor, max }, signal),
+  diagnostics: () => invoke<string>("copy_diagnostics"),
+  checkGitVersion: (program: string) => invoke<void>("check_git_version", { program }),
+  commitSignature: (path: string, sha: string, signal?: AbortSignal) =>
+    invokeRead<string>("commit_signature", { path, sha }, signal),
+  rangeDiff: (path: string, before: string, after: string, signal?: AbortSignal) =>
+    invokeRead<string>("range_diff", { path, before, after }, signal),
+  historyFetchInfo: (path: string) =>
+    invokeRead<{ shallow: boolean; remotes: string[]; promisor_remotes: string[] }>("history_fetch_info", { path }),
+  reflog: (path: string, signal?: AbortSignal) =>
+    invokeRead<{ sha: string; selector: string; message: string }[]>("repo_reflog", { path }, signal),
+  commitTemplate: (path: string, signal?: AbortSignal) =>
+    invokeRead<[string, string] | null>("commit_template", { path }, signal),
   commitDetails: (path: string, sha: string, signal?: AbortSignal) => invokeRead<Commit>("commit_details", { path, sha }, signal),
   commitFiles: (path: string, sha: string, signal?: AbortSignal) => invokeRead<FileChange[]>("commit_files", { path, sha }, signal),
   fileVersions: (path: string, source: DiffSource, file: string, untracked: boolean, parent: string | null, allowLarge = false, signal?: AbortSignal) =>
     invokeRead<FileVersions>("file_versions", { path, source, file, untracked, parent, allowLarge }, signal),
   saveFile: (path: string, file: string, content: string, expected?: string, utf8 = false) => invoke<void>("save_file", { path, file, content, expected, utf8 }),
-  fileHistory: (path: string, file: string, signal?: AbortSignal) => invokeRead<HistoryEntry[]>("file_history", { path, file }, signal),
-  blame: (path: string, file: string, rev: string | null, signal?: AbortSignal) => invokeRead<BlameLine[]>("blame", { path, file, rev }, signal),
+  fileHistory: (path: string, file: string, cursor: FileHistoryCursor | null, signal?: AbortSignal) =>
+    invokeRead<{ entries: HistoryEntry[]; cursor: FileHistoryCursor | null }>("file_history", { path, file, cursor }, signal),
+  blame: (path: string, file: string, rev: string | null, ignoreRevs: boolean, signal?: AbortSignal) =>
+    invokeRead<BlameLine[]>("blame", { path, file, rev, ignoreRevs }, signal),
   commitStats: (path: string, shas: string[], signal?: AbortSignal) => invokeRead<Stats[]>("commit_stats", { path, shas }, signal),
   rangeFiles: (path: string, from: string, to: string, signal?: AbortSignal) => invokeRead<FileChange[]>("range_files", { path, from, to }, signal),
   trackedFiles: (path: string, signal?: AbortSignal) => invokeRead<string[]>("tracked_files", { path }, signal),
@@ -427,7 +469,8 @@ export const api = {
   accountInfo: (path: string | null, signal?: AbortSignal) => invokeRead<AccountInfo>("account_info", { path }, signal),
   gitConfig: (path: string | null, scope: "global" | "local", keys: string[], signal?: AbortSignal) => invokeRead<Record<string, string>>("git_config_get", { path, scope, keys }, signal),
   setGitConfig: (path: string | null, scope: "global" | "local", key: string, value: string) => invoke<void>("set_git_config", { path, scope, key, value }),
-  generateSshKey: (email: string, name: string) => invoke<string>("generate_ssh_key", { email, name }),
+  generateSshKey: (email: string, name: string, passphrase: string, addToAgent: boolean) =>
+    invoke<{ public_key: string; private_path: string; agent_added: boolean; agent_error: string | null }>("generate_ssh_key", { email, name, passphrase, addToAgent }),
   acknowledgeJob: (id: string) => invoke<void>("acknowledge_job", { id }),
   cancelJob: (id: string) => invoke<boolean>("cancel_job", { id }),
   lfsLocks: (path: string, signal?: AbortSignal) => invokeRead<LfsInfo["locks"]>("lfs_locks", { path }, signal),
@@ -435,7 +478,7 @@ export const api = {
   sparseInfo: (path: string, signal?: AbortSignal) => invokeRead<{ enabled: boolean; patterns: string[] }>("sparse_info", { path }, signal),
   gitignoreTemplates: () => invoke<string[]>("gitignore_templates"),
   gitflowConfig: (path: string, signal?: AbortSignal) => invokeRead<GitflowConfig>("gitflow_config", { path }, signal),
-  cleanupList: (path: string, signal?: AbortSignal) => invokeRead<CleanupBranch[]>("cleanup_list", { path }, signal),
+  cleanupList: (path: string, detectPatches: boolean, signal?: AbortSignal) => invokeRead<CleanupBranch[]>("cleanup_list", { path, detectPatches }, signal),
   remotesList: (path: string, signal?: AbortSignal) => invokeRead<RemoteInfo[]>("remotes_list", { path }, signal),
   submodulesList: (path: string, signal?: AbortSignal) => invokeRead<SubmoduleInfo[]>("submodules_list", { path }, signal),
   rebasePlan: (path: string, base: string, signal?: AbortSignal) => invokeRead<{ expected: RebaseState; commits: Commit[] }>("rebase_plan", { path, base }, signal),
@@ -448,9 +491,14 @@ export const api = {
   activityLog: () => invoke<LogEntry[]>("activity_log"),
   sampleRepo: () => invoke<string>("sample_repo"),
   conflictSample: () => invoke<string>("conflict_sample"),
+  validateRefName: (path: string, kind: "branch" | "tag", name: string, signal: AbortSignal) =>
+    invokeRead<void>("validate_ref_name", { path, kind, name }, signal),
+  headIsUpstream: (path: string, sha: string, signal?: AbortSignal) => invokeRead<boolean>("head_is_upstream", { path, sha }, signal),
+  discardedChanges: (path: string) => invokeRead<{reference: string; time: number; subject: string}[]>("discarded_changes", { path }),
   lastCommitMessage: (path: string, signal?: AbortSignal) => invokeRead<[string, string]>("last_commit_message", { path }, signal),
   pickFolder: (title: string) => invoke<string | null>("pick_folder", { title }),
   initRepo: (parent: string, name: string, options?: InitOptions) => invoke<{path: string; warning: string | null}>("init_repo", { parent, name, options: options ?? null }),
+  suggestCloneFolder: (url: string, parent: string) => invoke<string>("suggest_clone_folder", { url, parent }),
   cloneRepo: (url: string, parent: string, options?: CloneOptions) => invoke<string>("clone_repo", { url, parent, options: options ?? null }),
   /** Preferences > External Tools > Terminal; General > Use In-App Terminal Instead opens the built-in one. */
   openTerminal: (path: string) => {

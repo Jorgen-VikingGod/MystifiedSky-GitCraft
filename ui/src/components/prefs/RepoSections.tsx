@@ -149,11 +149,26 @@ export function EncodingSection({ path }: { path: string }) {
 
 export function ConflictSection({ path }: { path: string }) {
   const { p, put, s } = useRepoPrefs(path);
+  const toast = useStore(state => state.toast);
+  const local = useQuery({ queryKey: ["rerere", path], queryFn: ({ signal }) => tools.configGet(path, "local", ["rerere.enabled"], signal) });
+  const globalConfig = useQuery({ queryKey: ["rerere", "global"], queryFn: ({ signal }) => tools.configGet(null, "global", ["rerere.enabled"], signal) });
   const global = s.settings.conflictDetection;
   return (
     <>
       <H>Conflict Prevention</H>
       <Note>GitCraft can automatically compare your branch against its "Base" branch to see if any conflicts arise while you're working.</Note>
+      <Row label="Reuse recorded conflict resolutions" help="Remember how you resolve conflicts and reuse the same resolution when Git encounters it again.">
+        <Toggle
+          value={["true", "yes", "on", "1"].includes((local.data?.["rerere.enabled"] || globalConfig.data?.["rerere.enabled"] || "").toLowerCase())}
+          disabled={local.isPending || globalConfig.isPending}
+          onChange={async enabled => {
+            try {
+              await api.setGitConfig(path, "local", "rerere.enabled", String(enabled));
+              await local.refetch();
+            } catch (error) { toast(false, String(error)); }
+          }}
+        />
+      </Row>
       <Row
         label="Enable proactive conflict detection with target branch"
         help="Unchecking this will disable proactive conflict detection only for this repository."
@@ -220,6 +235,31 @@ export function SparseSection({ path }: { path: string }) {
             Turn off
           </Btn>
         )}
+      </Row>
+    </>
+  );
+}
+
+export function PullSection({ path }: { path: string }) {
+  const { p, put } = useRepoPrefs(path);
+  return (
+    <>
+      <H>Pull and Checkout</H>
+      <Row label="Pull mode">
+        <Select value={p.pullMode ?? ""} options={[
+          ["", "Use the global default"], ["ff", "Fast-forward if possible"], ["ffonly", "Fast-forward only"],
+          ["rebase", "Rebase"], ["fetch", "Fetch only"],
+        ]} onChange={value => put({ pullMode: (value || undefined) as RepoPrefs["pullMode"] })} />
+      </Row>
+      <Row label="Autostash when rebasing a pull" help="Temporarily stash tracked working changes and reapply them after the rebase. Git may report conflicts when reapplying.">
+        <Select value={p.pullAutostash === undefined ? "" : String(p.pullAutostash)}
+          options={[["", "Use Git configuration"], ["true", "Enabled"], ["false", "Disabled"]]}
+          onChange={value => put({ pullAutostash: value ? value === "true" : undefined })} />
+      </Row>
+      <Row label="Update submodules after pull or checkout">
+        <Select value={p.pullCheckoutSubmodules === undefined ? "" : String(p.pullCheckoutSubmodules)}
+          options={[["", "Use the global default"], ["true", "Initialize and update recursively"], ["false", "Disabled"]]}
+          onChange={value => put({ pullCheckoutSubmodules: value ? value === "true" : undefined })} />
       </Row>
     </>
   );

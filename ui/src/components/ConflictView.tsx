@@ -1,3 +1,4 @@
+import { forgetEditorDraft, useEditorDraft } from "@/lib/editor-drafts";
 import { useShallow } from "zustand/react/shallow";
 import { RevisionGuard } from "@/lib/revision";
 import { aiApi } from "@/lib/integrations";
@@ -20,7 +21,10 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const s = useStore(useShallow((st) => ({ metrics: st.metrics, setDialog: st.setDialog, setUi: st.setUi, toast: st.toast })));
   const m = s.metrics;
   const q = useQuery({ queryKey: ["conflict", repo.path, file, JSON.stringify(repo.status)], queryFn: ({ signal }) => api.conflictInfo(repo.path, file, signal) });
-  const info = q.data;
+  const [base, setBase] = useState<typeof q.data>();
+  const info = base ?? q.data;
+  const saving = useRef(false);
+  const beginEdit = () => { if (!base && q.data) setBase(q.data); };
   const segments = useMemo(() => (info?.working ? parseConflicts(info.working) : []), [info?.working]);
   const chunks = segments.map((seg, i) => ({ seg, i })).filter((x) => x.seg.kind === "conflict");
   const [picks, setPicks] = useState<Record<number, Pick>>({});
@@ -30,22 +34,27 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const guard = useRef(new RevisionGuard()).current;
   const requestKey = `${repo.path}\0${file}\0${info?.working_token ?? ""}`;
   guard.observe(requestKey);
-  const changeManual = (value: string | null) => { guard.invalidate(); setManual(value); };
+  const changeManual = (value: string | null) => { if (!saving.current) { beginEdit(); guard.invalidate(); setManual(value); } };
   useEffect(() => () => { guard.invalidate(); }, []);
   const panes = useRef<(HTMLDivElement | null)[]>([]);
   const crlf = !!info?.working?.includes("\r\n");
-  useEffect(() => {
+  const discard = () => {
+    guard.invalidate();
     setPicks({});
     setManual(null);
+    setBase(undefined);
     setCurrent(0);
-  }, [file, info?.working]);
+  };
+  useEffect(discard, [file]);
 
   const pickOf = (i: number): Pick => {
     const seg = segments[i] as Extract<Segment, { kind: "conflict" }>;
     return picks[i] ?? { a: seg.ours.map(() => false), b: seg.theirs.map(() => false), touched: false };
   };
-  const setPick = (i: number, p: Pick) => { guard.invalidate(); setPicks((old) => ({ ...old, [i]: { ...p, touched: true } })); };
+  const setPick = (i: number, p: Pick) => { if (saving.current) return; beginEdit(); guard.invalidate(); setPicks((old) => ({ ...old, [i]: { ...p, touched: true } })); };
   const takeAll = (side: "a" | "b", on: boolean) => {
+    if (saving.current) return;
+    beginEdit();
     guard.invalidate();
     const next: Record<number, Pick> = { ...picks };
     for (const { i } of chunks) {
@@ -62,28 +71,36 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
     : parseConflicts(output).filter((seg) => seg.kind === "conflict").length;
   const allDone = !hasConflictMarkers(output);
 
-  const save = async (utf8 = false) => {
+  const save = async (utf8 = false, closeAfter = true) => {
+    if (saving.current || !info) return false;
     if (info?.decoding_loss && !utf8) {
       s.setDialog({kind:"choice",title:"Review this encoding before saving",text:"Some original bytes could not be decoded. Choose the correct repository encoding to preserve them. Converting this output to UTF-8 saves the text shown and can replace undecodable bytes.",choices:[{label:"Convert output to UTF-8",onSelect:()=>{void save(true);}}]});
-      return;
+      return false;
     }
     const normalized = output.replace(/\r\n/g, "\n");
     const text = crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
+    saving.current = true;
     try {
       if (allDone) {
         const ok = await act(repo.path, { type: "saveResolved", file, content: text, expected: info?.working_token, utf8 });
-        if (ok) s.setUi(tabId, { conflict: null });
+        if (!ok) return false;
       } else {
         await api.saveFile(repo.path, file, text, info?.working_token, utf8);
-        await refresh(repo.path);
+        void refresh(repo.path);
         s.toast(true, `Saved ${file}; conflict markers remain to resolve`);
       }
+      discard();
+      forgetEditorDraft(tabId);
+      if (allDone && closeAfter) s.setUi(tabId, { conflict: null });
+      return true;
     } catch (e) {
       if (/ENCODING_UNREPRESENTABLE|ENCODING_DECODE_LOSS/.test(String(e))) {
         s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot preserve all characters. The original file is unchanged. Convert it to UTF-8 with a byte-order mark?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
       } else s.toast(false, String(e));
-    }
+      return false;
+    } finally { saving.current = false; }
   };
+  useEditorDraft(tabId, file, manual !== null || Object.keys(picks).length > 0, () => save(false, false), discard, () => saving.current);
 
   const go = (dir: 1 | -1) => {
     if (!chunks.length) return;
@@ -95,8 +112,8 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
   const [ours, theirs] = info ? [info.ours_label, info.theirs_label] : ["current", "incoming"];
   const close = () => s.setUi(tabId, { conflict: null });
 
-  if (q.isLoading) return <div className="p-4 text-fg3 text-[13px]">Loading conflict…</div>;
-  if (q.isError) return <div className="p-4 text-[#ef7a76] text-[13px]">{String(q.error)}</div>;
+  if (q.isLoading && !info) return <div className="p-4 text-fg3 text-[13px]">Loading conflict…</div>;
+  if (q.isError && !info) return <div className="p-4 text-[#ef7a76] text-[13px]">{String(q.error)}</div>;
   if (!info) return null;
 
   const header = (
@@ -229,7 +246,7 @@ export function ConflictView({ repo, tabId, file }: { repo: RepoView; tabId: str
               <Pencil size={11} /> Edit
             </Button>
           )}
-          <Button size="sm" className="h-[22px]" onClick={() => (setPicks({}), changeManual(null))}>
+          <Button size="sm" className="h-[22px]" onClick={() => { if (!saving.current) discard(); }}>
             Reset
           </Button>
           <Button size="sm" variant="success" className="h-[22px]" onClick={() => save()}>

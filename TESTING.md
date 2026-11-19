@@ -24,7 +24,7 @@ git clone https://github.com/MystifiedSky/GitCraft.git
 cd GitCraft
 ```
 
-Install stable Rust using the [official Rust installer](https://www.rust-lang.org/tools/install) and Node.js 22.12 or later using the [Node.js installation instructions](https://nodejs.org/en/download). Reopen the terminal, verify `cargo --version`, `node --version`, and `git --version`, then run the commands below from the cloned repository root.
+Use Git 2.38 or later. Install stable Rust using the [official Rust installer](https://www.rust-lang.org/tools/install) and Node.js 22.12 or later using the [Node.js installation instructions](https://nodejs.org/en/download). Reopen the terminal, verify `cargo --version`, `node --version`, and `git --version`, then run the commands below from the cloned repository root.
 
 WSLg is useful for everyday development. Also test packaged releases in a full Ubuntu Desktop VM or physical Linux desktop to check menus, file dialogs, notifications, credential storage, terminal behavior, and desktop installation. Use a disposable VM with a snapshot for package and updater testing. CI currently uses Ubuntu 22.04 as the Linux release build baseline; testing 24.04 additionally checks a newer desktop environment.
 
@@ -85,7 +85,7 @@ Build the production renderer, then a release executable with the optional polic
 
 ```powershell
 npm --prefix ui run build
-./ui/node_modules/.bin/tauri.cmd build --no-bundle --config tauri.csp.conf.json
+./ui/node_modules/.bin/tauri.cmd build --no-bundle --config tauri.csp.conf.json --features verification
 node scripts/verify-desktop.mjs release csp
 ```
 

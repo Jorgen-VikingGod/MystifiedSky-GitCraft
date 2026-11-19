@@ -6,12 +6,14 @@ import { useStore } from "@/lib/store";
 import { hosting } from "@/lib/hosting";
 import { integrationHint } from "@/lib/notices";
 import { api } from "@/lib/api";
+import { stopAiRequests, useAiRequests } from "@/lib/ai-connection";
 import { resetZoom } from "@/lib/zoom";
 import { installAndRestart, RELEASES_URL, useUpdates } from "@/lib/updates";
 import { useSignedInServices } from "@/lib/integrations";
 
 export function StatusBar() {
   const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId, settings: s.settings, busy: s.busy, job: s.job, openLaunchpad: s.openLaunchpad, setDialog: s.setDialog, version: s.version })));
+  const aiRequests = useAiRequests((state) => state.count);
   const up = useUpdates();
   const signedIn = useSignedInServices();
   const tab = s.tabs.find((t) => t.id === s.activeId);
@@ -21,12 +23,12 @@ export function StatusBar() {
   // Lists the user's own pull requests; same call as the Launchpad, refreshed every 5 minutes.
   const prs = useLaunchpad(serviceConnected);
   // "Connect an integration" / "Select an integration" / the first pull request's sentence / "No Pull Requests".
-  const hint = !s.busy && !s.job && signedIn.isSuccess ? integrationHint(signedIn.data.map((x) => x.id), remote.data?.service, prs.data ? prs.data.pull_requests : null) : null;
+  const hint = !s.busy && !s.job && !aiRequests && signedIn.isSuccess ? integrationHint(signedIn.data.map((x) => x.id), remote.data?.service, prs.data ? prs.data.pull_requests : null) : null;
   const opensLaunchpad = serviceConnected;
   return (
     <div className="h-[26px] bg-panel flex items-center shrink-0 border-t border-black/30 text-[13px] text-white/90">
       <div className="flex items-center gap-2 pl-[22px] flex-1 min-w-0">
-        {s.busy || s.job ? <Loader2 size={14} className="spin text-link" /> : <Rocket size={14} className="text-white/80" />}
+        {s.busy || s.job || aiRequests ? <Loader2 size={14} className="spin text-link" /> : <Rocket size={14} className="text-white/80" />}
         {hint ? (
           <button
             className="truncate hover:underline"
@@ -36,12 +38,17 @@ export function StatusBar() {
             {hint}
           </button>
         ) : (
-          <span className="truncate">{s.job?.text || s.busy || "Ready"}</span>
+          <span className="truncate">{s.job?.text || s.busy || (aiRequests ? "Waiting for AI…" : "Ready")}</span>
         )}
         {s.job?.percent != null && (
           <span className="w-[90px] h-[5px] rounded bg-white/10 overflow-hidden shrink-0">
             <span className="block h-full bg-link" style={{ width: `${s.job.percent}%` }} />
           </span>
+        )}
+        {aiRequests > 0 && (
+          <button className="text-[12px] text-[#ef7a76] hover:underline shrink-0" onClick={stopAiRequests}>
+            Stop AI
+          </button>
         )}
         {s.job && (
           <button className="text-[12px] text-[#ef7a76] hover:underline shrink-0" onClick={() => api.cancelJob(s.job!.id)} title="Stop this job">

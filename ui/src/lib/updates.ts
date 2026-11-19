@@ -1,3 +1,4 @@
+import { protectEditorDrafts } from "./editor-drafts";
 import { flushPersistence } from "./persistence";
 // Automatic updates from GitHub Releases (Tauri updater). Installed copies read latest.json from the newest
 // release, check its signature against the public key built into the app, download in the background and
@@ -119,6 +120,7 @@ async function downloadPending(u: Update, manual: boolean) {
 export async function installAndRestart() {
   const u = pending;
   if (!u || busy || useUpdates.getState().phase !== "ready") return;
+  if (protectEditorDrafts(useStore.getState().setDialog, () => { void installAndRestart(); })) return;
   busy = true;
   try {
     await flushPersistence();

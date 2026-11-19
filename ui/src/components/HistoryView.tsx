@@ -1,10 +1,10 @@
 import { useShallow } from "zustand/react/shallow";
 import { VirtualRows } from "./VirtualRows";
 import { copy } from "@/lib/repo";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { History, ScanLine, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { BlameLine, RepoView } from "@/lib/api";
+import type { BlameLine, FileHistoryCursor, RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import { Avatar } from "./Icons";
@@ -25,8 +25,14 @@ function Since({ time }: { time: number }) {
 export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; tabId: string; file: string; mode: "history" | "blame"; sha: string | null }) {
   const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi, toast: st.toast })));
   const m = s.metrics;
-  const hist = useQuery({ queryKey: ["history", repo.path, file], queryFn: ({ signal }) => api.fileHistory(repo.path, file, signal) });
-  const entries = hist.data ?? [];
+  const [ignoreRevs, setIgnoreRevs] = useState(true);
+  const hist = useInfiniteQuery({
+    queryKey: ["history", repo.path, file],
+    initialPageParam: null as FileHistoryCursor | null,
+    queryFn: ({ pageParam, signal }) => api.fileHistory(repo.path, file, pageParam, signal),
+    getNextPageParam: page => page.cursor ?? undefined,
+  });
+  const entries = useMemo(() => hist.data?.pages.flatMap(page => page.entries) ?? [], [hist.data]);
   const selected = entries.find((entry) => entry.sha === sha);
   const current = selected ?? entries[0];
   const blameFile = sha ? selected?.path : file;
@@ -53,13 +59,19 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
             <ScanLine size={12} /> Blame
           </button>
         </div>
+        {mode === "blame" && (
+          <label className="flex items-center gap-1.5 text-[11.5px] text-fg2 whitespace-nowrap" title="Apply Git's blame ignore lists, including .git-blame-ignore-revs when present">
+            <input type="checkbox" checked={ignoreRevs} onChange={event => setIgnoreRevs(event.target.checked)} className="accent-[#80B1EA]" />
+            Ignore revisions
+          </label>
+        )}
         <button onClick={close} className="text-fg2 hover:text-white p-1" title="Close (Esc)">
           <X size={16} />
         </button>
       </div>
       <div className="flex-1 flex min-h-0">
         <div className="w-[250px] shrink-0 border-r border-black/30 bg-panel overflow-y-auto">
-          {hist.isError && <div role="alert" className="p-3 text-bad text-[12px]">Could not load file history: {String(hist.error)} <button className="underline" onClick={() => hist.refetch()}>Retry</button></div>}
+          {hist.isError && !hist.data && <div role="alert" className="p-3 text-bad text-[12px]">Could not load file history: {String(hist.error)} <button className="underline" onClick={() => hist.refetch()}>Retry</button></div>}
           {hist.isLoading && <div className="p-3 text-fg3 text-[12px]">Loading history…</div>}
           {!hist.isLoading && !hist.isError && entries.length === 0 && <div className="p-3 text-fg3 text-[12px]">No commits touch this file.</div>}
           {mode === "blame" && (
@@ -85,10 +97,13 @@ export function HistoryView({ repo, tabId, file, mode, sha }: { repo: RepoView; 
               </span>
             </button>
           ))}
-          {entries.length >= 500 && <div className="p-3 text-[11px] text-fg3">Showing the latest 500 commits.</div>}
+          {hist.isFetchNextPageError && <p role="alert" className="px-3 pt-2 text-[12px] text-warn">{String(hist.error)}</p>}
+          {hist.hasNextPage && <button className="p-3 text-[12px] text-link hover:underline" disabled={hist.isFetchingNextPage} onClick={() => void hist.fetchNextPage()}>
+            {hist.isFetchingNextPage ? "Loading older history…" : hist.isFetchNextPageError ? "Retry older history" : "Load older history"}
+          </button>}
         </div>
         <div className="flex-1 min-w-0">
-          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : blameFile ? <Blame repo={repo} file={blameFile} rev={sha} onPick={(c) => onGraph(c)} /> : <div className="p-4 text-fg3">{hist.isLoading ? "Loading file history..." : "Select a revision from this file's loaded history to view its blame."}</div>}
+          {mode === "history" ? current ? <HistoryDiff repo={repo} file={current.path} sha={current.sha} parent={current.parents[0] ?? null} onGraph={() => onGraph(current.sha)} /> : null : blameFile ? <Blame repo={repo} file={blameFile} rev={sha} ignoreRevs={ignoreRevs} onPick={(c) => onGraph(c)} /> : <div className="p-4 text-fg3">{hist.isLoading ? "Loading file history..." : "Select a revision from this file's loaded history to view its blame."}</div>}
         </div>
       </div>
     </div>
@@ -137,10 +152,10 @@ function HistoryDiff({ repo, file, sha, parent, onGraph }: { repo: RepoView; fil
 }
 
 /** Blame: each run of lines from the same commit gets a coloured bar and its author, date and sha. */
-function Blame({ repo, file, rev, onPick }: { repo: RepoView; file: string; rev: string | null; onPick: (sha: string) => void }) {
+function Blame({ repo, file, rev, ignoreRevs, onPick }: { repo: RepoView; file: string; rev: string | null; ignoreRevs: boolean; onPick: (sha: string) => void }) {
   const m = useStore((s) => s.metrics);
   const wrap = useStore((s) => s.settings.wordWrap);
-  const q = useQuery({ queryKey: ["blame", repo.path, file, rev], queryFn: ({ signal }) => api.blame(repo.path, file, rev, signal) });
+  const q = useQuery({ queryKey: ["blame", repo.path, file, rev, ignoreRevs], queryFn: ({ signal }) => api.blame(repo.path, file, rev, ignoreRevs, signal) });
   const [hover, setHover] = useState<string | null>(null);
   const colors = useMemo(() => {
     // Same palette as the graph (code-blame-color-0..9 = graph-color-0..9 in the theme).

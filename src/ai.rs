@@ -194,9 +194,11 @@ fn system_with_instructions(c: &AiConfig, feature: &str, system: &str) -> String
 
 /// All features, including PR drafting and conflict resolution, use this connection.
 fn ask(feature: &str, system: &str, prompt: String, effort: &str, schema: Value) -> Result<Value, String> {
+    crate::read_jobs::check()?;
     let c = config();
     if !c.enabled { return Err("AI features are turned off (Preferences > AI).".into()); }
     let system = system_with_instructions(&c, feature, system);
+    let prompt = crate::ai_context::redact(&prompt);
     if let Some(agent) = ai_cli::Agent::from_provider(&c.provider) {
         let reply = ai_cli::ask(agent, &c.cli_path, &c.cli_config_dir, model_override(&c, feature), &system, &prompt, &schema)?;
         return parse_answer(&reply, &schema, &c.provider);
@@ -216,13 +218,13 @@ fn ask(feature: &str, system: &str, prompt: String, effort: &str, schema: Value)
         "output_config": { "effort": effort, "format": { "type": "json_schema", "schema": schema } },
         "fallbacks": "default",
     });
-    let res = ureq::post(&url)
-        .set("x-api-key", key.as_deref().unwrap_or_default())
-        .set("anthropic-version", API_VERSION)
-        .set("anthropic-beta", FALLBACK_BETA)
-        .set("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(300)).send_json(body);
-    let v = read_response(res, &c.provider)?;
+    let request = crate::hosting::http_client().post(&url)
+        .header("x-api-key", key.as_deref().unwrap_or_default())
+        .header("anthropic-version", API_VERSION)
+        .header("anthropic-beta", FALLBACK_BETA)
+        .json(&body);
+    let (status, value) = ai_response(request, &c.provider)?;
+    let v = checked_response(status, value, &c.provider, key.as_deref())?;
     match v["stop_reason"].as_str() {
         Some("refusal") => return Err("The model declined this request.".into()),
         Some("max_tokens") => return Err("The answer was cut off. Try with fewer changes.".into()),
@@ -238,18 +240,41 @@ fn error_message(v: &Value) -> &str {
         .or(v[0]["error"]["message"].as_str()).or(v["message"].as_str()).unwrap_or("request failed")
 }
 
-fn read_response(res: Result<ureq::Response, ureq::Error>, provider: &str) -> Result<Value, String> {
-    match res {
-        Ok(r) => r.into_json().map_err(|_| format!("{} returned an invalid API response.", provider_label(provider))),
-        Err(ureq::Error::Status(code, r)) => {
-            let v: Value = r.into_json().unwrap_or(Value::Null);
-            Err(match code {
-                401 | 403 => format!("{} rejected access. Check the API key and endpoint in Preferences > AI.", provider_label(provider)),
-                429 => format!("{} is busy or its rate limit was reached. Try again shortly.", provider_label(provider)),
-                _ => format!("{} error {code}: {}", provider_label(provider), error_message(&v)),
-            })
+fn ai_response(request: reqwest::RequestBuilder, provider: &str) -> Result<(u16, Value), String> {
+    let context = crate::read_jobs::context();
+    tauri::async_runtime::block_on(crate::read_jobs::wait_http(async {
+        let mut response = request.send().await.map_err(crate::hosting::transport_error)?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(format!("{} redirected the request. Update the endpoint in Preferences > AI.", provider_label(provider)));
         }
-        Err(_) => Err(format!("Could not reach {}. Check that the server is running and the endpoint is correct in Preferences > AI.", provider_label(provider))),
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(crate::hosting::transport_error)? {
+            if body.len() + chunk.len() > 10 * 1024 * 1024 {
+                return Err("The AI response exceeded its 10 MB budget.".into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(_) if !status.is_success() => Value::Null,
+            Err(_) => return Err(format!("{} returned an invalid API response.", provider_label(provider))),
+        };
+        Ok((status.as_u16(), value))
+    }, context, std::time::Duration::from_secs(300)))
+}
+
+fn checked_response(status: u16, value: Value, provider: &str, key: Option<&str>) -> Result<Value, String> {
+    let label = provider_label(provider);
+    match status {
+        200..=299 => Ok(value),
+        401 | 403 => Err(format!("{label} rejected access. Check the API key and endpoint in Preferences > AI.")),
+        429 => Err(format!("{label} is busy or its rate limit was reached. Try again shortly.")),
+        _ => {
+            let message = error_message(&value);
+            let message = key.filter(|key| !key.is_empty()).map_or_else(|| message.to_owned(), |key| message.replace(key, "[redacted]"));
+            Err(format!("{label} error {status}: {}", message.chars().take(300).collect::<String>()))
+        }
     }
 }
 
@@ -281,18 +306,11 @@ fn ask_openai_style(c: &AiConfig, url: &str, model: &str, key: Option<&str>, sys
         } else if *mode == "json_object" {
             body["response_format"] = json!({ "type": "json_object" });
         }
-        let mut req = ureq::post(url).set("content-type", "application/json").timeout(std::time::Duration::from_secs(300));
-        if let Some(k) = key.filter(|s| !s.is_empty()) { req = req.set("Authorization", &format!("Bearer {k}")); }
-        let res = match req.send_json(body) {
-            Err(ureq::Error::Status(code, r)) if index + 1 < modes.len() => {
-                let status = r.status_text().to_string();
-                let v: Value = r.into_json().unwrap_or(Value::Null);
-                if unsupported_format(code, &v) { continue; }
-                return Err(format!("{} error {code}: {}", provider_label(&c.provider), v.as_object().map(|_| error_message(&v)).unwrap_or(&status)));
-            }
-            other => other,
-        };
-        let v = read_response(res, &c.provider)?;
+        let mut request = crate::hosting::http_client().post(url).json(&body);
+        if let Some(key) = key.filter(|key| !key.is_empty()) { request = request.bearer_auth(key); }
+        let (status, value) = ai_response(request, &c.provider)?;
+        if index + 1 < modes.len() && unsupported_format(status, &value) { continue; }
+        let v = checked_response(status, value, &c.provider, key)?;
         let choice = &v["choices"][0];
         if choice["finish_reason"] == "length" { return Err("The answer was cut off. Try with fewer changes or increase your server's output limit.".into()); }
         if choice["finish_reason"] == "content_filter" || choice["message"]["refusal"].as_str().is_some_and(|s| !s.is_empty()) {
@@ -312,12 +330,12 @@ pub fn test_connection() -> Result<String, String> {
     Ok(format!("Connected to {} — the selected model answered successfully", provider_label(&config().provider)))
 }
 
-fn staged_or_all(dir: &Path) -> Result<String, String> {
+fn staged_or_all(dir: &Path, untracked: &str) -> Result<String, String> {
     let staged = crate::ai_context::diff(dir, &["diff", "--cached"])?;
     if !staged.trim().is_empty() { return Ok(staged); }
     let has_head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok;
     let mut diff = if has_head { crate::ai_context::diff(dir, &["diff", "HEAD"])? } else { String::new() };
-    diff.push_str(&crate::ai_context::untracked(dir)?);
+    diff.push_str(untracked);
     Ok(diff)
 }
 
@@ -325,7 +343,7 @@ const COMMIT_SYSTEM: &str = "You write git commit messages. Read the diff and de
 following the repository's existing message style shown in the recent commits. The summary is one line, imperative mood, \
 at most 72 characters, no trailing period. The description explains the change in a few short lines, or is empty for trivial changes.";
 /// Select the saved commit's changes when renaming; never include work in progress.
-fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
+fn commit_prompt(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<String, String> {
     let (diff, recent, original) = if let Some(sha) = sha {
         let revision = format!("{sha}^{{commit}}");
         let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &revision]);
@@ -339,7 +357,7 @@ fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
         let recent = git::run(dir, &["log", "-15", "--format=%s", oid, "--"]).stdout;
         (shown, recent, format!("Existing message (context only; describe the diff accurately):\n{original}\n\n"))
     } else {
-        (staged_or_all(dir)?, git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
+        (staged_or_all(dir, untracked)?, git::run(dir, &["log", "-15", "--format=%s"]).stdout, String::new())
     };
     if diff.trim().is_empty() {
         return Err("There are no changes to describe.".into());
@@ -348,8 +366,8 @@ fn commit_prompt(dir: &Path, sha: Option<&str>) -> Result<String, String> {
     Ok(prompt)
 }
 
-pub fn commit_message(dir: &Path, sha: Option<&str>) -> Result<(String, String), String> {
-    let prompt = commit_prompt(dir, sha)?;
+pub fn commit_message(dir: &Path, sha: Option<&str>, untracked: &str) -> Result<(String, String), String> {
+    let prompt = commit_prompt(dir, sha, untracked)?;
     let schema = json!({
         "type": "object",
         "properties": { "summary": { "type": "string" }, "description": { "type": "string" } },
@@ -360,8 +378,8 @@ pub fn commit_message(dir: &Path, sha: Option<&str>) -> Result<(String, String),
     Ok((v["summary"].as_str().unwrap_or_default().to_string(), v["description"].as_str().unwrap_or_default().to_string()))
 }
 
-pub fn stash_message(dir: &Path) -> Result<String, String> {
-    let diff = staged_or_all(dir)?;
+pub fn stash_message(dir: &Path, untracked: &str) -> Result<String, String> {
+    let diff = staged_or_all(dir, untracked)?;
     if diff.trim().is_empty() {
         return Err("There are no changes to stash.".into());
     }
@@ -414,9 +432,9 @@ pub struct ComposedCommit {
 }
 
 /// "Compose commits with AI": split the uncommitted changes into a few focused commits (whole files).
-pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
+pub fn compose(dir: &Path, untracked: crate::ai_context::Untracked) -> Result<Vec<ComposedCommit>, String> {
     let st = git::try_status(dir)?;
-    let mut files: Vec<String> = st.unstaged.iter().chain(st.staged.iter()).map(|f| f.path.clone()).collect();
+    let mut files: Vec<String> = st.unstaged.iter().chain(st.staged.iter()).filter(|f| f.status != '?' && !crate::ai_context::sensitive_path(&f.path)).map(|f| f.path.clone()).chain(untracked.files).collect();
     files.sort();
     files.dedup();
     if files.is_empty() {
@@ -424,7 +442,7 @@ pub fn compose(dir: &Path) -> Result<Vec<ComposedCommit>, String> {
     }
     let has_head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok;
     let mut diff = crate::ai_context::diff(dir, if has_head { &["diff", "HEAD"] } else { &["diff", "--cached"] })?;
-    diff.push_str(&crate::ai_context::untracked(dir)?);
+    diff.push_str(&untracked.text);
     let prompt = format!("Changed files (every one must appear in exactly one commit):\n{}\n\nDiff:\n{diff}", files.join("\n"));
     let schema = json!({
         "type": "object",
@@ -530,7 +548,7 @@ mod tests {
         std::fs::write(dir.join("app.txt"), "application change\n").unwrap();
         run(&["add", "."]);
         std::fs::write(&notes, "unstaged private note\n").unwrap();
-        let prompt = commit_prompt(dir, None).unwrap();
+        let prompt = commit_prompt(dir, None, &crate::ai_context::untracked(dir).unwrap()).unwrap();
         assert!(prompt.len() < 4000);
         assert!(prompt.contains("staged security fix"));
         assert!(prompt.contains("+application change"));
@@ -539,11 +557,11 @@ mod tests {
         assert!(!prompt.contains("unstaged private note"));
         run(&["-c", "commit.gpgsign=false", "commit", "-qm", "Import dependency with security fix"]);
         let saved = run(&["rev-parse", "HEAD"]);
-        let renamed = commit_prompt(dir, Some(saved.trim())).unwrap();
+        let renamed = commit_prompt(dir, Some(saved.trim()), "").unwrap();
         assert!(renamed.contains("staged security fix"));
         assert!(!renamed.contains("unstaged private note"));
         std::fs::write(dir.join("new-untracked.txt"), "pending\n").unwrap();
-        assert!(commit_prompt(dir, None).unwrap().contains("new-untracked.txt"));
+        assert!(commit_prompt(dir, None, &crate::ai_context::untracked(dir).unwrap()).unwrap().contains("new-untracked.txt"));
     }
 
     #[test]
@@ -569,14 +587,14 @@ mod tests {
         std::fs::write(d.join("saved.txt"), "staged-secret-marker\n").unwrap();
         run(&["add", "saved.txt"]);
         std::fs::write(d.join("saved.txt"), "unstaged-secret-marker\n").unwrap();
-        let prompt = commit_prompt(&d, Some(&root)).unwrap();
+        let prompt = commit_prompt(&d, Some(&root), "").unwrap();
         assert!(prompt.contains("+saved-root-change"));
         assert!(prompt.contains("Original message"));
         for excluded in ["later-commit-change", "staged-secret-marker", "unstaged-secret-marker"] {
             assert!(!prompt.contains(excluded), "{excluded}");
         }
-        assert!(commit_prompt(&d, None).unwrap().contains("staged-secret-marker"));
-        assert!(commit_prompt(&d, Some("missing-commit")).is_err());
+        assert!(commit_prompt(&d, None, "").unwrap().contains("staged-secret-marker"));
+        assert!(commit_prompt(&d, Some("missing-commit"), "").is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -587,8 +605,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         assert!(git::run(&d, &["init", "-q"]).ok);
-        assert!(commit_message(&d, None).unwrap_err().contains("no changes"));
-        assert!(compose(&d).unwrap_err().contains("no changes"));
+        assert!(commit_message(&d, None, "").unwrap_err().contains("no changes"));
+        assert!(compose(&d, Default::default()).unwrap_err().contains("no changes"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

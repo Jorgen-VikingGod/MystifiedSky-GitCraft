@@ -4,13 +4,35 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./lib/api";
 import { parseConflicts } from "./components/ConflictView";
 import { comboOf, dispatchKey, fuzzy } from "./lib/commands";
-import { todo } from "./lib/rewrite";
+import { autosquash, todo } from "./lib/rewrite";
 import { timeSince, withCoauthors } from "./lib/utils";
-import { indexOnly, predictStatus, queryClient, refresh, refreshStatus, signInProblem } from "./lib/repo";
+import { indexOnly, predictStatus, queryClient, refresh, refreshStatus, signInProblem, sshHostKeyProblem } from "./lib/repo";
+import { translate } from "./lib/locale";
 import { globMatch } from "./lib/conflict";
 import { patchName } from "./lib/ai";
 import { formatDate } from "./lib/integrations";
 import { DEFAULT_METRICS, useStore, type RebasePlan } from "./lib/store";
+
+it("moves fixups and squashes after their target in replay order", () => {
+  const item = (sha: string, summary: string) => ({ sha, summary, author: "Fixture", email: "", message: summary, action: "pick" as const });
+  const original = [item("dd00", "squash! Add file"), item("cc00", "fixup! aa00"), item("bb00", "Unrelated"), item("aa00", "Add file")];
+  const items = autosquash(original);
+  const plan: RebasePlan = { mode: "rebase", base: "--root", onto: "--root", items, original };
+  expect(todo(plan).map(entry => [entry.sha, entry.action])).toEqual([["aa00", "pick"], ["cc00", "fixup"], ["dd00", "squash"], ["bb00", "pick"]]);
+});
+
+it("distinguishes a changed SSH host key from account authentication", () => {
+  expect(sshHostKeyProblem("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!")).toBe("changed");
+  expect(sshHostKeyProblem("Host key verification failed.")).toBe("unknown");
+  expect(signInProblem("Host key verification failed.\nCould not read from remote repository.")).toBeNull();
+  expect(signInProblem("Permission denied (publickey).")).toBe("ssh");
+});
+
+it("translates the navigation label while preserving its check mark and English fallback", () => {
+  expect(translate("es", "✓ Show Left Panel")).toBe("✓ Mostrar panel izquierdo");
+  expect(translate("en", "File")).toBe("File");
+  expect(translate("es", "Example repository name")).toBe("Example repository name");
+});
 
 describe("merge tool", () => {
   it("splits a file into shared text and conflict chunks", () => {

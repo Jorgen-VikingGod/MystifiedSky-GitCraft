@@ -1,57 +1,27 @@
+import { useText } from "@/lib/locale";
+import { protectEditorDrafts } from "@/lib/editor-drafts";
 import { useShallow } from "zustand/react/shallow";
 import { EDITORS } from "./prefs/GeneralSections";
 import { checkForUpdates, download, installAndRestart, RELEASES_URL, updateMenuItems, useUpdates } from "@/lib/updates";
 import { hosting } from "@/lib/hosting";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, Square, X } from "lucide-react";
 import { DropMenu, type MenuEntry } from "./ui/menu";
 import { useStore } from "@/lib/store";
 import { api } from "@/lib/api";
 import { act } from "@/lib/repo";
 import { signOutAll } from "@/lib/integrations";
-import { MOD } from "@/lib/utils";
+import { isMac, MOD } from "@/lib/utils";
 import { resetZoom, stepZoom } from "@/lib/zoom";
-import { AppMark } from "./Icons";
 
 const win = () => getCurrentWindow();
 
-/** Custom title bar and the File / Edit / View / Help menu bar. */
+/** Leave the macOS title bar clear for the native window controls. */
 export function TitleBar() {
-  return (
-    <div className="h-[30px] bg-titlebar flex items-center shrink-0" data-tauri-drag-region>
-      <div className="pl-2.5 pr-2 pointer-events-none">
-        <AppMark size={16} />
-      </div>
-      <span className="text-[12px] text-white/90 pointer-events-none" data-tauri-drag-region>
-        GitCraft
-      </span>
-      <div className="flex-1 h-full" data-tauri-drag-region />
-      <WinButton onClick={() => win().minimize()} label="Minimize">
-        <Minus size={14} strokeWidth={1.4} />
-      </WinButton>
-      <WinButton onClick={() => win().toggleMaximize()} label="Maximize">
-        <Square size={11} strokeWidth={1.4} />
-      </WinButton>
-      <WinButton onClick={() => win().close()} label="Close" danger>
-        <X size={16} strokeWidth={1.3} />
-      </WinButton>
-    </div>
-  );
-}
-
-function WinButton({ children, onClick, label, danger }: { children: React.ReactNode; onClick: () => void; label: string; danger?: boolean }) {
-  return (
-    <button
-      aria-label={label}
-      onClick={onClick}
-      className={`w-[46px] h-full flex items-center justify-center text-white/80 ${danger ? "hover:bg-[#c42b1c]" : "hover:bg-white/10"} hover:text-white`}
-    >
-      {children}
-    </button>
-  );
+  return isMac ? <div className="h-[30px] bg-titlebar shrink-0" data-tauri-drag-region /> : null;
 }
 
 export function MenuBar() {
+  const t = useText();
   const s = useStore(useShallow((s) => ({ tabs: s.tabs, activeId: s.activeId, settings: s.settings, closed: s.closed, closeTab: s.closeTab, newTab: s.newTab, reopenTab: s.reopenTab, setDialog: s.setDialog, setPalette: s.setPalette, setSettings: s.setSettings, toast: s.toast })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const repoPath = tab?.kind === "repo" ? tab.path : undefined;
@@ -67,6 +37,12 @@ export function MenuBar() {
     { label: "Clone Repo...", shortcut: `${MOD}+N`, onSelect: () => s.setDialog({ kind: "clone" }) },
     { label: "Init Repo...", shortcut: `${MOD}+I`, onSelect: () => s.setDialog({ kind: "init" }) },
     { label: "Open Repo...", shortcut: `${MOD}+O`, onSelect: () => s.setDialog({ kind: "open" }) },
+    { label: "Open Repo in New Window…", onSelect: async () => {
+      try {
+        const path = repoPath ?? await api.pickFolder("Choose a repository to open in a new window");
+        if (path) await api.openRepositoryWindow(path);
+      } catch (error) { s.toast(false, String(error)); }
+    } },
     { label: "Open Repo Management", shortcut: `Alt+${MOD}+O`, onSelect: () => s.setDialog({ kind: "repoManagement" }) },
     { label: `Open Repo in ${editorName(set.externalEditor)}`, shortcut: `${MOD}+Shift+E`, disabled: !repoPath, onSelect: () => repoPath && api.openInEditor(repoPath) },
     { separator: true },
@@ -112,12 +88,19 @@ export function MenuBar() {
     { separator: true },
     { label: "Toggle Full Screen", shortcut: "F11", onSelect: async () => win().setFullscreen(!(await win().isFullscreen())) },
     { label: "Activity Log", onSelect: () => s.setDialog({ kind: "log" }) },
-    { label: "Reload Window", onSelect: () => location.reload() },
+    { label: "Reload Window", onSelect: () => { if (!protectEditorDrafts(useStore.getState().setDialog, () => location.reload())) location.reload(); } },
   ];
   const help: MenuEntry[] = [
     { label: "Command Palette", shortcut: `${MOD}+Shift+P`, onSelect: () => s.setPalette("root") },
     { label: "Keyboard Shortcuts", shortcut: `${MOD}+/`, onSelect: () => s.setDialog({ kind: "shortcuts" }) },
     { label: "Feature Plan", onSelect: () => s.setDialog({ kind: "plan" }) },
+    { label: "Copy diagnostics", onSelect: async () => {
+      const { toast } = useStore.getState();
+      try {
+        await navigator.clipboard.writeText(await api.diagnostics());
+        toast(true, "Diagnostics copied");
+      } catch (error) { toast(false, String(error)); }
+    } },
     { label: "View Activity Logs", onSelect: () => s.setDialog({ kind: "log" }) },
     { separator: true },
     { label: "View Release Notes", onSelect: () => hosting.openUrl(RELEASES_URL) },
@@ -137,8 +120,8 @@ export function MenuBar() {
       ).map(([name, items]) => (
         <DropMenu
           key={name}
-          items={items as MenuEntry[]}
-          trigger={<button className="px-[7px] h-[22px] rounded-[3px] hover:bg-white/10 data-[state=open]:bg-white/10 outline-none">{name}</button>}
+          items={items.map(item => item.label ? { ...item, label: t(item.label) } : item)}
+          trigger={<button className="px-[7px] h-[22px] rounded-[3px] hover:bg-white/10 data-[state=open]:bg-white/10 outline-none">{t(name)}</button>}
         />
       ))}
     </div>

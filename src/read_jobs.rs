@@ -1,27 +1,31 @@
-//! Bounded, cancellable subprocess reads. Mutations keep their existing execution path.
-use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}, process::{Command, Stdio}, io::Read};
+//! Bounded Git subprocess execution with an independent concurrency limit for reads.
+use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::{Duration, Instant}, process::{Command, Stdio}, io::Read};
 use crate::git::GitOut;
+use std::{future::Future, sync::atomic::{AtomicBool, Ordering}};
 #[derive(Clone)]
-pub struct Context { cancelled: Arc<AtomicBool>, deadline: Instant }
+pub struct Context { cancelled: tokio::sync::watch::Sender<bool>, deadline: Instant }
 thread_local! { static CONTEXT: std::cell::RefCell<Option<Context>> = const { std::cell::RefCell::new(None) }; }
 fn requests() -> &'static Mutex<HashMap<String, Context>> { static REQUESTS: OnceLock<Mutex<HashMap<String, Context>>> = OnceLock::new(); REQUESTS.get_or_init(Default::default) }
 pub fn cancel(id: &str) {
-    let mut map = requests().lock().unwrap();
-    if let Some(context) = map.get(id) { context.cancelled.store(true, Ordering::Release); }
+    let mut map = requests().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(context) = map.get(id) { context.cancelled.send_replace(true); }
     else {
         map.retain(|_, c| c.deadline > Instant::now());
-        if map.len() < 1024 { map.insert(id.into(), Context { cancelled: Arc::new(AtomicBool::new(true)), deadline: Instant::now() + Duration::from_secs(120) }); }
+        if map.len() < 1024 { map.insert(id.into(), Context { cancelled: tokio::sync::watch::channel(true).0, deadline: Instant::now() + Duration::from_secs(120) }); }
     }
 }
 pub fn scope<T>(id: Option<String>, f: impl FnOnce() -> T) -> T {
-    let context = Context { cancelled: Arc::new(AtomicBool::new(false)), deadline: Instant::now() + Duration::from_secs(120) };
+    scope_for(id, Duration::from_secs(120), f)
+}
+pub fn scope_for<T>(id: Option<String>, timeout: Duration, f: impl FnOnce() -> T) -> T {
+    let context = Context { cancelled: tokio::sync::watch::channel(false).0, deadline: Instant::now() + timeout };
     let context = if let Some(id) = &id {
-        let mut map = requests().lock().unwrap();
+        let mut map = requests().lock().unwrap_or_else(|error| error.into_inner());
         map.retain(|_, c| c.deadline > Instant::now());
         map.entry(id.clone()).or_insert(context).clone()
     } else { context };
     let result = with(context, f);
-    if let Some(id) = id { requests().lock().unwrap().remove(&id); }
+    if let Some(id) = id { requests().lock().unwrap_or_else(|error| error.into_inner()).remove(&id); }
     result
 }
 fn with<T>(context: Context, f: impl FnOnce() -> T) -> T {
@@ -35,8 +39,21 @@ pub fn inherit<T>(f: impl FnOnce() -> T) -> impl FnOnce() -> T {
     move || match context { Some(context) => with(context, f), None => f() }
 }
 pub fn context() -> Option<Context> { CONTEXT.with(|c| c.borrow().clone()) }
-pub fn check_context(context: &Option<Context>) -> Result<(), String> {
-    if context.as_ref().is_some_and(stopped) { Err("Read cancelled or timed out".into()) } else { Ok(()) }
+pub async fn wait_http<T>(operation: impl Future<Output = Result<T, String>>, context: Option<Context>, timeout: Duration) -> Result<T, String> {
+    let expiry = context.as_ref().map_or(timeout, |context| timeout.min(context.deadline.saturating_duration_since(Instant::now())));
+    let cancelled = async {
+        if let Some(context) = &context {
+            let mut receiver = context.cancelled.subscribe();
+            let _ = receiver.wait_for(|cancelled| *cancelled).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancelled => Err("Request cancelled".into()),
+        result = tokio::time::timeout(expiry, operation) => result.map_err(|_| "The request timed out.".to_string())?,
+    }
 }
 pub fn check() -> Result<(), String> {
     if CONTEXT.with(|c| c.borrow().as_ref().is_some_and(stopped)) { Err("Read cancelled or timed out".into()) } else { Ok(()) }
@@ -53,24 +70,39 @@ pub fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String>
 }
 pub fn has_context() -> bool { CONTEXT.with(|c| c.borrow().is_some()) }
 fn budget() -> &'static (Mutex<usize>, std::sync::Condvar) { static BUDGET: OnceLock<(Mutex<usize>, std::sync::Condvar)> = OnceLock::new(); BUDGET.get_or_init(Default::default) }
-pub fn active_count() -> usize { *budget().0.lock().unwrap() }
-fn stopped(context: &Context) -> bool { context.cancelled.load(Ordering::Acquire) || Instant::now() >= context.deadline }
+pub fn active_count() -> usize { *budget().0.lock().unwrap_or_else(|error| error.into_inner()) }
+fn stopped(context: &Context) -> bool { *context.cancelled.borrow() || Instant::now() >= context.deadline }
 pub struct ReadOutput { pub ok: bool, pub stdout: Vec<u8>, pub stderr: Vec<u8> }
 impl ReadOutput { fn failed(error: &str) -> Self { Self { ok: false, stdout: vec![], stderr: error.as_bytes().to_vec() } } }
 pub fn run(command: Command, limit: usize, input: Option<Vec<u8>>) -> GitOut {
     let output = run_bytes(command, limit, input);
     GitOut { ok: output.ok, stdout: String::from_utf8_lossy(&output.stdout).into_owned(), stderr: String::from_utf8_lossy(&output.stderr).into_owned() }
 }
-pub fn run_bytes(mut command: Command, limit: usize, input: Option<Vec<u8>>) -> ReadOutput {
-    let context = CONTEXT.with(|c| c.borrow().clone()).unwrap_or_else(|| Context { cancelled: Arc::new(AtomicBool::new(false)), deadline: Instant::now() + Duration::from_secs(120) });
+pub fn run_mutation(command: Command, input: Option<Vec<u8>>) -> GitOut {
+    run_bounded(command, input, Duration::from_secs(300), "Git command timed out. Review the repository state before retrying.")
+}
+
+pub fn run_bounded(command: Command, input: Option<Vec<u8>>, timeout: Duration, timeout_message: &'static str) -> GitOut {
+    let context = Context { cancelled: tokio::sync::watch::channel(false).0, deadline: Instant::now() + timeout };
+    let output = execute(command, 64 * 1024 * 1024, input, &context, timeout_message);
+    GitOut { ok: output.ok, stdout: String::from_utf8_lossy(&output.stdout).into_owned(), stderr: String::from_utf8_lossy(&output.stderr).into_owned() }
+}
+
+pub fn run_bytes(command: Command, limit: usize, input: Option<Vec<u8>>) -> ReadOutput {
+    let context = CONTEXT.with(|c| c.borrow().clone()).unwrap_or_else(|| Context { cancelled: tokio::sync::watch::channel(false).0, deadline: Instant::now() + Duration::from_secs(120) });
     let (lock, changed) = budget();
-    let mut count = lock.lock().unwrap();
-    while *count >= 8 && !stopped(&context) { count = changed.wait_timeout(count, Duration::from_millis(20)).unwrap().0; }
+    let mut count = lock.lock().unwrap_or_else(|error| error.into_inner());
+    while *count >= 8 && !stopped(&context) { count = changed.wait_timeout(count, Duration::from_millis(20)).unwrap_or_else(|error| error.into_inner()).0; }
     if stopped(&context) { return ReadOutput::failed("Git read cancelled or timed out"); }
     *count += 1; drop(count);
     struct Permit;
-    impl Drop for Permit { fn drop(&mut self) { let (lock, changed) = budget(); *lock.lock().unwrap() -= 1; changed.notify_one(); } }
+    impl Drop for Permit { fn drop(&mut self) { let (lock, changed) = budget(); *lock.lock().unwrap_or_else(|error| error.into_inner()) -= 1; changed.notify_one(); } }
     let _permit = Permit;
+    execute(command, limit, input, &context, "Git read cancelled or timed out")
+}
+
+fn execute(mut command: Command, limit: usize, input: Option<Vec<u8>>, context: &Context, timeout: &'static str) -> ReadOutput {
+    if stopped(context) { return ReadOutput::failed(timeout); }
     crate::process_tree::prepare(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if input.is_some() { command.stdin(Stdio::piped()); } else { command.stdin(Stdio::null()); }
@@ -85,8 +117,8 @@ pub fn run_bytes(mut command: Command, limit: usize, input: Option<Vec<u8>>) -> 
     let writer = input.map(|input| { let mut stdin = child.stdin.take().unwrap(); std::thread::spawn(move || { use std::io::Write; let _ = stdin.write_all(&input); }) });
     let mut failure = None;
     let status = loop {
-        if stopped(&context) || overflow.load(Ordering::Acquire) {
-            failure = Some(if overflow.load(Ordering::Acquire) { "Git output exceeded the read budget" } else { "Git read cancelled or timed out" });
+        if stopped(context) || overflow.load(Ordering::Acquire) {
+            failure = Some(if overflow.load(Ordering::Acquire) { "Git output exceeded the read budget" } else { timeout });
             tree.kill(); let _ = child.kill(); break child.wait().ok();
         }
         match child.try_wait() { Ok(Some(status)) => break Some(status), Ok(None) => std::thread::sleep(Duration::from_millis(10)), Err(_) => { tree.kill(); let _ = child.wait(); break None; } }
@@ -147,7 +179,7 @@ mod tests {
             let mut command = Command::new("git"); command.arg("--version"); run(command, 4096, None)
         });
         assert!(!result.ok); assert!(result.stderr.contains("cancelled"));
-        let result = with(Context { cancelled: Arc::new(AtomicBool::new(false)), deadline: Instant::now() }, || {
+        let result = with(Context { cancelled: tokio::sync::watch::channel(false).0, deadline: Instant::now() }, || {
             let mut command = Command::new("git"); command.arg("--version"); run(command, 4096, None)
         });
         assert!(!result.ok); assert!(result.stderr.contains("timed out"));

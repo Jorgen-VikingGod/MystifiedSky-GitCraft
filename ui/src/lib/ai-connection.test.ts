@@ -45,7 +45,7 @@ describe("all AI features share the selected connection", () => {
     useStore.getState().setSettings({ ai: { ...DEFAULT_AI, provider, cliPath, cliConfigDir } });
     vi.mocked(invoke).mockResolvedValueOnce(["Summarize changes", ""]);
     await expect(ai.commitMessage("/repo")).resolves.toEqual(["Summarize changes", ""]);
-    expect(invoke).toHaveBeenCalledWith("ai_commit_message", { path: "/repo", sha: null, config: expect.objectContaining({ provider, cliPath, cliConfigDir }) });
+    expect(invoke).toHaveBeenCalledWith("ai_commit_message", expect.objectContaining({ path: "/repo", sha: null, config: expect.objectContaining({ provider, cliPath, cliConfigDir }) }));
   });
 });
 
@@ -61,12 +61,29 @@ it("discovers the program and models without changing the active connection or r
   ]);
 });
 
+it("waits for approval before sending reviewed untracked AI context", async () => {
+  const path = "/repo/ai-review";
+  vi.mocked(invoke).mockResolvedValueOnce({ id: 12, files: ["notes.txt"] }).mockResolvedValueOnce(["Review notes", ""]);
+  const generating = generateCommitMessage(path);
+  await vi.waitFor(() => expect(useStore.getState().dialog?.kind).toBe("choice"));
+  expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual(["ai_file_preview"]);
+  const dialog = useStore.getState().dialog;
+  if (dialog?.kind !== "choice") throw new Error("Missing AI file preview");
+  expect(dialog.text).toContain("notes.txt");
+  useStore.getState().setDialog(null);
+  dialog.choices[0].onSelect();
+  await generating;
+  expect(invoke).toHaveBeenLastCalledWith("ai_commit_message", expect.objectContaining({ path, preview: 12 }));
+});
+
 it("preserves a commit message edited while AI generation was running", async () => {
   const path = "/repo/ai-race";
   let finish!: (message: [string, string]) => void;
   const request = vi.spyOn(ai, "commitMessage").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
   try {
+    vi.mocked(invoke).mockResolvedValueOnce({ id: null, files: [] });
     const generating = generateCommitMessage(path);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
     useStore.getState().setDraft(path, { summary: "Keep my newer draft", description: "Typed while waiting" });
     finish(["Generated suggestion", "Generated body"]);
     await generating;

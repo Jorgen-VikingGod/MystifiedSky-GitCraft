@@ -16,7 +16,7 @@
         "height": 669,
         "minWidth": 760,
         "minHeight": 520,
-        "decorations": false,
+        "decorations": true,
         "resizable": true,
         "center": true
       }
@@ -47,10 +47,16 @@
     "shortDescription": "A graphical Git client",
     "longDescription": "GitCraft is a desktop Git client with a commit graph, staging, interactive rebase, a merge tool, GitHub and GitLab pull requests, and AI helpers.",
     "license": "GPL-3.0-only",
+    "macOS": { "infoPlist": "installer/finder-services.plist" },
     "windows": {
+      "wix": {
+        "fragmentPaths": ["installer/windows-explorer.wxs"],
+        "componentRefs": ["GitCraftExplorerCommands"]
+      },
       "nsis": {
         "installMode": "currentUser",
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "installer/windows-hooks.nsh"
       },
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
@@ -59,17 +65,20 @@
     "linux": {
       "deb": {
         "depends": [
-          "git"
+          "git (>= 1:2.38)"
         ]
       },
       "rpm": {
         "depends": [
-          "git"
+          "git >= 2.38"
         ]
       }
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["gitcraft"] }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1REM1OUYyQzlEQTg1NTkKUldSWmhkcko4bG5jOVcrNUlmaTdYdURnOHlFMkMxYTdGK2h3TnphbWpQMitXU3dDMWNtYjFPS00K",
       "endpoints": [

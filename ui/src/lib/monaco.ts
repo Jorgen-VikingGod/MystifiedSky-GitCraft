@@ -87,6 +87,6 @@ export function languageFor(file: string): string {
 
 registerEditorTheme(() => monaco.editor.setTheme(editorTheme()));
 
-export const EDITOR_FONT = "'Cascadia Mono', Consolas, 'Courier New', monospace";
+export const EDITOR_FONT = "'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', 'Liberation Mono', ui-monospace, monospace";
 
 export { monaco };

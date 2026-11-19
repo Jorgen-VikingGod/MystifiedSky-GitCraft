@@ -10,7 +10,12 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// A patch of uncommitted changes (`wip`) or of the given commits (oldest first, mailbox format).
-pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
+pub fn make_patch(dir: &Path, shas: &[String]) -> Result<Vec<u8>, String> {
+    let patch_bytes = |args: &[&str]| {
+        let output = crate::read_jobs::run_bytes(git::git_command(dir, args), 64 * 1024 * 1024, None);
+        if output.ok { Ok(output.stdout) }
+        else { Err(git::redact_diagnostic(&String::from_utf8_lossy(&output.stderr))) }
+    };
     // Keep the hunk boundaries unchanged in every export.
     let context = format!("-U{DIFF_CONTEXT_LINES}");
     let interhunk = format!("--inter-hunk-context={DIFF_INTERHUNK_LINES}");
@@ -19,13 +24,13 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
             let empty = git::run(dir, &["hash-object", "-w", "-t", "tree", "--stdin"]);
             if !empty.ok { return Err(empty.message()); } empty.stdout.trim().to_owned()
         };
-        let text = git::run_utf8(dir, &["diff", &baseline, "--binary", "--no-color", "--no-ext-diff", "--no-textconv", &context, &interhunk])?;
-        if text.trim().is_empty() {
+        let data = patch_bytes(&["diff", &baseline, "--binary", "--no-color", "--no-ext-diff", "--no-textconv", &context, &interhunk])?;
+        if data.is_empty() {
             return Err("There are no uncommitted changes to put in a patch (new files must be staged first).".into());
         }
-        return Ok(text);
+        return Ok(data);
     }
-    let mut out = String::new();
+    let mut out = Vec::new();
     let total = shas.len();
     // The subject prefix is PATCH, numbering starts at 1, and there is no reroll suffix by default.
     // Override personal format.* settings before adding the series numbering ourselves.
@@ -37,24 +42,32 @@ pub fn make_patch(dir: &Path, shas: &[String]) -> Result<String, String> {
         if parents.stdout.split_whitespace().count() > 2 {
             return Err("Merge commits cannot be exported as mailbox patches. Choose the individual commits instead.".into());
         }
-        let text = git::run_utf8(dir, &["format-patch", "-1", "--stdout", "--binary", &context, &interhunk, &prefix, "--no-numbered", "--no-cover-letter", &start, sha])?;
+        let mut data = patch_bytes(&["format-patch", "-1", "--stdout", "--binary", &context, &interhunk, &prefix, "--no-numbered", "--no-cover-letter", &start, sha])?;
         // Native indices are one-based: number = i_native - 1 + S, total = N - 1 + S.
-        out.push_str(&number_subject(&text, i + PATCH_START_NUMBER, total - 1 + PATCH_START_NUMBER));
+        number_subject(&mut data, i + PATCH_START_NUMBER, total - 1 + PATCH_START_NUMBER);
+        if out.len() + data.len() > 64 * 1024 * 1024 {
+            return Err("The patch series exceeds the 64 MB export limit. Select fewer commits.".into());
+        }
+        out.extend(data);
     }
     Ok(out)
 }
 
 /// The email subject: "Subject: [PATCH] …" for one patch,
 /// "[PATCH n/total]" when there are several (start number 1).
-pub fn number_subject(patch: &str, n: usize, total: usize) -> String {
-    if total <= 1 {
-        return patch.to_string();
+fn number_subject(patch: &mut Vec<u8>, n: usize, total: usize) {
+    if total <= 1 { return; }
+    let prefix = format!("Subject: [{PATCH_SUBJECT_PREFIX}] ");
+    let mut offset = 0;
+    for line in patch.split_inclusive(|byte| *byte == b'\n') {
+        if matches!(line, b"\n" | b"\r\n") { break; }
+        if line.starts_with(prefix.as_bytes()) {
+            let numbered = format!("Subject: [{PATCH_SUBJECT_PREFIX} {n}/{total}] ");
+            patch.splice(offset..offset + prefix.len(), numbered.into_bytes());
+            return;
+        }
+        offset += line.len();
     }
-    patch.replacen(
-        &format!("Subject: [{PATCH_SUBJECT_PREFIX}] "),
-        &format!("Subject: [{PATCH_SUBJECT_PREFIX} {n}/{total}] "),
-        1,
-    )
 }
 
 /// A zero merge limit selects diff.renamelimit; a nonpositive result selects 1000.
@@ -87,11 +100,77 @@ pub fn merge_args(dir: &Path, command: &str, args: &[&str]) -> Vec<String> {
     out
 }
 
+#[derive(Serialize)]
+pub struct HistoryFetchInfo {
+    pub shallow: bool,
+    pub remotes: Vec<String>,
+    pub promisor_remotes: Vec<String>,
+}
+
+pub fn history_fetch_info(dir: &Path) -> Result<HistoryFetchInfo, String> {
+    let shallow = git::run(dir, &["rev-parse", "--is-shallow-repository"]);
+    if !shallow.ok { return Err(shallow.message()); }
+    let output = git::run(dir, &["remote"]);
+    if !output.ok { return Err(output.message()); }
+    let mut remotes: Vec<String> = output.stdout.lines().map(str::to_owned).collect();
+    let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    let upstream = git::run(dir, &["config", "--get", &format!("branch.{}.remote", head.stdout.trim())]);
+    if let Some(index) = remotes.iter().position(|name| name == upstream.stdout.trim())
+        .or_else(|| remotes.iter().position(|name| name == "origin")) {
+        remotes.swap(0, index);
+    }
+    let legacy = git::run(dir, &["config", "--get", "extensions.partialClone"]);
+    let promisor_remotes = remotes.iter().filter(|name| {
+        legacy.stdout.trim() == name.as_str()
+            || git::run(dir, &["config", "--bool", "--get", &format!("remote.{name}.promisor")]).stdout.trim() == "true"
+    }).cloned().collect();
+    Ok(HistoryFetchInfo { shallow: shallow.stdout.trim() == "true", remotes, promisor_remotes })
+}
+
+#[derive(Serialize)]
+pub struct ReflogEntry {
+    sha: String,
+    selector: String,
+    message: String,
+}
+
+pub fn reflog(dir: &Path) -> Result<Vec<ReflogEntry>, String> {
+    let output = git::run_limited(dir, &["reflog", "show", "--all", "-n", "200", "--date=iso", "--format=%H%x00%gD%x00%gs"], 1024 * 1024);
+    if !output.ok { return Err(output.message()); }
+    Ok(output.stdout.lines().filter_map(|line| {
+        let mut columns = line.splitn(3, '\0');
+        Some(ReflogEntry { sha: columns.next()?.to_owned(), selector: columns.next()?.to_owned(), message: columns.next()?.to_owned() })
+    }).collect())
+}
+
+pub fn commit_template(dir: &Path) -> Result<Option<(String, String)>, String> {
+    let template = git::run(dir, &["config", "--path", "--get", "commit.template"]);
+    if !template.ok || template.stdout.trim_end_matches(['\r', '\n']).is_empty() { return Ok(None); }
+    let path = dir.join(template.stdout.trim_end_matches(['\r', '\n']));
+    let file = std::fs::File::open(path).map_err(|error| format!("Could not open the Git commit template: {error}"))?;
+    use std::io::Read;
+    const LIMIT: u64 = 64 * 1024;
+    let mut data = Vec::new();
+    file.take(LIMIT + 1).read_to_end(&mut data).map_err(|error| error.to_string())?;
+    if data.len() as u64 > LIMIT || data.contains(&0) { return Err("Git commit templates must be text under 64 KB.".into()); }
+    let cleaned = crate::read_jobs::run_bytes(git::git_command(dir, &["stripspace", "--strip-comments"]), LIMIT as usize, Some(data));
+    if !cleaned.ok { return Err(String::from_utf8_lossy(&cleaned.stderr).trim().to_owned()); }
+    let text = String::from_utf8(cleaned.stdout).map_err(|_| "The Git commit template is not UTF-8.")?;
+    let (summary, description) = text.trim_end().split_once('\n').unwrap_or((text.trim_end(), ""));
+    if summary.is_empty() { return Ok(None); }
+    Ok(Some((summary.to_owned(), description.trim().to_owned())))
+}
+
 /// Apply a patch file: mailbox patches become commits (`git am`), plain diffs change the working folder.
 pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::GitOut) -> git::GitOut {
-    let text = std::fs::read_to_string(file).unwrap_or_default();
-    let f = file.to_string_lossy().into_owned();
-    if text.starts_with("From ") {
+    use std::io::{BufRead, BufReader};
+    let source = std::fs::File::open(file).map(BufReader::new);
+    let mailbox = match source.and_then(|mut source| source.fill_buf().map(|bytes| bytes.starts_with(b"From "))) {
+        Ok(mailbox) => mailbox,
+        Err(error) => return git::GitOut::failed(&format!("Could not read the patch file: {error}")),
+    };
+    let Some(f) = file.to_str() else { return git::GitOut::failed("The patch filename contains unsupported characters."); };
+    if mailbox {
         for state in ["rebase-apply", "rebase-merge", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
             let path = git::run(dir, &["rev-parse", "--git-path", state]);
             let path = dir.join(path.stdout.trim());
@@ -100,9 +179,9 @@ pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::G
             }
         }
         // Keep a newly conflicted session so the user can resolve or explicitly abort it.
-        run(&["am", "--3way", &f])
+        run(&["am", "--3way", "--", f])
     } else {
-        run(&["apply", "--3way", &f])
+        run(&["apply", "--3way", "--", f])
     }
 }
 
@@ -149,8 +228,15 @@ pub fn repo_summary(dir: &Path) -> RepoSummary {
     s
 }
 
-/// The repository's pull / merge request template (GitHub or GitLab locations), if it has one.
-pub fn pr_template(dir: &Path) -> Option<String> {
+#[derive(Serialize)]
+pub struct PullRequestTemplate {
+    pub name: String,
+    pub body: String,
+}
+
+pub fn pr_templates(dir: &Path) -> Vec<PullRequestTemplate> {
+    use std::io::Read;
+    let Ok(root) = dir.canonicalize() else { return Vec::new(); };
     let mut candidates: Vec<PathBuf> = [
         ".github/pull_request_template.md",
         ".github/PULL_REQUEST_TEMPLATE.md",
@@ -159,17 +245,46 @@ pub fn pr_template(dir: &Path) -> Option<String> {
         "docs/pull_request_template.md",
         "docs/PULL_REQUEST_TEMPLATE.md",
         ".gitlab/merge_request_templates/Default.md",
-    ]
-    .iter()
-    .map(|p| dir.join(p))
-    .collect();
-    // Several templates: GitHub uses .github/PULL_REQUEST_TEMPLATE/*.md; take the first.
-    if let Ok(rd) = std::fs::read_dir(dir.join(".github").join("PULL_REQUEST_TEMPLATE")) {
-        let mut more: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|x| x == "md").unwrap_or(false)).collect();
-        more.sort();
-        candidates.extend(more);
+    ].iter().map(|path| root.join(path)).collect();
+    for folder in [".github/PULL_REQUEST_TEMPLATE", ".gitlab/merge_request_templates"] {
+        if let Ok(directory) = std::fs::read_dir(root.join(folder)) {
+            let mut more: Vec<_> = directory.flatten().map(|item| item.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")))
+                .collect();
+            more.sort();
+            candidates.extend(more.into_iter().take(32));
+        }
     }
-    candidates.into_iter().find_map(|p| std::fs::read_to_string(p).ok()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    let mut seen = std::collections::HashSet::new();
+    candidates.into_iter().filter_map(|candidate| {
+        let path = candidate.canonicalize().ok()?;
+        if !path.starts_with(&root) || !path.is_file() || !seen.insert(path.clone()) { return None; }
+        const LIMIT: u64 = 32 * 1024;
+        let mut text = String::new();
+        std::fs::File::open(path).ok()?.take(LIMIT + 1).read_to_string(&mut text).ok()?;
+        if text.len() as u64 > LIMIT || text.trim().is_empty() { return None; }
+        let name = candidate.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
+        Some(PullRequestTemplate { name, body: text.trim().to_owned() })
+    }).take(32).collect()
+}
+
+pub fn range_diff(dir: &Path, before: &str, after: &str) -> Result<String, String> {
+    let resolve = |range: &str| -> Result<String, String> {
+        let (base, tip) = range.trim().split_once("..")
+            .filter(|(base, tip)| !base.trim().is_empty() && !tip.trim().is_empty() && !tip.starts_with('.') && !tip.contains(".."))
+            .ok_or("Enter each range as base..tip, using two commit IDs, branches, or tags.")?;
+        let commit = |reference: &str| -> Result<String, String> {
+            let expression = format!("{}^{{commit}}", reference.trim());
+            let result = git::run(dir, &["rev-parse", "--verify", "-q", "--end-of-options", &expression]);
+            if result.ok { Ok(result.stdout.trim().to_owned()) }
+            else { Err(format!("Git could not resolve {} to a commit.", reference.trim())) }
+        };
+        Ok(format!("{}..{}", commit(base)?, commit(tip)?))
+    };
+    let before = resolve(before)?;
+    let after = resolve(after)?;
+    let result = git::run_limited(dir, &["range-diff", "--no-color", "--no-ext-diff", "--no-textconv", &before, &after], 2 * 1024 * 1024);
+    if result.ok { Ok(result.stdout) } else { Err(result.message()) }
 }
 
 #[derive(Serialize, Default)]
@@ -180,18 +295,36 @@ pub struct ConflictCheck {
     pub note: Option<String>,
 }
 
-/// The branch to compare with: the remote's default branch (origin/HEAD), else origin/main or origin/master.
+/// Prefer the default branch advertised by the current branch's upstream remote.
 pub fn default_target(dir: &Path) -> Option<String> {
-    let o = git::run(dir, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
-    let named = o.stdout.trim();
-    // origin/HEAD can name a branch the remote has since deleted; only use it when it still exists.
-    if o.ok && !named.is_empty() && git::run(dir, &["rev-parse", "--verify", "-q", &format!("{named}^{{commit}}")]).ok {
-        return Some(named.to_string());
+    let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    default_branch_for(dir, head.stdout.trim()).map(|(tracking, _)| tracking)
+}
+
+pub fn default_branch_for(dir: &Path, branch: &str) -> Option<(String, String)> {
+    let upstream = git::run(dir, &["config", "--get", &format!("branch.{branch}.remote")]);
+    let remotes = git::run(dir, &["remote"]);
+    let valid = |reference: &str| git::run(dir, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{reference}^{{commit}}")]).ok;
+    let preferred = upstream.stdout.trim();
+    let mut names = Vec::new();
+    if !preferred.is_empty() && preferred != "." { names.push(preferred); }
+    if !names.contains(&"origin") { names.push("origin"); }
+    for remote in remotes.stdout.lines() {
+        if !names.contains(&remote) { names.push(remote); }
     }
-    ["origin/main", "origin/master", "main", "master"]
-        .iter()
-        .find(|r| git::run(dir, &["rev-parse", "--verify", "-q", r]).ok)
-        .map(|r| r.to_string())
+    for remote in names.iter() {
+        let head = git::run(dir, &["symbolic-ref", "-q", &format!("refs/remotes/{remote}/HEAD")]);
+        if let Some(branch) = head.stdout.trim().strip_prefix(&format!("refs/remotes/{remote}/")).filter(|_| head.ok && valid(head.stdout.trim())) {
+            return Some((format!("{remote}/{branch}"), branch.to_owned()));
+        }
+    }
+    for remote in names {
+        for branch in ["main", "master"] {
+            let target = format!("{remote}/{branch}");
+            if valid(&format!("refs/remotes/{target}")) { return Some((target, branch.to_owned())); }
+        }
+    }
+    ["main", "master"].into_iter().find(|branch| valid(&format!("refs/heads/{branch}"))).map(|branch| (branch.to_owned(), branch.to_owned()))
 }
 
 /// Files that would conflict if HEAD were merged with `target` (no working-folder changes).
@@ -248,11 +381,11 @@ mod tests {
         g(&["config", "format.numbered", "true"]);
         g(&["config", "format.coverLetter", "true"]);
         // Patch of a commit, applied as a commit on another branch.
-        let patch = make_patch(&d, &[side.clone()]).unwrap();
+        let patch = String::from_utf8(make_patch(&d, std::slice::from_ref(&side)).unwrap()).unwrap();
         assert!(patch.starts_with("From "));
         assert!(patch.lines().any(|l| l == "Subject: [PATCH] side change"), "{patch}");
         assert_eq!(patch.lines().filter(|l| l.starts_with("Subject: ")).count(), 1);
-        let series = make_patch(&d, &[side.clone(), side.clone()]).unwrap();
+        let series = String::from_utf8(make_patch(&d, &[side.clone(), side.clone()]).unwrap()).unwrap();
         assert!(series.lines().any(|l| l == "Subject: [PATCH 1/2] side change"), "{series}");
         assert!(series.lines().any(|l| l == "Subject: [PATCH 2/2] side change"), "{series}");
         assert_eq!(series.lines().filter(|l| l.starts_with("Subject: ")).count(), 2);
@@ -263,7 +396,7 @@ mod tests {
         assert_eq!(git::run(&d, &["log", "-1", "--format=%s"]).stdout.trim(), "side change");
         // Patch of uncommitted work.
         fs::write(d.join("a.txt"), "wip\n").unwrap();
-        assert!(make_patch(&d, &[]).unwrap().contains("+wip"));
+        assert!(String::from_utf8(make_patch(&d, &[]).unwrap()).unwrap().contains("+wip"));
         let _ = fs::remove_file(&pf);
         let _ = fs::remove_dir_all(&d);
     }
@@ -286,7 +419,8 @@ mod tests {
         g(&["config", "diff.interHunkContext", "100"]);
         let changed = base.replace("line 5\n", "changed 5\n").replace("line 15\n", "changed 15\n");
         fs::write(d.join("context.txt"), changed).unwrap();
-        let check = |patch: String| {
+        let check = |patch: Vec<u8>| {
+            let patch = String::from_utf8(patch).unwrap();
             assert_eq!(patch.lines().filter(|l| l.starts_with("@@ ")).count(), 2, "{patch}");
             assert!(patch.contains("@@ -2,7 +2,7 @@"), "{patch}");
             assert!(patch.contains("@@ -12,7 +12,7 @@"), "{patch}");
@@ -323,8 +457,11 @@ mod tests {
     #[test]
     fn patch_subjects_are_numbered_like_libgit2() {
         let p = "From abc Mon Sep 17 00:00:00 2001\nSubject: [PATCH] Fix it\n";
-        assert_eq!(number_subject(p, 1, 1), p);
-        assert!(number_subject(p, 2, 3).contains("Subject: [PATCH 2/3] Fix it"));
+        let mut bytes = p.as_bytes().to_vec();
+        number_subject(&mut bytes, 1, 1);
+        assert_eq!(bytes, p.as_bytes());
+        number_subject(&mut bytes, 2, 3);
+        assert!(String::from_utf8(bytes).unwrap().contains("Subject: [PATCH 2/3] Fix it"));
     }
 
     #[test]

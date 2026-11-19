@@ -47,3 +47,16 @@ it("coalesces repeated close requests, retries failure and waits for edits durin
   expect(save).toHaveBeenCalledTimes(3);const count=preventDefault.mock.calls.length;guard({preventDefault});
   expect(preventDefault).toHaveBeenCalledTimes(count);stop();
 });
+
+it("persists new commit drafts and excludes transient amend text", async () => {
+  const save = vi.spyOn(api, "saveSettings").mockResolvedValue(undefined);
+  const stop = startPersistence();
+  try {
+    useStore.getState().setDraft("/repos/draft", { summary: "Keep my draft", description: "Draft body" });
+    useStore.getState().setDraft("/repos/amend", { summary: "Previous commit", amend: true });
+    await flushPersistence();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      drafts: { "/repos/draft": { summary: "Keep my draft", description: "Draft body" } },
+    }));
+  } finally { stop(); }
+});

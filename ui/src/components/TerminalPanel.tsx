@@ -2,10 +2,15 @@ import { useShallow } from "zustand/react/shallow";
 import { pendingRuns } from "@/lib/terminal-launch";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Plus, SquareTerminal, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Search, SquareTerminal, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { hosting } from "@/lib/hosting";
+import { CtxMenu } from "./ui/menu";
 import "@xterm/xterm/css/xterm.css";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -148,6 +153,37 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
 function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: { sessionId: number | null; cwd: string; run?: string; agentEnv?: Record<string, string>; visible: boolean; onReady: (id: number) => void; onExit: () => void }) {
   // Preferences > In-App Terminal.
   const pref = useStore.getState().settings;
+  const [findOpen, setFindOpen] = useState(false);
+  const [needle, setNeedle] = useState("");
+  const [found, setFound] = useState(true);
+  const search = useRef<SearchAddon | null>(null);
+  const searchBox = useRef<HTMLInputElement>(null);
+  const find = (next: string, reverse = false) => {
+    if (!next) { search.current?.clearDecorations(); setFound(true); return; }
+    setFound((reverse ? search.current?.findPrevious(next) : search.current?.findNext(next)) ?? false);
+  };
+  const closeFind = () => {
+    setFindOpen(false);
+    search.current?.clearDecorations();
+    term.current?.focus();
+  };
+  const openFind = () => {
+    setFindOpen(true);
+    requestAnimationFrame(() => searchBox.current?.select());
+  };
+  const clipboard = async (operation: "copy" | "paste") => {
+    const terminal = term.current;
+    if (!terminal) return;
+    try {
+      if (operation === "copy") {
+        const content = terminal.getSelection();
+        if (content) await navigator.clipboard.writeText(content);
+      } else {
+        terminal.paste(await navigator.clipboard.readText());
+      }
+      terminal.focus();
+    } catch (error) { useStore.getState().toast(false, String(error)); }
+  };
   const [focused, setFocused] = useState(true);
   const dim = useStore((s) => s.settings.termDim !== false);
   const host = useRef<HTMLDivElement>(null);
@@ -158,8 +194,15 @@ function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: {
   cb.current = { onReady, onExit };
 
   useEffect(() => {
+    const openLink = (_event: MouseEvent, value: string) => {
+      try {
+        const url = new URL(value);
+        if ((url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password)
+          void hosting.openUrl(url.href).catch(error => useStore.getState().toast(false, String(error)));
+      } catch { /* Only open valid web links. */ }
+    };
     const t = new Terminal({
-      fontFamily: `${pref.termFontFamily ? `'${pref.termFontFamily}', ` : ""}'Cascadia Mono', Consolas, monospace`,
+      fontFamily: `${pref.termFontFamily ? `'${pref.termFontFamily}', ` : ""}'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', 'Liberation Mono', ui-monospace, monospace`,
       fontSize: pref.termFontSize || 12,
       lineHeight: pref.termLineHeight || 1.2,
       cursorStyle: pref.termCursor || "bar",
@@ -167,9 +210,23 @@ function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: {
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: true,
+      linkHandler: { activate: openLink, allowNonHttpProtocols: false },
     });
     const f = new FitAddon();
     t.loadAddon(f);
+    const searchAddon = new SearchAddon();
+    t.loadAddon(searchAddon);
+    search.current = searchAddon;
+    t.loadAddon(new Unicode11Addon());
+    t.unicode.activeVersion = "11";
+    t.loadAddon(new WebLinksAddon(openLink));
+    t.attachCustomKeyEventHandler(event => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") {
+        if (event.type === "keydown") { event.preventDefault(); openFind(); }
+        return false;
+      }
+      return true;
+    });
     t.open(host.current!);
     term.current = t;
     fit.current = f;
@@ -227,6 +284,7 @@ function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: {
       unData.then((u) => u());
       unExit.then((u) => u());
       if (idRef.current) invoke("term_close", { id: idRef.current });
+      search.current = null;
       t.dispose();
     };
   }, [cwd]);
@@ -245,13 +303,34 @@ function TermView({ sessionId, cwd, run, agentEnv, visible, onReady, onExit }: {
   }, [visible]);
 
   return (
-    <div
-      ref={host}
-      data-terminal-session={sessionId ?? undefined}
-      data-terminal-visible={visible ? "true" : "false"}
-      onFocusCapture={() => setFocused(true)}
-      onBlurCapture={() => setFocused(false)}
-      className={cn("absolute inset-0 pl-2 pt-1 transition-opacity", !visible && "invisible", dim && !focused && "opacity-60")}
-    />
+    <div className={cn("absolute inset-0 transition-opacity", !visible && "invisible", dim && !focused && "opacity-60")}
+      onFocusCapture={() => setFocused(true)} onBlurCapture={() => setFocused(false)}>
+      <CtxMenu items={() => [
+        { label: "Copy", disabled: !term.current?.hasSelection(), onSelect: () => void clipboard("copy") },
+        { label: "Paste", onSelect: () => void clipboard("paste") },
+        { label: "Complete command with shell (Tab)", disabled: sessionId === null, onSelect: () => {
+          if (idRef.current === null) return;
+          term.current?.focus();
+          void invoke("term_write", { id: idRef.current, data: "\t" }).catch(error => useStore.getState().toast(false, String(error)));
+        } },
+        { label: "Find in terminal", onSelect: openFind },
+      ]}>
+        <div ref={host} data-terminal-session={sessionId ?? undefined} data-terminal-visible={visible ? "true" : "false"} className="absolute inset-0 pl-2 pt-1" />
+      </CtxMenu>
+      {visible && (findOpen ? (
+        <div className="absolute z-10 top-1 right-2 flex items-center gap-1 rounded border border-line bg-panel px-1.5 py-1 text-[12px]">
+          <input ref={searchBox} aria-label="Find in terminal" className="bg-field px-1.5 py-0.5 outline-none" placeholder="Find in terminal"
+            value={needle} onChange={event => { setNeedle(event.target.value); find(event.target.value); }}
+            onKeyDown={event => {
+              if (event.key === "Enter") { event.preventDefault(); find(needle, event.shiftKey); }
+              if (event.key === "Escape") { event.stopPropagation(); closeFind(); }
+            }} />
+          {!found && <span role="status" className="text-fg3">No match</span>}
+          <button className="p-1" title="Previous match" onClick={() => find(needle, true)}><ChevronUp size={14} /></button>
+          <button className="p-1" title="Next match" onClick={() => find(needle)}><ChevronDown size={14} /></button>
+          <button className="p-1" title="Close terminal search" onClick={closeFind}><X size={14} /></button>
+        </div>
+      ) : <button className="absolute top-1 right-3 p-1 opacity-65 hover:opacity-100" title="Find in terminal" onClick={openFind}><Search size={13} /></button>)}
+    </div>
   );
 }

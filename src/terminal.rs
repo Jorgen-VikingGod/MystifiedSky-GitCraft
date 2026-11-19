@@ -21,17 +21,17 @@ struct OutputFlow {
 }
 impl OutputFlow {
     fn reserve(&self, bytes: usize) -> bool {
-        let mut state = self.state.lock().unwrap();
-        while state.0 > 0 && state.0 + bytes > 64 * 1024 && !state.1 { state = self.changed.wait(state).unwrap(); }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.0 > 0 && state.0 + bytes > 64 * 1024 && !state.1 { state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner()); }
         if state.1 { return false; }
         state.0 += bytes;
         true
     }
-    fn acknowledge(&self, bytes: usize) { let mut state = self.state.lock().unwrap(); state.0 = state.0.saturating_sub(bytes); self.changed.notify_all(); }
-    fn close(&self) { self.state.lock().unwrap().1 = true; self.changed.notify_all(); }
+    fn acknowledge(&self, bytes: usize) { let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner()); state.0 = state.0.saturating_sub(bytes); self.changed.notify_all(); }
+    fn close(&self) { self.state.lock().unwrap_or_else(|error| error.into_inner()).1 = true; self.changed.notify_all(); }
     fn drain(&self) {
-        let mut state = self.state.lock().unwrap();
-        while state.0 > 0 && !state.1 { state = self.changed.wait(state).unwrap(); }
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.0 > 0 && !state.1 { state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner()); }
     }
 }
 
@@ -63,23 +63,24 @@ fn shell_command(name: &str) -> CommandBuilder {
 
 /// Preferences > In-App Terminal > Default In-App Terminal: powershell, pwsh, cmd, gitbash, wsl (Windows);
 /// default, bash, zsh, fish elsewhere.
-pub fn shell_for(name: &str) -> CommandBuilder {
-    match name {
+pub fn shell_for(name: &str) -> Result<CommandBuilder, String> {
+    Ok(match name {
         "powershell" if cfg!(windows) => shell_command("powershell.exe"),
         "pwsh" => shell_command(if cfg!(windows) { "pwsh.exe" } else { "pwsh" }),
         "cmd" if cfg!(windows) => shell_command("cmd.exe"),
         "wsl" if cfg!(windows) => shell_command("wsl.exe"),
         "gitbash" if cfg!(windows) => {
-            // Git for Windows: <install>\cmd\git.exe -> <install>\bin\bash.exe
-            let git = std::process::Command::new("where").arg("git").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string()).unwrap_or_default();
-            let bash = std::path::Path::new(&git).parent().and_then(|p| p.parent()).map(|p| p.join("bin").join("bash.exe")).filter(|p| p.exists());
-            let mut c = CommandBuilder::new(bash.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "bash.exe".into()));
+            #[cfg(windows)]
+            let bash = crate::external::git_for_windows_program("bin/bash.exe");
+            #[cfg(not(windows))]
+            let bash: Option<std::path::PathBuf> = None;
+            let mut c = CommandBuilder::new(bash.ok_or("Git Bash wasn't found next to the configured Git executable.")?);
             c.args(["--login", "-i"]);
             c
         }
-        "bash" | "zsh" | "fish" => CommandBuilder::new(name),
+        "bash" | "zsh" | "fish" => login_shell(name),
         _ => default_shell(),
-    }
+    })
 }
 
 /// The shell to start: PowerShell on Windows, the user's shell elsewhere.
@@ -90,8 +91,16 @@ fn default_shell() -> CommandBuilder {
             None => shell_command("powershell.exe"),
         }
     } else {
-        CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()))
+        login_shell(&std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()))
     }
+}
+
+fn login_shell(path: &str) -> CommandBuilder {
+    let mut shell = shell_command(path);
+    if cfg!(target_os = "macos") && matches!(std::path::Path::new(path).file_name().and_then(|name| name.to_str()), Some("zsh" | "bash" | "fish")) {
+        shell.arg("-l");
+    }
+    shell
 }
 
 /// Splits bytes into valid UTF-8 text, keeping an incomplete character for the next chunk.
@@ -115,7 +124,7 @@ pub fn take_utf8(buf: &mut Vec<u8>) -> String {
 
 impl Terminals {
     pub fn pending_output(&self) -> Vec<(u32, usize)> {
-        self.sessions.lock().unwrap().iter().map(|(id, session)| (*id, session.output.state.lock().unwrap().0)).collect()
+        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).iter().map(|(id, session)| (*id, session.output.state.lock().unwrap_or_else(|error| error.into_inner()).0)).collect()
     }
     /// Start a shell in `cwd`. Output goes to `on_data`; `on_exit` runs when the shell ends.
     pub fn open(
@@ -132,9 +141,12 @@ impl Terminals {
         let pair = pty
             .openpty(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
-        let mut cmd = shell_for(shell);
+        let mut cmd = shell_for(shell)?;
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("LANG").is_none_or(|value| value.is_empty()) { cmd.env("LANG", "en_US.UTF-8"); }
         // Keep agent config paths out of shell command text.
         if let Some(vars) = agent_env {
             for key in ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] {
@@ -152,7 +164,7 @@ impl Terminals {
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let input = input_queue(writer);
         let output = Arc::new(OutputFlow::default());
-        self.sessions.lock().unwrap().insert(id, Session { writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
+        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).insert(id, Session { writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
         let sessions = self.sessions.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -176,7 +188,7 @@ impl Terminals {
             }
             output.drain();
             // EOF releases the PTY and reaps shells that exited without the user closing their tab.
-            let session = sessions.lock().unwrap().remove(&id);
+            let session = sessions.lock().unwrap_or_else(|error| error.into_inner()).remove(&id);
             if let Some(mut session) = session {
                 let _ = session.child.wait();
             }
@@ -187,23 +199,23 @@ impl Terminals {
 
     pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
         if data.len() > 256 * 1024 { return Err("Paste at most 256 KB at a time into the terminal.".into()); }
-        let writer = self.sessions.lock().unwrap().get(&id).ok_or("That terminal has closed")?.writer.clone();
+        let writer = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).ok_or("That terminal has closed")?.writer.clone();
         writer.try_send(data.as_bytes().to_vec()).map_err(|_| "Terminal input is busy or closed. Wait before sending more input.".into())
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-        let master = self.sessions.lock().unwrap().get(&id).ok_or("That terminal has closed")?.master.clone();
-        let result = master.lock().unwrap().resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string());
+        let master = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).ok_or("That terminal has closed")?.master.clone();
+        let result = master.lock().unwrap_or_else(|error| error.into_inner()).resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string());
         result
     }
 
     pub fn acknowledge(&self, id: u32, bytes: usize) {
-        let output = self.sessions.lock().unwrap().get(&id).map(|s| s.output.clone());
+        let output = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).get(&id).map(|s| s.output.clone());
         if let Some(output) = output { output.acknowledge(bytes); }
     }
 
     pub fn close(&self, id: u32) {
-        let session = self.sessions.lock().unwrap().remove(&id);
+        let session = self.sessions.lock().unwrap_or_else(|error| error.into_inner()).remove(&id);
         if let Some(mut sess) = session {
             sess.output.close();
             let _ = sess.child.kill();

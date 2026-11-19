@@ -1,3 +1,4 @@
+import { useText } from "@/lib/locale";
 import { useShallow } from "zustand/react/shallow";
 import { saveProfileIdentity } from "@/lib/prefs";
 import { useQuery } from "@tanstack/react-query";
@@ -38,7 +39,7 @@ import { removeProfile, switchProfile } from "@/lib/prefs";
 import { Button } from "../ui/button";
 import { AgentsSection, CommitSection, EditorSection, ExperimentalSection, GeneralSection, NotificationsSection, SshSection, TerminalSection, ToolsSection, UiSection } from "./GeneralSections";
 import { AiSection, IntegrationsSection, SigningSection } from "./IntegrationSections";
-import { ConflictSection, EncodingSection, GitflowSection, HooksSection, IssueTrackerSection, LfsSection, SparseSection, SubmodulesSection } from "./RepoSections";
+import { ConflictSection, EncodingSection, GitflowSection, HooksSection, IssueTrackerSection, LfsSection, PullSection, SparseSection, SubmodulesSection } from "./RepoSections";
 import { H, Row, Text } from "./controls";
 
 type Item = { id: string; label: string; icon: ReactNode; render: (path: string) => ReactNode };
@@ -69,11 +70,13 @@ const REPO: Item[] = [
   { id: "conflict", label: "Conflict Prevention", icon: <GitMerge size={15} />, render: (p) => <ConflictSection path={p} /> },
   { id: "issues", label: "Issue Tracker", icon: <ListTodo size={15} />, render: (p) => <IssueTrackerSection path={p} /> },
   { id: "sparse", label: "Sparse Checkout", icon: <FolderTree size={15} />, render: (p) => <SparseSection path={p} /> },
+  { id: "pull", label: "Pull and Checkout", icon: <GitMerge size={15} />, render: (p) => <PullSection path={p} /> },
   { id: "submodules", label: "Submodules", icon: <Layers size={15} />, render: (p) => <SubmodulesSection path={p} /> },
 ];
 
 /** Full-window Preferences: section list on the left, the section on the right. */
 export function PreferencesScreen({ onClose, section }: { onClose: () => void; section?: string }) {
+  const t = useText();
   const s = useStore(useShallow((st) => ({ activeId: st.activeId, activeProfile: st.activeProfile, profiles: st.profiles, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path ?? "" : "";
@@ -82,25 +85,25 @@ export function PreferencesScreen({ onClose, section }: { onClose: () => void; s
   const nav = (x: Item) => (
     <button key={x.id} onClick={() => setSel(x.id)} className={cn("w-full flex items-center gap-2.5 h-[32px] px-4 text-[13px] text-left", sel === x.id ? "bg-selrow text-white" : "text-fg hover:bg-hoverrow")}>
       <span className="text-white/70 w-[16px] flex justify-center">{x.icon}</span>
-      {x.label}
+      {t(x.label)}
     </button>
   );
   return (
-    <section aria-label="Preferences" className="fixed left-0 right-0 top-[56px] bottom-0 z-[45] flex bg-app">
+    <section aria-label={t("Preferences")} className="fixed left-0 right-0 top-[56px] bottom-0 z-[45] flex bg-app">
       <div className="w-[250px] shrink-0 bg-panel border-r border-black/30 overflow-y-auto pb-4">
         <button title="Exit Preferences (Esc)" onClick={onClose} className="w-full flex items-center gap-2 h-[40px] px-3 text-[15px] text-white hover:bg-hoverrow text-left">
-          <ArrowLeft size={16} /> Exit Preferences
+          <ArrowLeft size={16} /> {t("Exit Preferences")}
         </button>
-        <div className="px-3 pt-1 pb-1 text-[12px] text-fg2">Current profile</div>
+        <div className="px-3 pt-1 pb-1 text-[12px] text-fg2">{t("Current profile")}</div>
         <div className="flex items-center gap-2 h-[32px] px-4 bg-white/[0.04] text-[13px] text-white">
           <Users size={15} className="text-white/70" />
           <span className="truncate">{s.profiles.find((x) => x.id === s.activeProfile)?.name ?? "Default Profile"}</span>
         </div>
-        <div className="px-3 pt-4 pb-1 text-[12px] text-fg2">Preferences</div>
+        <div className="px-3 pt-4 pb-1 text-[12px] text-fg2">{t("Preferences")}</div>
         {GENERAL.map(nav)}
         {path && (
           <>
-            <div className="px-3 pt-5 pb-1 text-[12px] text-fg2">Repo-Specific Preferences</div>
+            <div className="px-3 pt-5 pb-1 text-[12px] text-fg2">{t("Repo-Specific Preferences")}</div>
             <div className="px-3 pb-1 text-[12px] text-fg2 truncate flex items-center gap-1.5" title={path}>
               <Folder size={12} /> Repo:{tab?.title ?? path.split(/[\\/]/).pop()}
             </div>

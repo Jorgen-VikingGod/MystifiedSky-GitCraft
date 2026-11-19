@@ -61,3 +61,5 @@ secrets.*
 *.AppImage
 *.deb
 *.rpm
+
+/BUGS_AND_OPTIMIZATIONS.md

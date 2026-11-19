@@ -3,15 +3,17 @@ import { ArrowDown, ArrowUp, GripVertical, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Step } from "@/lib/api";
 import { useStore, type RebasePlan } from "@/lib/store";
-import { runPlan } from "@/lib/rewrite";
+import { autosquash, runPlan } from "@/lib/rewrite";
 import { Button } from "./ui/button";
 import { Avatar } from "./Icons";
 import { cn } from "@/lib/utils";
 
-const STEPS: { step: Step; label: string; key: string; color: string }[] = [
+const STEPS: { step: Exclude<Step, "exec">; label: string; key: string; color: string }[] = [
   { step: "pick", label: "Pick", key: "P", color: "#5cb85c" },
   { step: "reword", label: "Reword", key: "R", color: "#4d88ff" },
   { step: "squash", label: "Squash", key: "S", color: "#de9b43" },
+  { step: "fixup", label: "Fixup", key: "F", color: "#b17bcb" },
+  { step: "edit", label: "Edit", key: "E", color: "#178b8f" },
   { step: "drop", label: "Drop", key: "D", color: "#d9413d" },
 ];
 
@@ -24,6 +26,7 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [skipHooks, setSkipHooks] = useState(false);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const firstItem = useRef<HTMLButtonElement>(null);
@@ -31,14 +34,15 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
   const message = useRef<HTMLTextAreaElement>(null);
   const cherry = plan.mode === "cherry";
   const items = plan.items;
+  const steps = cherry ? STEPS.filter(({ step }) => step !== "edit") : STEPS;
   const update = (next: RebasePlan["items"]) => s.setUi(tabId, { rebase: { ...plan, items: next } });
   const select = (i: number) => {
     setSel(i);
     root.current?.querySelector<HTMLButtonElement>(`[data-rebase-item="${i}"]`)?.focus();
   };
 
-  const setAction = (i: number, step: Step) => {
-    if (!items[i] || (cherry && step === "squash" && i === items.length - 1)) return;
+  const setAction = (i: number, step: RebasePlan["items"][number]["action"]) => {
+    if (!items[i] || (cherry && (step === "squash" || step === "fixup") && i === items.length - 1)) return;
     update(items.map((it, k) => (k === i ? { ...it, action: step } : it)));
     if (step === "reword") {
       setEditing(i);
@@ -67,8 +71,8 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
     const panel = root.current;
     if (!panel) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.isComposing || (e.target as HTMLElement).closest("textarea")) return;
-      const st = STEPS.find((x) => x.key.toLowerCase() === e.key.toLowerCase());
+      if (e.defaultPrevented || e.isComposing || (e.target as HTMLElement).closest("textarea,input")) return;
+      const st = steps.find((x) => x.key.toLowerCase() === e.key.toLowerCase());
       if (st && !e.ctrlKey && !e.metaKey && !e.altKey) return (e.preventDefault(), setAction(sel, st.step));
       if (e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
@@ -86,10 +90,11 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
   });
 
   const kept = items.filter((i) => i.action !== "drop").length;
-  const bottomSquash = items.length > 0 && items[items.length - 1].action === "squash";
+  const firstKept = [...items].reverse().find(item => item.action !== "drop");
+  const bottomSquash = firstKept?.action === "squash" || firstKept?.action === "fixup";
   const start = async () => {
     setBusy(true);
-    await runPlan(tabId, path, plan);
+    await runPlan(tabId, path, plan, skipHooks);
     setBusy(false);
   };
 
@@ -105,7 +110,11 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
         </button>
       </div>
       <div className="px-3 py-1.5 text-[11.5px] text-fg3 border-b border-white/5 shrink-0">
-        Newest at the top. Pick an action for each commit (keys P, R, S, D), drag rows or use Ctrl+↑ ↓ to reorder. Squash melds a commit into the one below it.
+        Newest at the top. Drag rows or use Ctrl+↑ ↓ to reorder. Squash combines messages, Fixup keeps the earlier message, and Edit pauses for changes.
+        {items.some(item => item.action === "reword") && <label className="mt-1 flex items-center gap-2">
+          <input type="checkbox" checked={skipHooks} onChange={event => setSkipHooks(event.target.checked)} />
+          Skip checks that Git allows rewording to bypass
+        </label>}
       </div>
       <div className="flex-1 overflow-y-auto">
         {items.map((it, i) => {
@@ -132,7 +141,7 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
               <div className="flex items-center gap-2 h-[34px] pl-1.5 pr-3">
                 <GripVertical size={14} className="text-fg3 cursor-grab shrink-0" />
                 <div className="flex rounded-[3px] overflow-hidden border border-white/10 shrink-0">
-                  {STEPS.map((x) => (
+                  {steps.map((x) => (
                     <button
                       key={x.step}
                       title={`${x.label} (${x.key})`}
@@ -161,6 +170,15 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
                   <ArrowDown size={13} />
                 </button>
               </div>
+              {!cherry && !dropped && sel === i && (
+                <label className="flex items-center gap-2 pl-[38px] pr-3 pb-2 text-[11.5px] text-fg3">
+                  Run after this commit
+                  <input type="text" value={it.command ?? ""} maxLength={8192} placeholder="Optional shell command"
+                    onChange={event => update(items.map((item, k) => k === i ? { ...item, command: event.target.value } : item))}
+                    className="min-w-0 flex-1 bg-field border border-white/10 rounded px-2 py-1 mono text-fg" />
+                </label>
+              )}
+              {!cherry && !dropped && sel !== i && it.command?.trim() && <div className="pl-[38px] pr-3 pb-2 text-[11.5px] text-fg3 truncate">Run <span className="mono">{it.command}</span></div>}
               {editing === i && (
                 <div className="flex flex-col gap-2 pl-[38px] pr-3 pb-3">
                   <textarea
@@ -198,8 +216,11 @@ export function RebaseView({ tabId, path, plan }: { tabId: string; path: string;
       </div>
       <div className="flex items-center gap-2 px-3 py-2.5 border-t border-white/10 bg-panel shrink-0">
         <span className="text-[12px] text-fg3 flex-1">
-          {kept} of {items.length} commits kept{bottomSquash ? " · the bottom commit has nothing to squash into, so it will be picked" : ""}
+          {kept} of {items.length} commits kept{bottomSquash ? " · the first commit will be picked because it has no earlier commit to combine with" : ""}
         </span>
+        {!cherry && <Button size="sm" disabled={busy || editing !== null || !items.some(item => /^(fixup|squash)! /.test(item.summary))} onClick={() => update(autosquash(items))}>
+          Autosquash
+        </Button>}
         <Button size="sm" onClick={() => s.setUi(tabId, { rebase: { ...plan, items: plan.original.map((x) => ({ ...x })) } })}>
           Reset
         </Button>

@@ -44,6 +44,7 @@ pub struct AccountInfo {
 }
 
 fn cmd(program: &str) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = Command::new(program);
     #[cfg(windows)]
     c.creation_flags(0x0800_0000);
@@ -118,23 +119,74 @@ pub fn set(dir: &Path, scope: &str, key: &str, value: &str) -> Result<(), String
     }
 }
 
-/// Create a new ed25519 SSH key (no passphrase) and return its public half.
-pub fn generate_ssh_key(email: &str, name: &str) -> Result<String, String> {
+#[derive(Serialize)]
+pub struct GeneratedSshKey {
+    pub public_key: String,
+    pub private_path: String,
+    pub agent_added: bool,
+    pub agent_error: Option<String>,
+}
+
+const ASKPASS_SECRET: &str = "GITCRAFT_SSH_ASKPASS_PASSPHRASE";
+
+pub fn handle_ssh_askpass() -> bool {
+    let Some(passphrase) = std::env::var_os(ASKPASS_SECRET) else { return false; };
+    println!("{}", passphrase.to_string_lossy());
+    true
+}
+
+fn ssh_askpass(command: &mut Command, passphrase: &str) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    command.env("SSH_ASKPASS", executable).env("SSH_ASKPASS_REQUIRE", "force")
+        .env(ASKPASS_SECRET, passphrase);
+    Ok(())
+}
+
+pub fn generate_ssh_key(email: &str, name: &str, passphrase: &str, add_to_agent: bool) -> Result<GeneratedSshKey, String> {
+    let name = if name.trim().is_empty() { "id_ed25519" } else { name.trim() };
+    if !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) {
+        return Err("Use letters, numbers, hyphens or underscores in the SSH key name.".into());
+    }
+    if passphrase.contains(['\r', '\n', '\0']) {
+        return Err("An SSH passphrase cannot contain line breaks or NUL characters.".into());
+    }
     let dir = home().join(".ssh");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(if name.trim().is_empty() { "id_ed25519" } else { name.trim() });
-    if file.exists() {
-        return Err(format!("{} already exists", file.display()));
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let file = dir.join(name);
+    let public_path = file.with_extension("pub");
+    if file.exists() || public_path.exists() { return Err(format!("{} already exists", file.display())); }
+    let temporary = tempfile::tempdir_in(&dir).map_err(|error| error.to_string())?;
+    let staged = temporary.path().join("key");
+    let staged_public = staged.with_extension("pub");
+    let mut command = cmd("ssh-keygen");
+    command.args(["-q", "-t", "ed25519", "-C", email, "-f"]).arg(&staged);
+    if passphrase.is_empty() { command.args(["-N", ""]); }
+    else { ssh_askpass(&mut command, passphrase)?; }
+    let output = crate::read_jobs::run(command, 64 * 1024, None);
+    if !output.ok { return Err(format!("Could not generate the SSH key. {}", output.message())); }
+    let public_key = std::fs::read_to_string(&staged_public).map_err(|error| error.to_string())?.trim().to_string();
+    tempfile::TempPath::try_from_path(staged).and_then(|path| path.persist_noclobber(&file).map_err(std::io::Error::from)).map_err(|error| error.to_string())?;
+    if let Err(error) = tempfile::TempPath::try_from_path(staged_public).and_then(|path| path.persist_noclobber(&public_path).map_err(std::io::Error::from)) {
+        let _ = std::fs::remove_file(&file);
+        return Err(error.to_string());
     }
-    let o = cmd("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", email, "-f"])
-        .arg(&file)
-        .output()
-        .map_err(|e| format!("ssh-keygen is not available: {e}"))?;
-    if !o.status.success() {
-        return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+
+    let mut agent_error = None;
+    if add_to_agent {
+        let mut command = cmd("ssh-add");
+        #[cfg(target_os = "macos")]
+        if !passphrase.is_empty() { command.arg("--apple-use-keychain"); }
+        command.arg(&file);
+        let result = ssh_askpass(&mut command, passphrase).and_then(|()| {
+            let output = crate::read_jobs::run(command, 64 * 1024, None);
+            if output.ok { Ok(()) } else { Err(output.message()) }
+        });
+        agent_error = result.err().map(|error| format!("The SSH key was created. Start your SSH agent to add it. {error}"));
     }
-    std::fs::read_to_string(file.with_extension("pub")).map(|s| s.trim().to_string()).map_err(|e| e.to_string())
+    Ok(GeneratedSshKey {
+        public_key, private_path: file.to_string_lossy().into_owned(),
+        agent_added: add_to_agent && agent_error.is_none(), agent_error,
+    })
 }
 
 pub fn read_public_key(path: &str) -> Result<String, String> {
@@ -152,11 +204,41 @@ pub fn parse_gpg_keys(text: &str) -> Vec<GpgKey> {
     for line in text.lines() {
         let fields: Vec<_> = line.split(':').collect();
         match fields.first().copied() {
-            Some("sec") if fields.len() > 4 => { id = fields[4].into(); fingerprint.clear(); },
-            Some("fpr") if fields.len() > 9 && !id.is_empty() => fingerprint = fields[9].into(),
-            Some("uid") if fields.len() > 9 && !id.is_empty() => { keys.push(GpgKey { id: std::mem::take(&mut id), fingerprint: std::mem::take(&mut fingerprint), uid: fields[9].into() }); },
+            Some("sec") => {
+                id.clear();
+                fingerprint.clear();
+                if fields.len() > 11 && !matches!(fields[1], "e" | "r" | "d" | "i")
+                    && fields[11].contains('S') && !fields[11].contains('D') {
+                    id = fields[4].into();
+                }
+            },
+            Some("fpr") if fields.len() > 9 && !id.is_empty() && fingerprint.is_empty() => fingerprint = fields[9].into(),
+            Some("uid") if fields.len() > 9 && !id.is_empty() && !fingerprint.is_empty() && !matches!(fields[1], "e" | "r" | "d" | "i") => { keys.push(GpgKey { id: std::mem::take(&mut id), fingerprint: std::mem::take(&mut fingerprint), uid: fields[9].into() }); },
             _ => {},
         }
     }
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_gpg_keys;
+
+    #[test]
+    fn gpg_picker_only_lists_usable_signing_keys() {
+        let mut input = String::new();
+        for (validity, id, capabilities) in [
+            ("u", "usable", "cSC"), ("e", "expired", "scESC"), ("r", "revoked", "scSC"),
+            ("d", "disabled", "scSCD"), ("u", "encrypt-only", "eE"),
+        ] {
+            input.push_str(&format!("sec:{validity}:256:22:{id}:0:0:::::{capabilities}:
+fpr:::::::::{id}-fingerprint:
+uid:u::::::::{id} UID:
+"));
+        }
+        let keys = parse_gpg_keys(&input);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "usable");
+        assert_eq!(keys[0].fingerprint, "usable-fingerprint");
+    }
 }

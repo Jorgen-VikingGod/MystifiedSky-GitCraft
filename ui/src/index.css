@@ -24,7 +24,7 @@
   --color-selrow: rgb(77 136 255 / 0.2);
   --color-hoverrow: rgb(77 136 255 / 0.1);
   --font-sans: "Open Sans", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --font-mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, "DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
 }
 
 html,
@@ -255,3 +255,37 @@ button, [role="button"], [role="option"], [role="tab"], input, select, textarea 
 @media (prefers-reduced-motion: reduce) {
   .graph-row, .graph-row-text, .menu-item { transition: none; }
 }
+
+@media (forced-colors: active) {
+  :root {
+    --color-accent: Highlight;
+    --color-link: LinkText;
+    --color-selrow: Highlight;
+    --color-fg: CanvasText;
+    --color-fg2: CanvasText;
+    --color-fg3: GrayText;
+    --color-line: ButtonBorder;
+  }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  [aria-selected="true"], [aria-pressed="true"] {
+    outline: 1px solid Highlight;
+  }
+}
+
+.hosted-markdown { white-space: normal; }
+.hosted-markdown > * + * { margin-top: 0.65em; }
+.hosted-markdown a { color: var(--color-link); text-decoration: underline; }
+.hosted-markdown :is(h1, h2, h3, h4, h5, h6) { font-weight: 700; }
+.hosted-markdown :is(h1, h2) { font-size: 1.15em; }
+.hosted-markdown ul { list-style: disc; padding-inline-start: 1.5em; }
+.hosted-markdown ol { list-style: decimal; padding-inline-start: 1.5em; }
+.hosted-markdown .task-list-item { list-style: none; }
+.hosted-markdown blockquote { border-inline-start: 3px solid var(--color-line2); padding-inline-start: 0.75em; color: var(--color-fg2); }
+.hosted-markdown code { font-family: var(--font-mono); background: var(--color-field); }
+.hosted-markdown pre { overflow: auto; padding: 0.75em; background: var(--color-field); }
+.hosted-markdown table { display: block; overflow: auto; }
+.hosted-markdown :is(th, td) { border: 1px solid var(--color-line); padding: 0.3em 0.5em; }
+.hosted-markdown img { max-width: 100%; max-height: 24em; object-fit: contain; }

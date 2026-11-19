@@ -66,9 +66,25 @@ describe("reference commit and branch actions", () => {
     expect(run).toHaveBeenCalledWith(repo.path, { type: "worktreeAdd", path: "/repos/selected", branch: "selected", newBranch: true, start: commit.sha });
   });
 
+  it("uses the chosen pull-request template without pushing a branch during selection", async () => {
+    const run = vi.spyOn(api, "run");
+    vi.spyOn(hosting, "templates").mockResolvedValue([
+      { name: "Feature.md", body: "Describe the feature" }, { name: "Fix.md", body: "Describe the fix" },
+    ]);
+    await startPullRequest(repo.path, "feature/selected");
+    const picker = useStore.getState().dialog;
+    if (picker?.kind !== "form") throw new Error("Missing template picker");
+    expect(picker.fields[0].options).toContainEqual(["Fix.md", "Fix.md"]);
+    picker.onSubmit({ template: "Fix.md" });
+    const form = useStore.getState().dialog;
+    if (form?.kind !== "form") throw new Error("Missing pull request form");
+    expect(form.fields.find(field => field.key === "body")?.value).toContain("Describe the fix");
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("pushes the selected branch when creating a pull request", async () => {
     const run = vi.spyOn(api, "run").mockResolvedValue({ ok: false, message: "Test stops before remote creation" });
-    vi.spyOn(hosting, "template").mockResolvedValue(null);
+    vi.spyOn(hosting, "templates").mockResolvedValue([]);
     await startPullRequest(repo.path, "feature/selected");
     const dialog = useStore.getState().dialog;
     if (dialog?.kind !== "form") throw new Error("Missing pull request dialog");

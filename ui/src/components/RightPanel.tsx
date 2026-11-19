@@ -1,3 +1,4 @@
+import { CommitChecks } from "./CommitChecks";
 import { useShallow } from "zustand/react/shallow";
 import { buildTree, type TreeNode } from "@/lib/file-tree";
 import { VirtualFileRows } from "./VirtualFileRows";
@@ -225,12 +226,19 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const { total } = workingChanges(repo.status);
   const merging = repo.state_note === "merging";
   const [cur, inc] = repo.conflict_labels ?? [repo.head_branch ?? "HEAD", "incoming"];
-  // Commit template (Preferences > Commit): fill an empty, untouched commit box.
+  const templateEnabled = s.settings.useCommitTemplate !== false && !merging && !draft.amend;
+  const customTemplate = !!(s.settings.templateSummary || s.settings.templateDescription);
+  const gitTemplate = useQuery({
+    queryKey: ["commitTemplate", repo.path], queryFn: ({ signal }) => api.commitTemplate(repo.path, signal),
+    enabled: templateEnabled && !customTemplate,
+    retry: false,
+  });
+  const templateSummary = customTemplate ? s.settings.templateSummary : gitTemplate.data?.[0];
+  const templateDescription = customTemplate ? s.settings.templateDescription : gitTemplate.data?.[1];
   useEffect(() => {
-    const t = s.settings;
-    if (t.useCommitTemplate !== false && !merging && !draft.summary && !draft.description && !draft.amend && (t.templateSummary || t.templateDescription))
-      s.setDraft(repo.path, { summary: t.templateSummary, description: t.templateDescription });
-  }, [repo.path, merging, draft.summary, draft.description]);
+    if (templateEnabled && !draft.summary && !draft.description && (templateSummary || templateDescription))
+      s.setDraft(repo.path, { summary: templateSummary ?? "", description: templateDescription ?? "" });
+  }, [repo.path, templateEnabled, templateSummary, templateDescription, draft.summary, draft.description]);
   // Prefill the commit box with the message git prepared for the merge (MERGE_MSG).
   useEffect(() => {
     if (merging && repo.merge_msg && !draft.summary && !draft.description) {
@@ -242,6 +250,7 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
   const left = s.metrics.summary_counter - draft.summary.length;
   const push = s.settings.pushAfterCommit;
   const [skipHooks, setSkipHooks] = useState(s.settings.skipHooks);
+  const [signOff, setSignOff] = useState(false);
   const [coauthors, setCoauthors] = useState("");
   const coauthorsRef = useRef(coauthors);
   coauthorsRef.current = coauthors;
@@ -252,12 +261,17 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
     s.setUi(tabId, { diff: target });
   };
 
-  const doCommit = async (stageAll: boolean) => {
+  const doCommit = async (stageAll: boolean, confirmed = false) => {
     if (repo.status.conflicted || conflicted.length > 0) { s.toast(false, "Resolve and stage every conflicted file before committing."); return; }
+    if (draft.amend && !confirmed && await api.headIsUpstream(repo.path, repo.head_sha).catch(() => false)) {
+      confirmThen("Amend a published commit?", "This commit is already on its upstream branch. Amending it changes its ID and may require a force push.",
+        "Amend commit", () => void doCommit(stageAll, true));
+      return;
+    }
     const submitted = useStore.getState().drafts[repo.path];
     const submittedAuthors = coauthorsRef.current;
     const description = withCoauthors(draft.description, coauthors);
-    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks, stripComments: s.settings.stripComments });
+    const ok = await act(repo.path, { type: "commit", summary: draft.summary, description, amend: draft.amend, stageAll, skipHooks, ...(signOff ? { signOff } : {}), stripComments: s.settings.stripComments });
     if (ok) {
       if (coauthorsRef.current === submittedAuthors) setCoauthors("");
       if (useStore.getState().drafts[repo.path] === submitted) s.setDraft(repo.path, { summary: "", description: "", amend: false });
@@ -515,6 +529,10 @@ function WorkPanel({ repo, tabId }: { repo: RepoView; tabId: string }) {
                 <input type="checkbox" checked={skipHooks} onChange={(e) => setSkipHooks(e.target.checked)} className="accent-[#80B1EA]" />
                 Skip Git hooks
               </label>
+              <label className="flex items-center gap-2 text-[12.5px] text-white/80 pl-5 cursor-pointer" title="Add a Signed-off-by trailer using your Git identity">
+                <input type="checkbox" checked={signOff} onChange={event => setSignOff(event.target.checked)} className="accent-[#80B1EA]" />
+                Sign off (DCO)
+              </label>
               </div>
             </Collapsible>
           </>
@@ -598,6 +616,17 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
   const s = useStore(useShallow((st) => ({ metrics: st.metrics, setUi: st.setUi })));
   const ui = useTabUi(tabId);
   const files = useQuery({ queryKey: ["commitFiles", repo.path, c.sha], queryFn: ({ signal }) => api.commitFiles(repo.path, c.sha, signal), staleTime: Infinity });
+  const signature = useQuery({
+    queryKey: ["commitSignature", repo.path, c.sha],
+    queryFn: ({ signal }) => api.commitSignature(repo.path, c.sha, signal),
+    staleTime: 60_000, retry: false,
+  });
+  const code = signature.data ?? "";
+  const signatureLabel = ({
+    G: "Verified signature", B: "Bad signature", U: "Valid signature, unknown trust",
+    X: "Expired signature", Y: "Signature key expired", R: "Signature key revoked",
+    E: "Signature could not be checked",
+  } as Record<string, string>)[code];
   const counts = useMemo(() => {
     const f = files.data ?? [];
     return { m: f.filter((x) => x.status === "M" || x.status === "R").length, a: f.filter((x) => x.status === "A").length, d: f.filter((x) => x.status === "D").length };
@@ -621,7 +650,9 @@ function CommitDetails({ repo, tabId, commit: c }: { repo: RepoView; tabId: stri
       </PanelHeader>
       <div className="px-3 pt-3 pb-2 shrink-0 select-text">
         <div className="text-[15px] text-white font-semibold leading-snug break-words">{c.summary}</div>
+        {signatureLabel && <span className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[11.5px] bg-white/8 ${code === "G" ? "text-good" : "text-warn"}`}>{signatureLabel}</span>}
         {c.body && <div className="text-[13px] text-white/75 mt-2 whitespace-pre-wrap break-words max-h-[120px] overflow-auto">{c.body}</div>}
+        {!!repo.remotes.length && <CommitChecks key={c.sha} path={repo.path} sha={c.sha} />}
       </div>
       <div className="flex items-center gap-2 px-3 py-2 border-y border-white/5 shrink-0">
         <Avatar name={c.author} email={c.email} size={28} />

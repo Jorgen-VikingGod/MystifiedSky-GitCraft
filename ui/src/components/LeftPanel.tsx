@@ -25,6 +25,7 @@ import {
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { GitRef, RepoView } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useText } from "@/lib/locale";
 import { act, confirmThen, openRepoPath, setHiddenMany, toggleHidden } from "@/lib/repo";
 import type { MenuEntry } from "./ui/menu";
 import { openWebLink } from "@/lib/weblinks";
@@ -57,6 +58,7 @@ type SectionKey = "lfs" | "gitflow" | "local" | "remote" | "worktrees" | "stashe
 
 /** Left panel: branches, remotes, worktrees, stashes, tags and the service sections. */
 export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undefined; tabId: string; onSelectSha: (sha: string) => void }) {
+  const t = useText();
   const settings = useStore(useShallow((st) => ({ hidden: st.settings.hidden, solo: st.settings.solo, leftView: st.settings.leftView, showAgentsView: st.settings.showAgentsView })));
   const setUi = useStore((st) => st.setUi);
   const s = { settings, setUi };
@@ -68,7 +70,11 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
 
   const locals = useMemo(() => (repo?.refs ?? []).filter((r) => r.kind === "Local" && match(r.name)), [repo, f]);
   const remotes = useMemo(() => (repo?.refs ?? []).filter((r) => r.kind === "Remote" && match(r.name)), [repo, f]);
-  const tags = useMemo(() => (repo?.refs ?? []).filter((r) => r.kind === "Tag" && match(r.name)), [repo, f]);
+  const tags = useMemo(() => {
+    const byVersion = new Intl.Collator(undefined, { numeric: true });
+    return (repo?.refs ?? []).filter(ref => ref.kind === "Tag" && match(ref.name))
+      .sort((a, b) => byVersion.compare(b.name, a.name));
+  }, [repo, f]);
   const stashes = (repo?.stashes ?? []).filter((x) => match(x.message));
   const worktrees = (repo?.worktrees ?? []).filter((w) => match(w.path) || match(w.branch));
   const hiddenList = (repo && s.settings.hidden[repo.path]) || [];
@@ -266,7 +272,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
         ) : (
           <>
             <Section title="PULL REQUESTS" icon={<GitPullRequest size={14} />} count={0} open={false} onToggle={() => toggle("prs")} />
-            <Section title="ISSUES" icon={<CircleDot size={14} />} open={false} onToggle={() => toggle("issues")} />
+            <Section title={t("ISSUES")} icon={<CircleDot size={14} />} open={false} onToggle={() => toggle("issues")} />
           </>
         )}
         <Section
@@ -596,17 +602,19 @@ function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; o
         <CtxMenu
           key={l.id}
           items={[
-            { label: `Unlock ${l.path}`, onSelect: () => act(repo.path, { type: "lfsUnlock", path: l.path, force: false }) },
-            { label: "Force unlock", danger: true, onSelect: () => act(repo.path, { type: "lfsUnlock", path: l.path, force: true }) },
+            ...(l.ours ? [{ label: `Unlock ${l.path}`, onSelect: () => act(repo.path, { type: "lfsUnlock", path: l.path, force: false }) }] : [
+              { label: "Force unlock", danger: true, onSelect: () => confirmThen("Force unlock this file?", "Remove the Git LFS lock on " + l.path + "?", "Force Unlock", () => act(repo.path, { type: "lfsUnlock", path: l.path, force: true })) },
+            ]),
           ]}
         >
           <Row indent={1} title={`Locked by ${l.owner}`}>
             <Lock size={12} className="text-warn" />
             <span className="truncate">{l.path}</span>
-            <span className="text-[11px] text-fg3">{l.owner}</span>
+            <span className="text-[11px] text-fg3">{l.ours ? "You" : l.owner || "Another user"}</span>
           </Row>
         </CtxMenu>
       ))}
+      {locks.isError && <Note>Could not verify Git LFS locks. <button className="text-link" onClick={() => locks.refetch()}>Retry</button></Note>}
       {lfs.patterns.length === 0 && <Note>No patterns tracked yet. Right-click a file to track its type with LFS.</Note>}
     </Section>
   );
@@ -614,11 +622,13 @@ function LfsSection({ repo, open, onToggle }: { repo: RepoView; open: boolean; o
 
 /** PULL REQUESTS and ISSUES from GitHub / GitLab for this repository's remote. */
 function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoView; tabId: string; prsOpen: boolean; issuesOpen: boolean; toggle: (k: SectionKey) => void }) {
+  const t = useText();
   const s = useStore(useShallow((st) => ({ setDialog: st.setDialog, setUi: st.setUi })));
   const remote = useQuery({ queryKey: ["remote", repo.path, repo.remotes.join()], queryFn: ({ signal }) => hosting.remote(repo.path, signal), staleTime: Infinity });
   const on = !!remote.data;
-  const prs = useInfiniteQuery({ queryKey: ["prsPages", repo.path, remote.data?.web], initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => hosting.prsPage(repo.path, pageParam, signal), getNextPageParam: (page) => page.cursor ?? undefined,
+  const [pullFilter, setPullFilter] = useState<import("@/lib/hosting").PullFilter>("open");
+  const prs = useInfiniteQuery({ queryKey: ["prsPages", repo.path, remote.data?.web, pullFilter], initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => hosting.prsPage(repo.path, pageParam, signal, pullFilter), getNextPageParam: (page) => page.cursor ?? undefined,
     enabled: on && prsOpen, staleTime: 60_000 });
   const pullRequests = useMemo(() => [...new Map((prs.data?.pages.flatMap((page) => page.items) ?? []).map((pr) => [pr.number, pr])).values()], [prs.data]);
   const tracker = useStore((st) => st.settings.repoPrefs[repo.path]?.tracker);
@@ -626,10 +636,10 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
     queryFn: ({ pageParam, signal }) => hosting.issuesPage(repo.path, pageParam, signal), getNextPageParam: (page) => page.cursor ?? undefined,
     enabled: on && issuesOpen, staleTime: 60_000 });
   const issueRows = useMemo(() => [...new Map((issues.data?.pages.flatMap((page) => page.items) ?? []).map((issue) => [issueIdentity(issue), issue])).values()], [issues.data]);
-  const service = remote.data?.provider === "gitlab" ? "GitLab" : "GitHub";
+  const service = ({ github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket", azure: "Azure DevOps", gitea: remote.data?.service === "codeberg" ? "Codeberg" : remote.data?.service === "forgejo" ? "Forgejo" : "Gitea" })[remote.data?.provider ?? "github"];
   const note = (q: { isLoading: boolean; isError: boolean; error: unknown }) =>
     !on ? (
-      <Note>This repository's remote isn't on GitHub or GitLab.</Note>
+      <Note>This repository's remote is outside the configured hosting services.</Note>
     ) : q.isLoading ? (
       <Note>Loading…</Note>
     ) : q.isError ? (
@@ -643,7 +653,7 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
   return (
     <>
       <Section
-        title={remote.data?.provider === "gitlab" ? "MERGE REQUESTS" : "PULL REQUESTS"}
+        title={t(remote.data?.provider === "gitlab" ? "MERGE REQUESTS" : "PULL REQUESTS")}
         icon={<GitPullRequest size={14} />}
         count={pullRequests.length ?? 0}
         open={prsOpen}
@@ -654,6 +664,14 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
           ) : undefined
         }
       >
+        {on && <select aria-label={t("Filter pull requests")} className="mx-3 my-1 max-w-[calc(100%-1.5rem)] bg-field rounded px-1.5 py-1 text-[12px] text-fg"
+          value={pullFilter} onChange={event => setPullFilter(event.target.value as typeof pullFilter)}>
+          <option value="open">Open</option>
+          <option value="closed">{t("Closed")}</option>
+          <option value="merged">{t("Merged")}</option>
+          <option value="mine">{t("Created by me")}</option>
+          <option value="reviewRequested">{t("Review requested")}</option>
+        </select>}
         {note(prs)}
         {pullRequests.map((p) => (
           <CtxMenu
@@ -672,9 +690,9 @@ function HostedLists({ repo, tabId, prsOpen, issuesOpen, toggle }: { repo: RepoV
         ))}
         {prs.hasNextPage && <button className="pl-[30px] py-1 text-link text-[12px]" disabled={prs.isFetchingNextPage} onClick={() => prs.fetchNextPage()}>{prs.isFetchingNextPage ? "Loading more…" : "Load more pull requests"}</button>}
         {prs.isFetchNextPageError && <Note>Could not load the next page. <button className="text-link" onClick={() => prs.fetchNextPage()}>Retry</button></Note>}
-        {on && !prs.isError && !prs.isLoading && pullRequests.length === 0 && <Note>No open pull requests.</Note>}
+        {on && !prs.isError && !prs.isLoading && pullRequests.length === 0 && <Note>{prs.hasNextPage ? "No matching pull requests on the loaded pages." : "No matching pull requests."}</Note>}
       </Section>
-      <Section title="ISSUES" icon={<CircleDot size={14} />} count={issueRows.length} open={issuesOpen} onToggle={() => toggle("issues")}>
+      <Section title={t("ISSUES")} icon={<CircleDot size={14} />} count={issueRows.length} open={issuesOpen} onToggle={() => toggle("issues")}>
         {note(issues)}
         {issueRows.map((i) => (
           <CtxMenu

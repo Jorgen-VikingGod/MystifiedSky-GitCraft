@@ -1,3 +1,5 @@
+import { isMac } from "@/lib/utils";
+import { protectEditorDrafts } from "@/lib/editor-drafts";
 import { WatchManager } from "@/lib/watch-manager";
 import { startPersistence, preferenceCloseGuard } from "@/lib/persistence";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -48,6 +50,8 @@ export default function App() {
   useUpdateChecks(settingsLoaded);
   const theme = useStore((x) => x.settings.theme);
   useEffect(() => applyTheme(theme), [theme]);
+  const language = useStore(state => state.settings.language);
+  useEffect(() => { document.documentElement.lang = language === "es" ? "es" : "en"; }, [language]);
 
   return (
     <div className="h-full flex flex-col">
@@ -80,11 +84,11 @@ function LazyRepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
 export function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
   const s = useStore(useShallow((s) => ({ showTerminal: s.settings.showTerminal, showLeft: s.settings.showLeft, leftWidth: s.settings.leftWidth, showRight: s.settings.showRight, rightWidth: s.settings.rightWidth, setUi: s.setUi, setSettings: s.setSettings, closeTab: s.closeTab })));
   const ui = useTabUi(tab.id);
-  const q = useRepo(tab.path, active);
+  const q = useRepo(tab.path, active, tab.id);
   const viewing = !!(ui?.diff || ui?.history || ui?.conflict || ui?.rebase);
   const [peek, setPeek] = useState(false);
   useEffect(() => setPeek(false), [viewing]);
-  const repo = q.isError ? undefined : q.data;
+  const repo = q.isError && !ui?.diff && !ui?.conflict ? undefined : q.data;
   const set = s;
   const leftPanelRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
@@ -113,9 +117,10 @@ export function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
         {/* Reserve readable graph space; side panels yield on smaller windows. */}
         <div style={{ minWidth: "min(440px, calc(100% - 504px))" }} className="flex-1 min-w-[160px] flex flex-col min-h-0">
           <div className="flex-1 min-h-0">
-          {q.isError && (
+          {q.isError && !repo && (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-fg2 px-6 text-center">
-              <div className="text-white text-[15px]">This repository could not be opened</div>
+              <div className="text-white text-[15px]">{ui.historyFilter ? "History filters could not be applied" : "This repository could not be opened"}</div>
+              {ui.historyFilter && <button className="text-link hover:underline" onClick={() => s.setUi(tab.id, { historyFilter: undefined })}>Clear history filters</button>}
               <div className="text-[12.5px] max-w-[460px] break-words">{String(q.error)}</div>
               <div className="text-[12px] text-fg3 max-w-[460px] break-all">{tab.path}</div>
               <div className="flex items-center gap-4">
@@ -149,9 +154,9 @@ export function RepoScreen({ tab, active }: { tab: Tab; active: boolean }) {
             ) : ui?.rebase ? (
               <RebaseView tabId={tab.id} path={repo.path} plan={ui.rebase} />
             ) : ui?.conflict ? (
-              <ConflictView repo={repo} tabId={tab.id} file={ui.conflict} />
+              <ConflictView key={ui.conflict} repo={repo} tabId={tab.id} file={ui.conflict} />
             ) : ui?.diff ? (
-              <DiffView repo={repo} tabId={tab.id} target={ui.diff} />
+              <DiffView key={JSON.stringify(ui.diff)} repo={repo} tabId={tab.id} target={ui.diff} />
             ) : ui?.history ? (
               <HistoryView repo={repo} tabId={tab.id} file={ui.history.file} mode={ui.history.mode} sha={ui.history.sha} />
             ) : (
@@ -276,14 +281,29 @@ function useStartup() {
         await api.screenshotReady();
         return;
       }
-      const saved = (await api.loadSettings().catch(() => null)) as {
+      const saved = (await api.loadSettings().catch(error => { useStore.getState().toast(false, String(error)); return null; })) as {
+        recoveryWarning?: string;
         settings?: Partial<Settings>;
+        drafts?: Record<string, { summary: string; description: string }>;
         tabs?: string[];
         active?: number;
         profiles?: Profile[];
         activeProfile?: string;
       } | null;
-      if (saved?.settings) useStore.setState({ settings: { ...DEFAULT_SETTINGS, ...saved.settings } });
+      if (saved?.recoveryWarning) useStore.getState().toast(false, saved.recoveryWarning);
+      if (saved?.settings) {
+        const settings = { ...DEFAULT_SETTINGS, ...saved.settings };
+        if (isMac && !saved.settings.distinctShortcutModifiers) {
+          settings.keybindings = Object.fromEntries(Object.entries(settings.keybindings)
+            .map(([id, key]) => [id, key.replace(/^Ctrl(?=\+)/, "Meta")]));
+        }
+        useStore.setState({ settings });
+      }
+      if (saved?.drafts) {
+        useStore.setState({ drafts: Object.fromEntries(Object.entries(saved.drafts).filter(([, value]) =>
+          typeof value?.summary === "string" && typeof value.description === "string",
+        ).map(([path, draft]) => [path, { summary: draft.summary, description: draft.description, amend: false }])) });
+      }
       if (saved?.profiles?.length) useStore.setState({ profiles: saved.profiles, activeProfile: saved.activeProfile ?? saved.profiles[0].id });
       if (saved?.settings?.zoom && saved.settings.zoom !== 1) setZoom(saved.settings.zoom);
       // General > Remember tabs. Every saved tab comes back at once, in its order, with the last
@@ -291,12 +311,37 @@ function useStartup() {
       // doesn't open each repository in turn and flash through them.
       const savedPaths = useStore.getState().settings.rememberTabs ? [...new Set(saved?.tabs ?? [])] : [];
       if (savedPaths.length) restoreTabs(savedPaths, saved?.active ?? 0);
-      startBackendSync();
+      void api.checkGitVersion(useStore.getState().settings.gitPath).catch(error => useStore.getState().toast(false, String(error)));
+      if (getCurrentWindow().label === "main") startBackendSync();
       startPersistence();
-      await getCurrentWindow().onCloseRequested(preferenceCloseGuard(
+      const pendingCloneUrls: string[] = [];
+      const showPendingClone = () => {
+        const state = useStore.getState();
+        if (state.dialog || pendingCloneUrls.length === 0) return;
+        state.setDialog({ kind: "clone", url: pendingCloneUrls.shift() });
+      };
+      useStore.subscribe((current, previous) => {
+        if (current.dialog === null && previous.dialog !== null) queueMicrotask(showPendingClone);
+      });
+      const openLaunchPaths = async () => {
+        for (const launch of await api.takeLaunchPaths()) {
+          if (launch.kind === "repository") await openRepoPath(launch.path);
+          else pendingCloneUrls.push(launch.url);
+        }
+        showPendingClone();
+      };
+      await listen("open-launch-paths", () => { void openLaunchPaths().catch(error => useStore.getState().toast(false, String(error))); });
+      await openLaunchPaths().catch(error => useStore.getState().toast(false, String(error)));
+      const closeWithPreferences = preferenceCloseGuard(
         () => getCurrentWindow().close(),
         error => useStore.getState().toast(false, "Could not save preferences before closing: " + String(error)),
-      ));
+      );
+      await getCurrentWindow().onCloseRequested(event => {
+        const state = useStore.getState();
+        const guarded = protectEditorDrafts(state.setDialog, () => closeWithPreferences({ preventDefault() {} }));
+        if (guarded) event.preventDefault();
+        else closeWithPreferences(event);
+      });
       setSettingsLoaded(true);
       await syncGitCredentials();
     })().catch((error) => useStore.getState().toast(false, "GitCraft could not finish starting: " + String(error)));
@@ -308,7 +353,7 @@ function useStartup() {
 function useUpdateChecks(settingsLoaded: boolean) {
   const screenshot = useStore((s) => s.screenshot);
   const auto = useStore((s) => s.settings.autoUpdate);
-  useEffect(() => (settingsLoaded && !screenshot && auto ? startUpdateChecks() : undefined), [settingsLoaded, screenshot, auto]);
+  useEffect(() => (settingsLoaded && !screenshot && auto && getCurrentWindow().label === "main" ? startUpdateChecks() : undefined), [settingsLoaded, screenshot, auto]);
 }
 
 /** Auto-fetch every open repository every N minutes (0 = off), pruning if enabled. A failure is
@@ -333,7 +378,7 @@ function useAutoFetch() {
         const r = await api.run(p, { type: "autoFetch", prune }).catch(() => ({ ok: false, message: "Autofetch failed" }));
         if (r.ok) {
           warned.current.delete(p);
-          await refresh(p);
+          if (r.message) await refresh(p);
         } else if (!warned.current.has(p)) {
           warned.current.add(p);
           useStore.getState().toast(false, r.message);

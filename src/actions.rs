@@ -49,6 +49,21 @@ pub fn push_review(dir: &Path) -> Result<PushReview, String> {
     Ok(PushReview {branch,head,remote,remote_ref,url,remote_oid,tracking_oid,config})
 }
 
+pub fn validate_ref_name(dir: &Path, kind: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() { return Err(format!("Enter a {kind} name.")); }
+    let valid = !name.starts_with('-') && match kind {
+        "branch" => {
+            let normalized = name.replace(' ', "-");
+            let result = git::run(dir, &["check-ref-format", "--branch", &normalized]);
+            result.ok && result.stdout.trim() == normalized
+        }
+        "tag" => git::run(dir, &["check-ref-format", &format!("refs/tags/{name}")]).ok,
+        _ => return Err("Unknown Git reference type.".into()),
+    };
+    if valid { Ok(()) } else { Err(format!("Enter a valid {kind} name. Git reserves leading dashes and some characters.")) }
+}
+
 fn branch_config(dir: &Path, name: &str) -> Result<Vec<(String,String)>, git::GitOut> {
     let out=git::run(dir,&["config","--local","--null","--list"]);if !out.ok {return Err(out);}
     let mut config:Vec<_>=out.stdout.split('\0').filter_map(|record| {
@@ -83,6 +98,7 @@ pub enum Action {
     UnstageAll,
     Discard { paths: Vec<String> },
     DiscardAll,
+    RestoreDiscard { reference: String },
     Commit {
         summary: String,
         description: String,
@@ -93,12 +109,15 @@ pub enum Action {
         /// Commit > Remove comments from commit messages (git commit --cleanup=strip).
         #[serde(default)]
         strip_comments: bool,
+        #[serde(default)]
+        sign_off: bool,
     },
     Checkout { target: String },
     CheckoutRemote { remote_branch: String },
     CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
     DeleteBranch { name: String },
+    DeleteMergedLocal { name: String, expected: String },
     DeleteRemoteBranch { remote_branch: String },
     RenameBranch { old: String, new: String },
     CreateTag { name: String, at: Option<String>, message: Option<String> },
@@ -106,15 +125,18 @@ pub enum Action {
     PushTag { name: String, remote: String },
     DeleteRemoteTag { name: String, remote: String },
     Fetch,
-    Pull { mode: String },
+    Pull { mode: String, autostash: Option<bool> },
     /// force: push even though the remote has other commits. lease (default true) keeps the
     /// safety check that the remote branch is still where we last saw it.
     Push { force: bool, #[serde(default)] lease: Option<bool>, #[serde(default)] review: Option<PushReview> },
     /// Push the selected local branch without changing the checked-out branch.
     PushBranch { branch: String },
     Stash { message: String },
-    StashPop { index: usize, expected: Option<String> },
-    StashApply { index: usize, expected: Option<String> },
+    StashKeepIndex { message: String },
+    StashUntracked { message: String },
+    StashHunk { file: String, hunk: usize, lines: Option<Vec<usize>>, expected: Vec<git::DiffLine> },
+    StashPop { index: usize, expected: Option<String>, #[serde(default)] without_index: bool },
+    StashApply { index: usize, expected: Option<String>, #[serde(default)] without_index: bool },
     StashDrop { index: usize, expected: Option<String> },
     CherryPick { sha: String, #[serde(default)] mainline: Option<usize> },
     Revert { sha: String, #[serde(default)] mainline: Option<usize> },
@@ -127,9 +149,10 @@ pub enum Action {
     ContinueRebase,
     SkipRebase,
     /// Interactive rebase onto `base` ("--root" for the whole history) with our own todo list.
-    InteractiveRebase { base: String, items: Vec<crate::rewrite::TodoItem>, expected: crate::rewrite::PlanState },
+    CreateFixup { target: String },
+    InteractiveRebase { base: String, items: Vec<crate::rewrite::TodoItem>, expected: crate::rewrite::PlanState, #[serde(default)] skip_hooks: bool },
     /// Interactive cherry pick of the listed commits onto HEAD.
-    InteractiveCherryPick { items: Vec<crate::rewrite::TodoItem> },
+    InteractiveCherryPick { items: Vec<crate::rewrite::TodoItem>, #[serde(default)] skip_hooks: bool },
     /// Conflicts: take "ours" (current) or "theirs" (incoming) for whole files.
     TakeSide { paths: Vec<String>, side: String },
     MarkResolved { paths: Vec<String> },
@@ -142,6 +165,9 @@ pub enum Action {
     /// Background fetch of every remote (auto-fetch), optionally pruning.
     AutoFetch { prune: bool },
     FetchRemote { remote: String },
+    FetchHistory { remote: String, mode: String },
+    Bisect { mode: String, commit: Option<String>, good: Option<String> },
+    MaintainRepository { task: String },
     RemoteEdit { name: String, new_name: String, url: String, push_url: String },
     RemoteRemove { name: String },
     WorktreeAdd { path: String, branch: String, new_branch: bool, start: Option<String> },
@@ -170,7 +196,7 @@ pub enum Action {
     /// Open a file in the external diff tool (git difftool), or a conflict in the merge tool.
     ExternalDiff { file: String, staged: bool, tool: String },
     ExternalMerge { file: String, tool: String },
-    LfsTrack { pattern: String },
+    LfsTrack { pattern: String, #[serde(default)] lockable: bool },
     LfsUntrack { pattern: String },
     LfsPull,
     LfsLock { path: String },
@@ -202,12 +228,13 @@ pub struct ActionResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 enum UndoRec {
     Commit { before: String, after: String, label: String, branch: String },
     InitialCommit { after: String, branch: String, label: String },
     Checkout { from: String, to: String },
     CreateBranch { name: String, sha: String },
+    RenameBranch { from: String, to: String, sha: String },
     DeleteBranch { name: String, sha: String, config: Vec<(String,String)> },
     Reset { before: String, after: String, mode: String, branch: String },
     CreateTag { name: String, sha: String },
@@ -224,6 +251,7 @@ impl UndoRec {
             UndoRec::Commit { label, .. } | UndoRec::InitialCommit { label, .. } => label.clone(),
             UndoRec::Checkout { to, .. } => format!("checkout {to}"),
             UndoRec::CreateBranch { name, .. } => format!("create branch {name}"),
+            UndoRec::RenameBranch { from, to, .. } => format!("rename {from} to {to}"),
             UndoRec::DeleteBranch { name, .. } => format!("delete branch {name}"),
             UndoRec::Reset { .. } => "reset".into(),
             UndoRec::CreateTag { name, .. } => format!("create tag {name}"),
@@ -235,10 +263,94 @@ impl UndoRec {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct Stacks {
     undo: Vec<UndoRec>,
     redo: Vec<UndoRec>,
+    #[serde(skip)]
+    store: Option<UndoStore>,
+}
+
+const UNDO_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone)]
+struct UndoStore { file: std::path::PathBuf, refs: String }
+
+impl UndoStore {
+    fn locate(repo: &str) -> Option<Self> {
+        let dir = git::run(Path::new(repo), &["rev-parse", "--absolute-git-dir"]);
+        if !dir.ok { return None; }
+        let path = Path::new(dir.stdout.trim()).canonicalize().ok()?;
+        let key = crate::files::content_token(Some(path.to_string_lossy().as_bytes()));
+        let local = if cfg!(test) { path } else { crate::sample::data_dir().join("undo") };
+        Some(Self { file: local.join(format!("gitcraft-undo-{key}.json")), refs: format!("refs/gitcraft/undo/{key}/") })
+    }
+
+    fn read(&self) -> Option<Stacks> {
+        let metadata = self.file.symlink_metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > UNDO_BYTES as u64 { return None; }
+        serde_json::from_slice(&std::fs::read(&self.file).ok()?).ok()
+    }
+
+    fn save(&self, repo: &Path, snapshot: &Stacks) -> Result<(), String> {
+        use std::io::Write;
+        let mut state = snapshot.clone();
+        let bytes = loop {
+            let data = serde_json::to_vec(&state).map_err(|error| error.to_string())?;
+            if data.len() <= UNDO_BYTES { break data; }
+            if !state.undo.is_empty() { state.undo.remove(0); }
+            else if !state.redo.is_empty() { state.redo.remove(0); }
+            else { return Err("Undo history exceeds the storage limit.".into()); }
+        };
+        let mut oids = std::collections::BTreeSet::new();
+        for record in state.undo.iter().chain(&state.redo) {
+            for oid in record.objects().into_iter().flatten().filter(|oid| valid_undo_oid(oid)) {
+                oids.insert(oid);
+            }
+        }
+        let input: String = oids.iter().map(|oid| format!("update {}{oid} {oid}\n", self.refs)).collect();
+        if !input.is_empty() {
+            let result = crate::read_jobs::run_mutation(git::git_command(repo, &["update-ref", "--stdin"]), Some(input.into_bytes()));
+            if !result.ok { return Err(result.message()); }
+        }
+
+        let parent = self.file.parent().ok_or("Invalid undo storage path.")?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+        file.write_all(&bytes).and_then(|_| file.as_file().sync_all()).map_err(|error| error.to_string())?;
+        file.persist(&self.file).map_err(|error| error.to_string())?;
+
+        // Pin new targets before saving. Release obsolete pins only after the snapshot is durable.
+        let refs = git::run(repo, &["for-each-ref", "--format=%(refname)", &self.refs]);
+        if refs.ok {
+            let removals: String = refs.stdout.lines().filter_map(|reference| {
+                let oid = reference.strip_prefix(&self.refs)?;
+                (valid_undo_oid(oid) && !oids.contains(oid)).then(|| format!("delete {reference}\n"))
+            }).collect();
+            if !removals.is_empty() {
+                let _ = crate::read_jobs::run_mutation(git::git_command(repo, &["update-ref", "--stdin"]), Some(removals.into_bytes()));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_undo_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+impl UndoRec {
+    fn objects(&self) -> [Option<&str>; 2] {
+        match self {
+            Self::Commit { before, after, .. } | Self::Reset { before, after, .. } | Self::Rewrite { before, after, .. } => [Some(before), Some(after)],
+            Self::Checkout { from, to } => [Some(from), Some(to)],
+            Self::InitialCommit { after, .. } => [Some(after), None],
+            Self::CreateBranch { sha, .. } | Self::RenameBranch { sha, .. } | Self::DeleteBranch { sha, .. }
+                | Self::CreateTag { sha, .. } | Self::DeleteTag { sha, .. } => [Some(sha), None],
+            Self::Discard { stash, .. } => [Some(stash), None],
+            Self::Patch { .. } => [None, None],
+        }
+    }
 }
 
 #[derive(Default)]
@@ -286,8 +398,19 @@ impl Engine {
         if version == Some(current) { None } else { Some((current, log.clone())) }
     }
 
+    fn load_undo(&self, repo: &str) {
+        if self.stacks.lock().unwrap_or_else(|error| error.into_inner()).contains_key(repo) { return; }
+        let store = UndoStore::locate(repo);
+        // Metadata reads can be cancelled. Let a later read retry an unresolved directory.
+        if store.is_none() { return; }
+        let mut state = store.as_ref().and_then(UndoStore::read).unwrap_or_default();
+        state.store = store;
+        self.stacks.lock().unwrap_or_else(|error| error.into_inner()).entry(repo.to_owned()).or_insert(state);
+    }
+
     pub fn undo_info(&self, repo: &str) -> UndoInfo {
-        let s = self.stacks.lock().unwrap();
+        self.load_undo(repo);
+        let s = self.stacks.lock().unwrap_or_else(|error| error.into_inner());
         match s.get(repo) {
             Some(st) => UndoInfo {
                 undo: st.undo.last().map(|r| r.label()),
@@ -297,14 +420,25 @@ impl Engine {
         }
     }
 
-    fn push_undo(&self, repo: &str, rec: UndoRec) {
-        let mut s = self.stacks.lock().unwrap();
-        let st = s.entry(repo.to_string()).or_default();
-        st.undo.push(rec);
-        st.redo.clear();
-        if st.undo.len() > 50 {
-            st.undo.remove(0);
+    fn save_undo(&self, repo: &str, snapshot: Stacks) {
+        if let Some(store) = &snapshot.store {
+            if let Err(error) = store.save(Path::new(repo), &snapshot) {
+                self.record("Save undo history", &git::GitOut::failed(&error));
+            }
         }
+    }
+
+    fn push_undo(&self, repo: &str, rec: UndoRec) {
+        self.load_undo(repo);
+        let snapshot = {
+            let mut s = self.stacks.lock().unwrap_or_else(|error| error.into_inner());
+            let st = s.entry(repo.to_string()).or_default();
+            st.undo.push(rec);
+            st.redo.clear();
+            if st.undo.len() > 50 { st.undo.remove(0); }
+            st.clone()
+        };
+        self.save_undo(repo, snapshot);
     }
 
     /// Runs git and records it in the activity log.
@@ -335,6 +469,7 @@ impl Engine {
     }
 
     fn append_log(&self, mut entry: LogEntry) {
+        if !entry.ok { crate::diagnostics::record_failure(&entry.command, &entry.output); }
         entry.command=git::redact_diagnostic(&entry.command);entry.output=git::redact_diagnostic(&entry.output);
         for (text, limit) in [(&mut entry.command,8192),(&mut entry.output,65536)] {
             if text.len()>limit {
@@ -412,7 +547,7 @@ impl Engine {
             }
         };
         match &mut action {
-            Action::StashPop { index, expected } | Action::StashApply { index, expected } | Action::StashDrop { index, expected }
+            Action::StashPop { index, expected, .. } | Action::StashApply { index, expected, .. } | Action::StashDrop { index, expected }
                 | Action::StashRename { index, expected, .. } | Action::StashTakeFile { index, expected, .. } => {
                 if let Some(expected) = expected {
                     let list = self.git(dir, &["stash", "list", "--format=%H"]);
@@ -449,7 +584,8 @@ impl Engine {
             }
             Action::Discard { paths } => self.discard(repo, dir, Some(paths)),
             Action::DiscardAll => self.discard(repo, dir, None),
-            Action::Commit { summary, description, amend, stage_all, skip_hooks, strip_comments } => {
+            Action::RestoreDiscard { reference } => done(crate::discard_backups::restore(dir, &reference), "Restored discarded changes"),
+            Action::Commit { summary, description, amend, stage_all, skip_hooks, strip_comments, sign_off } => {
                 let unmerged=self.git(dir, &["ls-files", "--unmerged", "-z"]);
                 if !unmerged.ok { return done(unmerged, ""); }
                 if !unmerged.stdout.is_empty() { return done(git::GitOut::failed("Resolve and stage every conflicted file before committing. Commit All cannot resolve conflicts automatically."), ""); }
@@ -475,6 +611,7 @@ impl Engine {
                 if skip_hooks {
                     a.push("--no-verify"); // "Skip git hooks"
                 }
+                if sign_off { a.push("--signoff"); }
                 if strip_comments {
                     a.push("--cleanup=strip"); // "Remove comments from commit messages"
                 }
@@ -489,6 +626,9 @@ impl Engine {
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
             Action::Checkout { target } => {
+                if let Err(error) = crate::manage::require_lfs_for_checkout(dir, &target) {
+                    return done(git::GitOut::failed(&error), "");
+                }
                 let from = self.head_name(dir);
                 let o = self.git(dir, &["checkout", "-q", &target]);
                 if o.ok {
@@ -506,12 +646,15 @@ impl Engine {
                 if self.rev(dir, "FETCH_HEAD^{commit}") != expected {
                     return done(git::GitOut::failed("The pull request changed during checkout. Refresh it and try again."), "");
                 }
+                if let Err(error) = crate::manage::require_lfs_for_checkout(dir, &expected) {
+                    return done(git::GitOut::failed(&error), "");
+                }
                 let result = self.git(dir, &["checkout", "--detach", "-q", &expected]);
                 if result.ok { self.push_undo(repo, UndoRec::Checkout { from, to: expected }); }
                 done(result, "Checked out the pull request's source commit")
             }
             Action::CheckoutRemote { remote_branch } => {
-                let local = remote_branch.splitn(2, '/').nth(1).unwrap_or(&remote_branch).to_string();
+                let local = remote_branch.split_once('/').map(|x| x.1).unwrap_or(&remote_branch).to_string();
                 let selected = format!("refs/remotes/{remote_branch}");
                 if !self.git(dir, &["check-ref-format", "--branch", &local]).ok || self.rev(dir, &selected).is_empty() {
                     return done(git::GitOut::failed("That remote branch is no longer available. Refresh the repository and try again."), "");
@@ -522,6 +665,9 @@ impl Engine {
                     if !upstream.ok || upstream.stdout.trim() != selected {
                         return done(git::GitOut::failed(&format!("Local branch '{local}' does not track '{remote_branch}'. Create a differently named local branch from the selected remote commit, or explicitly change its upstream before checking it out.")), "");
                     }
+                }
+                if let Err(error) = crate::manage::require_lfs_for_checkout(dir, if exists { &local } else { &selected }) {
+                    return done(git::GitOut::failed(&error), "");
                 }
                 let from = self.head_name(dir);
                 let o = if exists {
@@ -536,11 +682,14 @@ impl Engine {
             }
             Action::CreateBranch { name, at, checkout } => {
                 let name = name.trim().replace(' ', "-");
-                if name.is_empty() {
-                    return ActionResult { ok: false, message: "Branch name is empty".into() };
-                }
+                if let Err(error) = validate_ref_name(dir, "branch", &name) { return done(git::GitOut::failed(&error), ""); }
                 let at = at.unwrap_or_else(|| "HEAD".into());
-                let o = self.git(dir, &["branch", &name, &at]);
+                if checkout {
+                    if let Err(error) = crate::manage::require_lfs_for_checkout(dir, &at) {
+                        return done(git::GitOut::failed(&error), "");
+                    }
+                }
+                let o = self.git(dir, &["branch", "--", &name, &at]);
                 if !o.ok {
                     return done(o, "");
                 }
@@ -552,28 +701,44 @@ impl Engine {
                 }
                 ActionResult { ok: true, message: format!("Created branch {name}") }
             }
-            Action::DeleteBranch { name } => {
+            Action::DeleteBranch { ref name } | Action::DeleteMergedLocal { ref name, .. } => {
                 let sha = self.rev(dir, &format!("refs/heads/{name}"));
-                let config=match branch_config(dir,&name) {Ok(config)=>config,Err(out)=>return done(out, "")};
-                let o = self.git(dir, &["branch", "-D", "--", &name]);
+                if let Action::DeleteMergedLocal { expected, .. } = &action {
+                    if sha.is_empty() || sha != *expected || crate::manage::default_branch(dir).is_some_and(|(_, branch)| branch == *name) {
+                        return done(git::GitOut::failed("The local branch is protected or no longer matches the merged commit."), "");
+                    }
+                }
+                let config=match branch_config(dir,name) {Ok(config)=>config,Err(out)=>return done(out, "")};
+                let o = self.git(dir, &["branch", "-D", "--", name]);
                 if o.ok {
                     self.push_undo(repo, UndoRec::DeleteBranch { name: name.clone(), sha, config });
                 }
                 done(o, &format!("Deleted {name}"))
             }
             Action::DeleteRemoteBranch { remote_branch } => {
-                let (remote, b) = remote_branch.split_once('/').unwrap_or(("origin", &remote_branch));
-                done(self.git(dir, &["push", remote, "--delete", b]), &format!("Deleted {remote_branch}"))
+                let remotes = git::run(dir, &["remote"]);
+                let Some((remote, name)) = remotes.stdout.lines().filter_map(|remote| remote_branch.strip_prefix(&format!("{remote}/")).map(|name| (remote, name))).max_by_key(|(remote, _)| remote.len()) else {
+                    return done(git::GitOut::failed("The remote branch is no longer configured."), "");
+                };
+                let reference = format!("refs/heads/{name}");
+                if !git::run(dir, &["check-ref-format", &reference]).ok { return done(git::GitOut::failed("The remote branch name is invalid."), ""); }
+                done(self.job(repo, "push", dir, &["push", "--delete", "--", remote, &reference]), &format!("Deleted {remote_branch}"))
             }
             Action::RenameBranch { old, new } => {
                 let new = new.trim().replace(' ', "-");
-                done(self.git(dir, &["branch", "-m", &old, &new]), &format!("Renamed {old} to {new}"))
+                if let Err(error) = validate_ref_name(dir, "branch", &new) { return done(git::GitOut::failed(&error), ""); }
+                let sha = self.rev(dir, &format!("refs/heads/{old}"));
+                let renamed = self.git(dir, &["branch", "-m", "--", &old, &new]);
+                if renamed.ok && old != new { self.push_undo(repo, UndoRec::RenameBranch { from: old.clone(), to: new.clone(), sha }); }
+                done(renamed, &format!("Renamed {old} to {new}"))
             }
             Action::CreateTag { name, at, message } => {
+                let name = name.trim().to_owned();
+                if let Err(error) = validate_ref_name(dir, "tag", &name) { return done(git::GitOut::failed(&error), ""); }
                 let at = at.unwrap_or_else(|| "HEAD".into());
                 let o = match message.as_deref().filter(|m| !m.trim().is_empty()) {
-                    Some(m) => self.git(dir, &["tag", "-a", &name, &at, "-m", m]),
-                    None => self.git(dir, &["tag", &name, &at]),
+                    Some(m) => self.git(dir, &["tag", "-a", "-m", m, "--", &name, &at]),
+                    None => self.git(dir, &["tag", "--", &name, &at]),
                 };
                 if o.ok {
                     let sha = self.rev(dir, &format!("refs/tags/{name}"));
@@ -607,15 +772,37 @@ impl Engine {
                     &format!("{} tag {name} {} {remote}", if deleting { "Deleted" } else { "Pushed" }, if deleting { "from" } else { "to" }))
             }
             Action::Fetch => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
-            Action::Pull { mode } => match mode.as_str() {
-                "fetch" => done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"),
-                "ffonly" => done(self.job(repo, "pull", dir, &["pull", "--ff-only", "--progress"]), "Pulled (fast-forward only)"),
-                "rebase" => done(self.job(repo, "pull", dir, &["pull", "--rebase", "--progress"]), "Pulled (rebase)"),
-                _ => {
-                    let args = crate::extras::merge_args(dir, "pull", &["--no-rebase", "--progress"]);
-                    done(self.job(repo, "pull", dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), "Pulled")
+            Action::Pull { mode, autostash } => {
+                if mode == "fetch" { return done(self.job(repo, "fetch", dir, &["fetch", "--all", "--prune", "--progress"]), "Fetched all remotes"); }
+                let before = self.rev(dir, "HEAD");
+                let branch = self.branch_ref(dir);
+                if branch.is_empty() {
+                    return done(git::GitOut::failed("Check out a local branch before pulling."), "");
                 }
-            },
+                let upstream = git::run(dir, &["for-each-ref", "--format=%(upstream)", &branch]);
+                if upstream.ok && upstream.stdout.trim().is_empty() {
+                    return done(git::GitOut::failed("Set an upstream branch before pulling."), "");
+                }
+                let (out, message) = match mode.as_str() {
+                    "ffonly" => (self.job(repo, "pull", dir, &["pull", "--ff-only", "--progress"]), "Pulled (fast-forward only)"),
+                    "rebase" => {
+                        let mut args = vec!["pull", "--rebase", "--progress"];
+                        if let Some(enabled) = autostash {
+                            args.push(if enabled { "--autostash" } else { "--no-autostash" });
+                        }
+                        (self.job(repo, "pull", dir, &args), "Pulled (rebase)")
+                    }
+                    _ => {
+                        let args = crate::extras::merge_args(dir, "pull", &["--no-rebase", "--progress"]);
+                        (self.job(repo, "pull", dir, &args.iter().map(String::as_str).collect::<Vec<_>>()), "Pulled")
+                    }
+                };
+                if out.ok && !before.is_empty() && self.branch_ref(dir) == branch {
+                    let after = self.rev(dir, "HEAD");
+                    if after != before && !after.is_empty() { self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "pull (local branch)".into() }); }
+                }
+                done(out, message)
+            }
             Action::Push { force, lease, review } => {
                 if force {
                     let Some(review)=review else {return done(git::GitOut::failed("Review the branch and destination again before forcing a push."), "");};
@@ -676,28 +863,35 @@ impl Engine {
                 let refspec = format!("{source}:{destination}");
                 done(self.job(repo, "push", dir, &["push", "--set-upstream", "--progress", &remote, &refspec]), &format!("Pushed {branch}"))
             }
-            Action::Stash { message } => {
+            Action::Stash { ref message } | Action::StashKeepIndex { ref message } | Action::StashUntracked { ref message } => {
                 let unmerged=self.git(dir, &["ls-files", "--unmerged", "-z"]);
                 if !unmerged.ok { return done(unmerged, ""); }
                 if !unmerged.stdout.is_empty() || ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-merge","rebase-apply","sequencer"].iter().any(|state|self.in_progress(dir,state)) {
                     return done(git::GitOut::failed("Finish or abort the current merge, rebase or replay before stashing. Its conflict state was kept."), "");
                 }
-                // Stage everything (new files too), then `stash push` without --include-untracked, named by stash_message.
-                let add = self.git(dir, &["add", "-A"]);
-                if !add.ok {
-                    return done(add, "");
-                }
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
-                let msg = stash_message(&message, &branch);
-                let o = self.git(dir, &["stash", "push", "-m", &msg]);
+                let msg = stash_message(message, &branch);
+                let o = match action {
+                    Action::StashKeepIndex { .. } => self.git(dir, &["stash", "push", "--include-untracked", "--keep-index", "-m", &msg]),
+                    Action::StashUntracked { .. } => crate::files::stash_untracked(dir, &msg),
+                    _ => self.git(dir, &["stash", "push", "--include-untracked", "-m", &msg]),
+                };
                 // A stash with no local changes is reported as an error, not as success.
                 if o.ok && o.stdout.trim() == STASH_NOTHING {
                     return ActionResult { ok: false, message: STASH_NOTHING.into() };
                 }
                 done(o, "Stashed changes")
             }
-            Action::StashPop { index, .. } => done(self.git(dir, &["stash", "pop", "-q", &format!("stash@{{{index}}}")]), "Popped stash"),
-            Action::StashApply { index, .. } => done(self.git(dir, &["stash", "apply", "-q", &format!("stash@{{{index}}}")]), "Applied stash"),
+            Action::StashHunk { file, hunk, lines, expected } => {
+                if ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]
+                    .iter().any(|name| self.in_progress(dir, name)) {
+                    return done(git::GitOut::failed("Finish or abort the current Git operation before stashing a hunk."), "");
+                }
+                let result = crate::files::stash_hunk(dir, &file, hunk, lines.as_deref(), &expected);
+                done(result, "Stashed the selected changes")
+            }
+            Action::StashPop { index, without_index, .. } => done(self.restore_stash(dir, "pop", index, without_index), "Popped stash"),
+            Action::StashApply { index, without_index, .. } => done(self.restore_stash(dir, "apply", index, without_index), "Applied stash"),
             Action::StashDrop { index, .. } => done(self.git(dir, &["stash", "drop", "-q", &format!("stash@{{{index}}}")]), "Deleted stash"),
             Action::CherryPick { sha, mainline } => self.apply_commit(dir, &sha, mainline, false),
             Action::Revert { sha, mainline } => self.apply_commit(dir, &sha, mainline, true),
@@ -739,17 +933,125 @@ impl Engine {
                 let flag = format!("--{command}");
                 done(self.git(dir, &["-c", "core.editor=true", &operation, &flag]), "Git operation updated")
             },
-            Action::AbortRebase => done(self.git(dir, &["rebase", "--abort"]), "Rebase aborted"),
-            Action::ContinueRebase => done(self.git(dir, &["-c", "core.editor=true", "rebase", "--continue"]), "Rebase continued"),
-            Action::SkipRebase => done(self.git(dir, &["rebase", "--skip"]), "Skipped commit"),
-            Action::AutoFetch { prune } => {
-                let o = if prune { self.git(dir, &["fetch", "--all", "--prune", "--quiet"]) } else { self.git(dir, &["fetch", "--all", "--quiet"]) };
-                // A failed background fetch only asks to fetch by hand.
-                if o.ok {
-                    ActionResult { ok: true, message: String::new() }
-                } else {
-                    ActionResult { ok: false, message: "Autofetch failed. Fetch manually for more information.".into() }
+            Action::AbortRebase => {
+                let result = self.git(dir, &["rebase", "--abort"]);
+                crate::rewrite::cleanup_replay_files(dir);
+                done(result, "Rebase aborted")
+            },
+            Action::ContinueRebase | Action::SkipRebase => {
+                let original = crate::rewrite::replay_original(dir);
+                let skip = matches!(action, Action::SkipRebase);
+                let flag = if skip { "--skip" } else { "--continue" };
+                let result = self.git(dir, &["-c", "core.editor=true", "rebase", flag]);
+                crate::rewrite::cleanup_replay_files(dir);
+                if result.ok {
+                    if crate::rewrite::edit_stop(dir) {
+                        return done(result, "Rebase paused. Amend or split the commit, then choose Continue Rebase.");
+                    }
+                    if let Some((before, branch)) = original {
+                        let after = self.rev(dir, "HEAD");
+                        if before != after && !after.is_empty() && self.branch_ref(dir) == branch && crate::rewrite::replay_original(dir).is_none() {
+                            self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "rebase".into() });
+                        }
+                    }
                 }
+                done(result, if skip { "Skipped commit" } else { "Rebase continued" })
+            },
+            Action::AutoFetch { prune } => {
+                let read_refs = || git::run(dir, &["for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", "refs/remotes", "refs/tags"]);
+                let before = read_refs();
+                let mut args = vec!["fetch", "--all", "--quiet", "--no-write-fetch-head", "--no-auto-maintenance"];
+                if prune { args.push("--prune"); }
+                let mut command = git::git_command(dir, &args);
+                command.env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
+                let output = crate::read_jobs::run_bounded(command, None, std::time::Duration::from_secs(30),
+                    "Auto-fetch timed out. Fetch manually to retry.");
+                self.record(&format!("git {}", args.join(" ")), &output);
+                if !output.ok {
+                    let message = if output.stderr.starts_with("Auto-fetch timed out") { output.stderr }
+                        else { "Auto-fetch failed. Fetch manually for more information.".into() };
+                    return ActionResult { ok: false, message };
+                }
+                let after = read_refs();
+                let changed = !before.ok || !after.ok || before.stdout != after.stdout;
+                ActionResult { ok: true, message: if changed { "Remote refs changed".into() } else { String::new() } }
+            }
+            Action::Bisect { mode, commit, good } => {
+                let gitdir = git::run(dir, &["rev-parse", "--absolute-git-dir"]);
+                if !gitdir.ok { return done(gitdir, ""); }
+                let active = crate::git::bisect_progress(Path::new(gitdir.stdout.trim()));
+                if mode == "start" && active.is_some() {
+                    return done(git::GitOut::failed("Reset the current bisect before starting another."), "");
+                }
+                if mode != "start" && active.is_none() {
+                    return done(git::GitOut::failed("No bisect is in progress."), "");
+                }
+                let status = match git::try_status(dir) {
+                    Ok(status) => status,
+                    Err(error) => return done(git::GitOut::failed(&error), ""),
+                };
+                if !status.staged.is_empty() || status.unstaged.iter().any(|file| file.status != '?')
+                    || ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"]
+                        .iter().any(|marker| self.in_progress(dir, marker)) {
+                    return done(git::GitOut::failed("Finish the current Git operation and commit or stash tracked changes first."), "");
+                }
+                let resolve = |value: &str| -> Result<String, String> {
+                    if value.trim().is_empty() { return Err("Choose a commit for this bisect step.".into()); }
+                    let reference = format!("{}^{{commit}}", value.trim());
+                    let resolved = git::run(dir, &["rev-parse", "--verify", "-q", "--end-of-options", &reference]);
+                    if resolved.ok { Ok(resolved.stdout.trim().to_owned()) }
+                    else { Err("Git could not resolve the selected commit.".into()) }
+                };
+                let run = || -> Result<git::GitOut, String> {
+                    match mode.as_str() {
+                        "start" => {
+                            let bad = resolve(commit.as_deref().unwrap_or(""))?;
+                            let good = resolve(good.as_deref().unwrap_or(""))?;
+                            if bad == good || !git::run(dir, &["merge-base", "--is-ancestor", &good, &bad]).ok {
+                                return Err("Choose a known-good ancestor of the bad commit.".into());
+                            }
+                            Ok(self.git(dir, &["bisect", "start", &bad, &good]))
+                        }
+                        "good" | "bad" | "skip" => {
+                            if active.as_ref().is_some_and(|active| active.first_bad.is_some()) {
+                                return Err("The first bad commit is known. Reset this bisect to finish.".into());
+                            }
+                            let target = resolve(commit.as_deref().unwrap_or("HEAD"))?;
+                            Ok(self.git(dir, &["bisect", &mode, &target]))
+                        }
+                        "reset" => Ok(self.git(dir, &["bisect", "reset"])),
+                        _ => Err("Unknown bisect action.".into()),
+                    }
+                };
+                match run() {
+                    Ok(output) => done(output, if mode == "reset" { "Bisect reset" } else { "Bisect updated" }),
+                    Err(error) => done(git::GitOut::failed(&error), ""),
+                }
+            }
+            Action::MaintainRepository { task } => {
+                let (args, message): (&[&str], &str) = match task.as_str() {
+                    "gc" => (&["maintenance", "run", "--task=gc"], "Repository maintenance completed"),
+                    "commitGraph" => (&["commit-graph", "write", "--reachable"], "Commit graph updated"),
+                    _ => return done(git::GitOut::failed("Choose a supported maintenance task."), ""),
+                };
+                done(self.job(repo, "maintenance", dir, args), message)
+            }
+            Action::FetchHistory { remote, mode } => {
+                let info = match crate::extras::history_fetch_info(dir) {
+                    Ok(info) => info,
+                    Err(error) => return done(git::GitOut::failed(&error), ""),
+                };
+                if !info.remotes.contains(&remote) { return done(git::GitOut::failed("Choose an existing remote."), ""); }
+                let options: &[&str] = match mode.as_str() {
+                    "deepen" if info.shallow => &["--deepen=500"],
+                    "unshallow" if info.shallow => &["--unshallow"],
+                    "objects" if info.promisor_remotes.contains(&remote) => &["--refetch", "--no-filter"],
+                    _ => return done(git::GitOut::failed("This fetch option is no longer available for the selected remote."), ""),
+                };
+                let mut args = vec!["fetch", "--progress"];
+                args.extend_from_slice(options);
+                args.extend(["--", &remote]);
+                done(self.job(repo, "fetch history", dir, &args), "Fetched repository history")
             }
             Action::FetchRemote { remote } => done(self.job(repo, "fetch", dir, &["fetch", "--prune", "--progress", &remote]), &format!("Fetched {remote}")),
             Action::RemoteEdit { name, new_name, url, push_url } => {
@@ -788,7 +1090,7 @@ impl Engine {
                 done(o, &format!("Worktree created at {}", path.trim()))
             }
             Action::WorktreeRemove { path, force } => {
-                let o = if force { self.git(dir, &["worktree", "remove", "--force", &path]) } else { self.git(dir, &["worktree", "remove", &path]) };
+                let o = if force { self.git(dir, &["worktree", "remove", "--force", "--", &path]) } else { self.git(dir, &["worktree", "remove", "--", &path]) };
                 done(o, "Worktree removed")
             }
             Action::WorktreeLock { path, message } => {
@@ -825,19 +1127,25 @@ impl Engine {
                 done(self.git(dir, &["rm", "--", &path]), &format!("Removed submodule {path}"))
             }
             Action::DeleteBranches { names, remotes } => {
+                let reviewed = crate::manage::cleanup_list(dir);
                 let mut failed = Vec::new();
+                let mut remote_targets = HashMap::new();
                 for n in &names {
+                    let Some(branch) = reviewed.iter().find(|branch| branch.name == *n) else { failed.push(n.clone()); continue; };
                     let sha = self.rev(dir, &format!("refs/heads/{n}"));
                     let config=match branch_config(dir,n) {Ok(config)=>config,Err(_)=>{failed.push(n.clone());continue;}};
                     if self.git(dir, &["branch", "-D", "--", n]).ok {
                         self.push_undo(repo, UndoRec::DeleteBranch { name: n.clone(), sha, config });
+                        if !branch.upstream.is_empty() && !branch.upstream_gone { remote_targets.insert(branch.name.as_str(), (&branch.remote, &branch.remote_ref)); }
                     } else {
                         failed.push(n.clone());
                     }
                 }
                 for r in &remotes {
-                    let (remote, b) = r.split_once('/').unwrap_or(("origin", r));
-                    if !self.git(dir, &["push", remote, "--delete", b]).ok {
+                    let Some((remote, reference)) = remote_targets.get(r.as_str()) else { failed.push(r.clone()); continue; };
+                    let default = git::run(dir, &["symbolic-ref", "-q", &format!("refs/remotes/{remote}/HEAD")]);
+                    let default_ref = default.stdout.trim().strip_prefix(&format!("refs/remotes/{remote}/")).map(|branch| format!("refs/heads/{branch}"));
+                    if default_ref.as_deref() == Some(reference.as_str()) || !self.job(repo, "push", dir, &["push", "--delete", "--", remote, reference]).ok {
                         failed.push(r.clone());
                     }
                 }
@@ -967,12 +1275,17 @@ impl Engine {
                 done(o, "Patch applied")
             }
             Action::LfsInstall => done(self.git(dir, &["lfs", "install", "--local"]), "Git LFS enabled for this repository"),
-            Action::LfsTrack { pattern } => done(self.git(dir, &["lfs", "track", pattern.trim()]), &format!("LFS now tracks {}", pattern.trim())),
+            Action::LfsTrack { pattern, lockable } => {
+                let mut args = vec!["lfs", "track"];
+                if lockable { args.push("--lockable"); }
+                args.extend(["--", pattern.trim()]);
+                done(self.git(dir, &args), &format!("LFS now tracks {}", pattern.trim()))
+            }
             Action::LfsUntrack { pattern } => done(self.git(dir, &["lfs", "untrack", pattern.trim()]), &format!("LFS no longer tracks {}", pattern.trim())),
             Action::LfsPull => done(self.git(dir, &["lfs", "pull"]), "LFS files downloaded"),
-            Action::LfsLock { path } => done(self.git(dir, &["lfs", "lock", &path]), &format!("Locked {path}")),
+            Action::LfsLock { path } => done(self.git(dir, &["lfs", "lock", "--", &path]), &format!("Locked {path}")),
             Action::LfsUnlock { path, force } => {
-                let o = if force { self.git(dir, &["lfs", "unlock", "--force", &path]) } else { self.git(dir, &["lfs", "unlock", &path]) };
+                let o = if force { self.git(dir, &["lfs", "unlock", "--force", "--", &path]) } else { self.git(dir, &["lfs", "unlock", "--", &path]) };
                 done(o, &format!("Unlocked {path}"))
             }
             Action::Ignore { pattern, untrack } => {
@@ -1002,26 +1315,45 @@ impl Engine {
             Action::GitflowFinish { kind, name, keep, tag_message } => {
                 done(crate::manage::gitflow_finish(dir, &kind, &name, keep, &tag_message, &|a: &[&str]| self.git(dir, a)), &format!("Finished {kind}: '{name}'"))
             }
-            Action::InteractiveRebase { base, items, expected } => {
+            Action::CreateFixup { target } => {
+                if !matches!(target.len(), 40 | 64) || !target.bytes().all(|byte| byte.is_ascii_hexdigit()) ||
+                    self.rev(dir, &format!("{target}^{{commit}}")) != target || !self.git(dir, &["merge-base", "--is-ancestor", &target, "HEAD"]).ok {
+                    return done(git::GitOut::failed("Choose a commit on the checked-out branch to fix up."), "");
+                }
+                if ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "BISECT_START"]
+                    .iter().any(|name| self.in_progress(dir, name)) {
+                    return done(git::GitOut::failed("Finish the current Git operation before creating a fixup commit."), "");
+                }
+                let before = self.rev(dir, "HEAD");
+                let flag = format!("--fixup={target}");
+                let result = self.git(dir, &["commit", "-q", &flag]);
+                if result.ok {
+                    self.push_undo(repo, UndoRec::Commit { before, after: self.rev(dir, "HEAD"), branch: self.branch_ref(dir), label: "fixup commit".into() });
+                }
+                done(result, "Created fixup commit from staged changes")
+            }
+            Action::InteractiveRebase { base, items, expected, skip_hooks } => {
                 if crate::rewrite::plan_state(dir, &base).ok().as_ref() != Some(&expected) {
                     return done(git::GitOut::failed("The branch, tip, or base changed after this plan was prepared. Reopen the planner and review the current history."), "");
                 }
                 let before = self.rev(dir, "HEAD");
-                let o = crate::rewrite::interactive_rebase(dir, &base, &items);
+                let o = crate::rewrite::interactive_rebase(dir, &expected.base, &items, skip_hooks);
                 self.record(&format!("git rebase -i {base} ({} steps)", items.len()), &o);
-                if o.ok {
+                if o.ok && crate::rewrite::edit_stop(dir) {
+                    ActionResult { ok: true, message: "Rebase paused. Amend or split the commit, then choose Continue Rebase.".into() }
+                } else if o.ok {
                     let after = self.rev(dir, "HEAD");
                     self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive rebase".into() });
                     ActionResult { ok: true, message: "Rebase complete".into() }
                 } else if self.in_progress(dir, "rebase-merge") {
-                    ActionResult { ok: false, message: "The rebase stopped on a conflict. Resolve it, then Continue Rebase (or Abort Rebase).".into() }
+                    ActionResult { ok: false, message: "The rebase paused. Check conflicts or the Git activity log, then continue, skip, or abort the rebase.".into() }
                 } else {
                     ActionResult { ok: false, message: o.message() }
                 }
             }
-            Action::InteractiveCherryPick { items } => {
+            Action::InteractiveCherryPick { items, skip_hooks } => {
                 let before = self.rev(dir, "HEAD");
-                let o = crate::rewrite::interactive_cherry_pick(dir, &items, &|a: &[&str]| self.git(dir, a));
+                let o = crate::rewrite::interactive_cherry_pick(dir, &items, skip_hooks);
                 let after = self.rev(dir, "HEAD");
                 if after != before {
                     self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive cherry pick".into() });
@@ -1162,6 +1494,14 @@ impl Engine {
         }
     }
 
+    fn restore_stash(&self, dir: &Path, action: &str, index: usize, without_index: bool) -> git::GitOut {
+        let stash = format!("stash@{{{index}}}");
+        let mut args = vec!["stash", action, "-q"];
+        if !without_index { args.push("--index"); }
+        args.push(&stash);
+        self.git(dir, &args)
+    }
+
     fn discard(&self, repo: &str, dir: &Path, paths: Option<Vec<String>>) -> ActionResult {
         // Keep an automatic stash so the discard can be undone.
         let mut a = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before discard"];
@@ -1178,9 +1518,11 @@ impl Engine {
         if sha.is_empty() || sha == previous {
             return ActionResult { ok: false, message: "There are no changes to discard.".into() };
         }
-        let _ = self.git(dir, &["stash", "drop", "-q"]);
+        let backup = crate::discard_backups::save(dir, &sha);
+        if backup.ok && self.rev(dir, "stash@{0}") == sha { let _ = self.git(dir, &["stash", "drop", "-q"]); }
         self.push_undo(repo, UndoRec::Discard { stash: sha, paths, redo_state: None });
-        ActionResult { ok: true, message: "Discarded changes".into() }
+        let message = if backup.ok { "Discarded changes. A backup is available under Actions." } else { "Discarded changes. The backup was kept in Stashes." };
+        ActionResult { ok: true, message: message.into() }
     }
 
     fn apply(&self, dir: &Path, rec: &UndoRec, undo: bool) -> git::GitOut {
@@ -1219,6 +1561,13 @@ impl Engine {
                 }
                 created
             }
+            (UndoRec::RenameBranch { from, to, sha }, undo) => {
+                let (current, target) = if undo { (to, from) } else { (from, to) };
+                if self.rev(dir, &format!("refs/heads/{current}")) != *sha {
+                    return git::GitOut::failed("The renamed branch moved or no longer exists.");
+                }
+                self.git(dir, &["branch", "-m", "--", current, target])
+            }
             (UndoRec::CreateBranch { name, sha }, true) => {
                 if self.rev(dir, &format!("refs/heads/{name}")) != *sha {
                     return git::GitOut::failed("This branch has changed since the recorded action; refusing to delete its new commits.");
@@ -1246,7 +1595,7 @@ impl Engine {
             }
             (UndoRec::CreateTag { name, .. }, true) | (UndoRec::DeleteTag { name, .. }, false) => self.git(dir, &["tag", "-d", name]),
             (UndoRec::CreateTag { name, sha }, false) | (UndoRec::DeleteTag { name, sha }, true) => self.git(dir, &["tag", name, sha]),
-            (UndoRec::Discard { stash, .. }, true) => self.git(dir, &["stash", "apply", "-q", stash]),
+            (UndoRec::Discard { stash, .. }, true) => self.git(dir, &["stash", "apply", "--index", "-q", stash]),
             (UndoRec::Discard { paths, redo_state, .. }, false) => {
                 if !matches!((redo_state.as_deref(), discard_state(dir)), (Some(expected), Ok(current)) if expected == current) {
                     return git::GitOut::failed("The working tree changed after Undo. Discard the intended files again instead of redoing this action.");
@@ -1256,7 +1605,12 @@ impl Engine {
                 if let Some(paths) = paths { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
                 let out = self.git(dir, &args);
                 if out.ok && self.rev(dir, "stash@{0}") == previous { return git::GitOut::failed("There are no changes to discard."); }
-                if out.ok { let _ = self.git(dir, &["stash", "drop", "-q"]); }
+                if out.ok {
+                    let sha = self.rev(dir, "stash@{0}");
+                    if crate::discard_backups::save(dir, &sha).ok && self.rev(dir, "stash@{0}") == sha {
+                        let _ = self.git(dir, &["stash", "drop", "-q"]);
+                    }
+                }
                 out
             },
             (UndoRec::Rewrite { before, .. }, true) => self.git(dir, &["reset", "-q", "--keep", before]),
@@ -1273,6 +1627,7 @@ impl Engine {
     }
 
     fn undo(&self, repo: &str, dir: &Path) -> ActionResult {
+        self.load_undo(repo);
         let rec = {
             let mut s = self.stacks.lock().unwrap();
             s.get_mut(repo).and_then(|st| st.undo.pop())
@@ -1284,7 +1639,13 @@ impl Engine {
         if o.ok {
             if let UndoRec::Discard { redo_state, .. } = &mut rec { *redo_state = discard_state(dir).ok(); }
             let label = rec.label();
-            self.stacks.lock().unwrap().entry(repo.to_string()).or_default().redo.push(rec);
+            let snapshot = {
+                let mut stacks = self.stacks.lock().unwrap_or_else(|error| error.into_inner());
+                let state = stacks.entry(repo.to_owned()).or_default();
+                state.redo.push(rec);
+                state.clone()
+            };
+            self.save_undo(repo, snapshot);
             ActionResult { ok: true, message: format!("Undo Successful: {label}") }
         } else {
             self.stacks.lock().unwrap().entry(repo.to_string()).or_default().undo.push(rec);
@@ -1293,6 +1654,7 @@ impl Engine {
     }
 
     fn redo(&self, repo: &str, dir: &Path) -> ActionResult {
+        self.load_undo(repo);
         let rec = {
             let mut s = self.stacks.lock().unwrap();
             s.get_mut(repo).and_then(|st| st.redo.pop())
@@ -1303,13 +1665,35 @@ impl Engine {
         let o = self.apply(dir, &rec, false);
         if o.ok {
             let label = rec.label();
-            self.stacks.lock().unwrap().entry(repo.to_string()).or_default().undo.push(rec);
+            let snapshot = {
+                let mut stacks = self.stacks.lock().unwrap_or_else(|error| error.into_inner());
+                let state = stacks.entry(repo.to_owned()).or_default();
+                state.undo.push(rec);
+                state.clone()
+            };
+            self.save_undo(repo, snapshot);
             ActionResult { ok: true, message: format!("Redo Successful: {label}") }
         } else {
             self.stacks.lock().unwrap().entry(repo.to_string()).or_default().redo.push(rec);
             ActionResult { ok: false, message: format!("Redo Failed: {}", o.message()) }
         }
     }
+}
+
+// Conservatively refuse replay after any intervening tracked or untracked edit.
+fn discard_state(dir: &Path) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for args in [vec!["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD"], vec!["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-color"], vec!["ls-files", "--others", "--exclude-standard", "-z"]] {
+        let output = git::git_cmd(dir).args(&args).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+        output.stdout.hash(&mut hash);
+        if args[0] == "ls-files" {
+            let names = std::str::from_utf8(&output.stdout).map_err(|_| "Cannot safely verify a non-UTF-8 file name for Redo.")?;
+            for name in names.split('\0').filter(|s| !s.is_empty()) { std::fs::read(dir.join(name)).map_err(|e| e.to_string())?.hash(&mut hash); }
+        }
+    }
+    Ok(format!("{:x}", hash.finish()))
 }
 
 #[cfg(test)]
@@ -1500,6 +1884,35 @@ mod tests {
     }
 
     #[test]
+    fn stash_pop_restores_the_staged_and_unstaged_split() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let repo = path.to_string_lossy();
+        let engine = Engine::default();
+        for args in [&["init"][..], &["config", "user.name", "Fixture"], &["config", "user.email", "fixture@example.invalid"], &["config", "commit.gpgsign", "false"]] {
+            assert!(git::run(path, args).ok);
+        }
+        let file = path.join("mixed.txt");
+        let text = |first: &str, last: &str| format!("{first}\n{}{last}\n", "middle\n".repeat(12));
+        std::fs::write(&file, text("first", "last")).unwrap();
+        assert!(git::run(path, &["add", "mixed.txt"]).ok);
+        assert!(git::run(path, &["commit", "-qm", "base"]).ok);
+        let staged = text("staged first", "last");
+        let worktree = text("staged first", "unstaged last");
+        std::fs::write(&file, &staged).unwrap();
+        assert!(git::run(path, &["add", "mixed.txt"]).ok);
+        std::fs::write(&file, &worktree).unwrap();
+        std::fs::write(path.join("untracked.txt"), "kept").unwrap();
+        assert!(engine.perform(&repo, Action::Stash { message: "mixed".into() }).ok);
+        assert!(git::run(path, &["status", "--porcelain"]).stdout.is_empty());
+        let result = engine.perform(&repo, Action::StashPop { index: 0, expected: None, without_index: false });
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(git::run(path, &["show", ":mixed.txt"]).stdout.replace("\r\n", "\n"), staged);
+        assert_eq!(std::fs::read_to_string(file).unwrap().replace("\r\n", "\n"), worktree);
+        assert_eq!(std::fs::read_to_string(path.join("untracked.txt")).unwrap(), "kept");
+    }
+
+    #[test]
     fn stash_names_follow_the_rules() {
         assert_eq!(stash_message("", "main"), "WIP on main");
         assert_eq!(stash_message("  fix later \n", "main"), "fix later");
@@ -1601,13 +2014,56 @@ mod tests {
     }
 
     #[test]
+    fn discard_backup_restores_staging_with_a_fresh_engine() {
+        let dir = temp_repo("discard-restart");
+        let path = dir.to_string_lossy();
+        fs::write(dir.join("tracked.txt"), "original\n").unwrap();
+        assert!(git::run(&dir, &["add", "tracked.txt"]).ok);
+        assert!(git::run(&dir, &["commit", "-m", "initial"]).ok);
+        fs::write(dir.join("tracked.txt"), "staged\n").unwrap();
+        assert!(git::run(&dir, &["add", "tracked.txt"]).ok);
+        fs::write(dir.join("tracked.txt"), "unstaged\n").unwrap();
+        fs::write(dir.join("untracked.txt"), "untracked\n").unwrap();
+        assert!(Engine::default().perform(&path, Action::DiscardAll).ok);
+        assert!(git::status(&dir).unstaged.is_empty());
+        assert!(git::status(&dir).staged.is_empty());
+        let backups = crate::discard_backups::list(&dir).unwrap();
+        assert_eq!(backups.len(), 1);
+        let restored = Engine::default().perform(&path, Action::RestoreDiscard { reference: backups[0].reference.clone() });
+        assert!(restored.ok, "{}", restored.message);
+        assert_eq!(git::run(&dir, &["show", ":tracked.txt"]).stdout.trim(), "staged");
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap().trim(), "unstaged");
+        assert!(dir.join("untracked.txt").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn branch_cleanup_uses_default_branch_and_excludes_other_worktrees() {
+        let dir = temp_repo("cleanup-default");
+        let worktree = tempfile::tempdir().unwrap();
+        let g = |args: &[&str]| { let result = git::run(&dir, args); assert!(result.ok, "{}", result.message()); };
+        g(&["commit", "--allow-empty", "-m", "default"]);
+        g(&["branch", "-m", "main"]);
+        g(&["branch", "merged"]);
+        g(&["worktree", "add", "-b", "elsewhere", worktree.path().to_str().unwrap()]);
+        g(&["checkout", "-b", "unmerged"]);
+        g(&["commit", "--allow-empty", "-m", "feature work"]);
+        g(&["checkout", "-b", "current"]);
+        let items = crate::manage::cleanup_list(&dir);
+        assert!(items.iter().any(|item| item.name == "merged" && item.merged));
+        assert!(items.iter().any(|item| item.name == "unmerged" && !item.merged));
+        assert!(!items.iter().any(|item| matches!(item.name.as_str(), "main" | "current" | "elsewhere")));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn stage_commit_undo_redo_branch_stash_discard() {
         let d = temp_repo("flow");
         let repo = d.to_string_lossy().to_string();
         let e = Engine::default();
         fs::write(d.join("a.txt"), "one\n").unwrap();
         assert!(e.perform(&repo, Action::StageAll).ok);
-        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "first".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         let first = head(&d);
 
         fs::write(d.join("a.txt"), "one\ntwo\n").unwrap();
@@ -1615,7 +2071,7 @@ mod tests {
         assert_eq!(st.unstaged.len(), 1);
         assert!(e.perform(&repo, Action::Stage { paths: vec!["a.txt".into()] }).ok);
         assert_eq!(git::status(&d).staged.len(), 1);
-        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "second".into(), description: "body".into(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         let second = head(&d);
         assert_ne!(first, second);
 
@@ -1640,11 +2096,11 @@ mod tests {
         assert!(e.perform(&repo, Action::Stash { message: "wip".into() }).ok);
         assert_eq!(git::load(&d, 100).stashes.len(), 1);
         assert!(git::status(&d).unstaged.is_empty());
-        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None }).ok);
-        // Everything is staged before stashing, so a new file comes back staged (git stash pop re-adds it).
+        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None, without_index: false }).ok);
+        // A file that was untracked stays untracked.
         let st = git::status(&d);
-        assert_eq!(st.unstaged.len() + st.staged.len(), 1);
-        assert_eq!(st.staged.len(), 1);
+        assert_eq!(st.unstaged.len(), 1);
+        assert!(st.staged.is_empty());
         // With nothing to stash an error is reported instead of success.
         assert!(e.perform(&repo, Action::StageAll).ok);
         assert!(e.perform(&repo, Action::Stash { message: String::new() }).ok);
@@ -1652,7 +2108,7 @@ mod tests {
         assert!(named.lines().next().unwrap_or("").ends_with("WIP on master"), "default stash name: {named}");
         let none = e.perform(&repo, Action::Stash { message: String::new() });
         assert!(!none.ok && none.message == STASH_NOTHING, "{}", none.message);
-        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None }).ok);
+        assert!(e.perform(&repo, Action::StashPop { index: 0, expected: None, without_index: false }).ok);
         assert_eq!(git::status(&d).staged.len(), 1);
         assert!(e.perform(&repo, Action::UnstageAll).ok);
 
@@ -1689,7 +2145,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let index = |p: &str| git::run(&d, &["show", &format!(":{p}")]).stdout.replace("\r\n", "\n");
         fs::write(d.join("f.txt"), "a\nb\nc\n").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "base".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         let base = head(&d);
         fs::write(d.join("f.txt"), "a\nB\nc\nnew\n").unwrap();
         // Hunk body: " a", "-b", "+B", " c", "+new" -> stage only "+new" (index 4)
@@ -1713,7 +2169,7 @@ mod tests {
         assert_eq!(index("n.txt"), "one\n");
 
         // Commit and compare; hide a branch from the graph.
-        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "next".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: false }).ok);
         let files = crate::files::range_files(&d, &base, "HEAD").unwrap();
         assert_eq!(files.len(), 2);
@@ -1721,13 +2177,13 @@ mod tests {
         assert_eq!(st[0].files, 2);
         let hist = crate::files::history(&d, "f.txt", 10).unwrap();
         assert_eq!(hist.len(), 2);
-        let bl = crate::files::blame(&d, "f.txt", None).unwrap();
+        let bl = crate::files::blame(&d, "f.txt", None, true).unwrap();
         assert_eq!(bl.len(), 4);
         let v = crate::files::versions(&d, &git::DiffSource::Range(base.clone(), git::WORKDIR.into()), "f.txt", None, false);
         assert_eq!(v.old.as_deref().map(|s| s.replace("\r\n", "\n")), Some("a\nb\nc\n".to_string()));
-        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![], pinned: None, smart: false };
+        let view = git::RefView { hidden: vec!["refs/heads/side".into()], solo: vec![], pinned: None, smart: false, filter: Default::default() };
         assert_eq!(git::load_view(&d, 100, &view).commits.len(), 2);
-        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()], pinned: None, smart: false };
+        let solo = git::RefView { hidden: vec![], solo: vec!["refs/heads/side".into()], pinned: None, smart: false, filter: Default::default() };
         assert_eq!(git::load_view(&d, 100, &solo).commits.len(), 1);
         let more = git::load_view(&d, 1, &git::RefView::default());
         assert!(more.has_more);
@@ -1744,7 +2200,7 @@ mod tests {
         let read = |p: &str| fs::read_to_string(d.join(p)).unwrap().replace("\r\n", "\n");
         let commit = |f: &str, t: &str, m: &str| {
             fs::write(d.join(f), t).unwrap();
-            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
             head(&d)
         };
         let base = commit("a.txt", "1\n", "one");
@@ -1761,7 +2217,7 @@ mod tests {
             TodoItem { action: Step::Squash, sha: c3.clone(), message: None },
             TodoItem { action: Step::Drop, sha: c4.clone(), message: None },
         ];
-        let r = e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items });
+        let r = e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items, skip_hooks: false });
         assert!(r.ok, "{}", r.message);
         let log = git::run(&d, &["log", "--format=%s", &format!("{base}..HEAD")]).stdout;
         assert_eq!(log.lines().collect::<Vec<_>>(), vec!["two (reworded)"]);
@@ -1781,7 +2237,7 @@ mod tests {
             TodoItem { action: Step::Pick, sha: c2.clone(), message: None },
             TodoItem { action: Step::Pick, sha: c3.clone(), message: None },
         ];
-        assert!(e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items }).ok);
+        assert!(e.perform(&repo, Action::InteractiveRebase { expected: crate::rewrite::plan_state(&d, &base).unwrap(), base: base.clone(), items, skip_hooks: false }).ok);
         let log = git::run(&d, &["log", "--reverse", "--format=%s", &format!("{base}..HEAD")]).stdout;
         assert_eq!(log.lines().collect::<Vec<_>>(), vec!["four", "two", "three"]);
         assert!(e.perform(&repo, Action::CreateBranch { name: "side".into(), at: Some(base.clone()), checkout: true }).ok);
@@ -1789,7 +2245,7 @@ mod tests {
             TodoItem { action: Step::Pick, sha: c2.clone(), message: None },
             TodoItem { action: Step::Reword, sha: c3.clone(), message: Some("three!".into()) },
         ];
-        let r = e.perform(&repo, Action::InteractiveCherryPick { items });
+        let r = e.perform(&repo, Action::InteractiveCherryPick { items, skip_hooks: false });
         assert!(r.ok, "{}", r.message);
         let log = git::run(&d, &["log", "--reverse", "--format=%s", &format!("{base}..HEAD")]).stdout;
         assert_eq!(log.lines().collect::<Vec<_>>(), vec!["two", "three!"]);
@@ -1815,7 +2271,7 @@ mod tests {
         assert!(e.perform(&repo, Action::SaveResolved { file: "a.txt".into(), content: "master\nside\n".into(), expected: None, utf8: None }).ok);
         assert!(!git::status(&d).conflicted);
         assert!(git::load(&d, 50).merge_msg.unwrap().contains("Merge branch 'side'"));
-        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "Merge side".into(), description: String::new(), amend: false, stage_all: false, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         assert_eq!(git::run(&d, &["rev-list", "--parents", "-n1", "HEAD"]).stdout.split_whitespace().count(), 3);
 
         // Fast-forward a branch that isn't checked out, set an upstream, rename a stash.
@@ -1839,7 +2295,7 @@ mod tests {
         let e = Engine::default();
         let commit = |f: &str, m: &str| {
             fs::write(d.join(f), m).unwrap();
-            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         };
         commit("a.txt", "one");
         assert!(e.perform(&repo, Action::RenameBranch { old: "master".into(), new: "main".into() }).ok);
@@ -1881,7 +2337,7 @@ mod tests {
             assert!(e.perform(&repo, Action::SubmoduleUpdate { paths: vec![] }).ok);
             assert!(e.perform(&repo, Action::SubmoduleRemove { path: "libs/dep".into() }).ok);
         } // (some Git setups forbid file:// submodules; the rest still runs)
-        assert!(e.perform(&repo, Action::Commit { summary: "tidy".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok || true);
+        assert!(e.perform(&repo, Action::Commit { summary: "tidy".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok || true);
 
         // Gitflow: init creates develop; feature start / finish; release with a tag.
         let cfg = crate::manage::gitflow_config(&d);
@@ -1919,7 +2375,7 @@ mod tests {
         let repo = d.to_string_lossy().to_string();
         let e = Engine::default();
         let rd = |p: std::path::PathBuf| fs::read_to_string(p).unwrap().replace("\r\n", "\n");
-        let commit = |m: &str| assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+        let commit = |m: &str| assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         fs::write(d.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
         fs::write(d.join("b.txt"), "b\n").unwrap();
         commit("base");
@@ -1985,7 +2441,7 @@ mod tests {
 
         // Ignore helpers: add once, untrack a tracked file.
         fs::write(d.join("secret.log"), "x").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "log".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "log".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec!["secret.log".into()] }).ok);
         assert!(e.perform(&repo, Action::Ignore { pattern: "*.log".into(), untrack: vec![] }).ok);
         assert_eq!(fs::read_to_string(d.join(".gitignore")).unwrap().matches("*.log").count(), 1);
@@ -2000,16 +2456,16 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(hooks.join("pre-commit"), fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false });
+        let r = e.perform(&repo, Action::Commit { summary: "blocked".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false });
         assert!(!r.ok && r.message.contains("blocked by hook"), "{}", r.message);
-        assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "skipped".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: true, strip_comments: false, sign_off: false }).ok);
         let _ = fs::remove_file(hooks.join("pre-commit"));
 
         // Sparse checkout: only docs/ stays in the working folder.
         fs::create_dir_all(d.join("docs")).unwrap();
         fs::write(d.join("docs/a.md"), "a").unwrap();
         fs::write(d.join("big.bin"), "b").unwrap();
-        assert!(e.perform(&repo, Action::Commit { summary: "files".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+        assert!(e.perform(&repo, Action::Commit { summary: "files".into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
         assert!(e.perform(&repo, Action::SparseSet { patterns: vec!["/docs/".into()] }).ok);
         assert!(crate::manage::sparse_info(&d).enabled);
         assert!(!d.join("big.bin").exists() && d.join("docs/a.md").exists());
@@ -2021,20 +2477,4 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-}
-
-// Conservatively refuse replay after any intervening tracked or untracked edit.
-fn discard_state(dir: &Path) -> Result<String, String> {
-    use std::hash::{Hash, Hasher};
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    for args in [vec!["diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD"], vec!["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-color"], vec!["ls-files", "--others", "--exclude-standard", "-z"]] {
-        let output = git::git_cmd(dir).args(&args).output().map_err(|e| e.to_string())?;
-        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
-        output.stdout.hash(&mut hash);
-        if args[0] == "ls-files" {
-            let names = std::str::from_utf8(&output.stdout).map_err(|_| "Cannot safely verify a non-UTF-8 file name for Redo.")?;
-            for name in names.split('\0').filter(|s| !s.is_empty()) { std::fs::read(dir.join(name)).map_err(|e| e.to_string())?.hash(&mut hash); }
-        }
-    }
-    Ok(format!("{:x}", hash.finish()))
 }

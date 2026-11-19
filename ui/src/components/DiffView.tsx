@@ -1,3 +1,4 @@
+import { forgetEditorDraft, protectEditorDrafts, useEditorDraft } from "@/lib/editor-drafts";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -47,6 +48,8 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   const allowLarge = largeTarget === targetKey;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
+  const saving = useRef(false);
+  const discard = () => { setDraft(null); setEditing(false); };
   const editToken = useRef<string | undefined>(undefined);
   const handle = useRef<DiffHandle | null>(null);
   const hunkScroll = useRef<HTMLDivElement>(null);
@@ -69,7 +72,11 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
   }, [target.file, JSON.stringify(target.source)]);
 
   const v = versions.data;
-  const editable = !!v?.editable && !v.binary;
+  const locks = useQuery({ queryKey: ["lfsLocks", repo.path], queryFn: ({ signal }) => api.lfsLocks(repo.path, signal),
+    enabled: !!v?.lockable, staleTime: 30_000, retry: false });
+  const fileLock = locks.data?.find(lock => lock.path === target.file);
+  const canEditLocked = !v?.lockable || fileLock?.ours === true;
+  const editable = !!v?.editable && !v.binary && canEditLocked;
   const virtualComparison = lines.data?.some(line => line.kind === "Limit") || (set.wordWrap && (lines.data?.length ?? 0) > 500);
   const added = (lines.data ?? []).filter((l) => l.kind === "Added").length;
   const removed = (lines.data ?? []).filter((l) => l.kind === "Removed").length;
@@ -83,19 +90,24 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
     (target.untracked ? "?" : "M");
 
   const save = async (utf8 = false) => {
-    if (draft === null) return;
+    if (draft === null) return true;
+    if (saving.current) return false;
+    saving.current = true;
     try {
       await api.saveFile(repo.path, target.file, draft, editToken.current, utf8);
       s.toast(true, `Saved ${name}`);
-      setDraft(null);
-      setEditing(false);
-      await refresh(repo.path);
+      discard();
+      forgetEditorDraft(tabId);
+      void refresh(repo.path);
+      return true;
     } catch (e) {
       if (/ENCODING_UNREPRESENTABLE|ENCODING_DECODE_LOSS/.test(String(e))) {
         s.setDialog({ kind: "choice", title: "Save this file as UTF-8?", text: "The current encoding cannot represent every character. The original file is unchanged. Convert this file to UTF-8 with a byte-order mark to preserve your text?", choices: [{ label: "Save as UTF-8", onSelect: () => { void save(true); } }] });
       } else s.toast(false, String(e));
-    }
+      return false;
+    } finally { saving.current = false; }
   };
+  useEditorDraft(tabId, target.file, draft !== null, save, discard, () => saving.current);
 
   const next = (dir: 1 | -1) => {
     if (view === "diff" && (set.diffMode !== "hunk" || virtualComparison)) return dir === 1 ? handle.current?.next() : handle.current?.prev();
@@ -124,9 +136,9 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
       <MonacoFile
         value={draft ?? v.new ?? v.old ?? ""}
         file={target.file}
-        readOnly={!editing}
+        readOnly={!editing || !canEditLocked}
         wordWrap={set.wordWrap}
-        onChange={(t) => editing && setDraft(t)}
+        onChange={(t) => editing && canEditLocked && !saving.current && setDraft(t)}
         onSave={() => save()}
       />
     );
@@ -139,8 +151,8 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
         sideBySide={set.diffMode === "split"}
         wordWrap={set.wordWrap}
         ignoreWhitespace={set.ignoreWhitespace}
-        editable={editing}
-        onChange={(t) => editing && setDraft(t)}
+        editable={editing && canEditLocked}
+        onChange={(t) => editing && canEditLocked && !saving.current && setDraft(t)}
         onSave={() => save()}
         handle={handle}
       />
@@ -194,6 +206,10 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
       </div>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-[32px] py-1 px-2 bg-app border-b border-white/5 shrink-0">
         <div className="flex-1 flex items-center gap-1.5 min-w-0">
+          {v?.lockable && <span className="text-[11px] text-fg3 whitespace-nowrap">
+            {fileLock?.ours ? "LFS locked by you" : fileLock ? "LFS locked by " + (fileLock.owner || "another user") : locks.isError ? "Could not verify LFS lock" : locks.isLoading ? "Checking LFS lock…" : "LFS read-only"}
+          </span>}
+          {v?.lockable && locks.isSuccess && !fileLock && <Button size="sm" onClick={() => act(repo.path, { type: "lfsLock", path: target.file })}>Lock file</Button>}
           {editable && !editing && (
             <Button size="sm" variant="primary" className="h-[22px]" onClick={() => { editToken.current = v?.new_token ?? undefined; setEditing(true); setView("file"); }} title="Edit the working-folder copy of this file">
               <Pencil size={12} /> {target.source.kind === "Staged" ? "Edit in Working Directory" : "Edit This File"}
@@ -204,7 +220,7 @@ export function DiffView({ repo, tabId, target }: { repo: RepoView; tabId: strin
               <Button size="sm" variant="success" className="h-[22px]" disabled={draft === null} onClick={() => save()} title="Save (Ctrl+S)">
                 <Save size={12} /> Save Changes
               </Button>
-              <Button size="sm" className="h-[22px]" onClick={() => (setEditing(false), setDraft(null))}>
+              <Button size="sm" className="h-[22px]" onClick={() => { if (!protectEditorDrafts(s.setDialog, discard, tabId)) discard(); }}>
                 Cancel
               </Button>
             </>
@@ -291,6 +307,56 @@ function splitHunks(lines: DiffLine[]): { pre: DiffLine[]; hunks: Hunk[] } {
   return { pre, hunks };
 }
 
+function replacementLines(lines: DiffLine[]) {
+  const pairs = new Map<number, number>();
+  for (let start = 0; start < lines.length;) {
+    if (lines[start].kind !== "Removed") { start++; continue; }
+    let added = start;
+    while (lines[added]?.kind === "Removed") added++;
+    let end = added;
+    while (lines[end]?.kind === "Added") end++;
+    // Leave insertions and deletions at line granularity when replacements cannot be paired.
+    if (added - start === end - added) {
+      for (let i = 0; i < added - start; i++) {
+        pairs.set(start + i, added + i);
+        pairs.set(added + i, start + i);
+      }
+    }
+    start = end;
+  }
+  return pairs;
+}
+
+function changedWords(line: string, other: string): { text: string; changed: boolean }[] | undefined {
+  if (line === other || line.length > 1000 || other.length > 1000) return;
+  const tokens = (text: string) => text.match(/[\p{L}\p{M}\p{N}_]+|\s+|[^\p{L}\p{M}\p{N}_\s]/gu) ?? [];
+  const words = tokens(line);
+  const compare = tokens(other);
+  if (words.length > 100 || compare.length > 100) return;
+  const stride = compare.length + 1;
+  const score = new Uint8Array((words.length + 1) * stride);
+  for (let a = words.length - 1; a >= 0; a--) {
+    for (let b = compare.length - 1; b >= 0; b--) {
+      const cell = a * stride + b;
+      score[cell] = words[a] === compare[b] ? 1 + score[cell + stride + 1] : Math.max(score[cell + stride], score[cell + 1]);
+    }
+  }
+  if (score[0] < Math.max(words.length, compare.length) / 3) return;
+  const marks = words.map(text => ({ text, changed: true }));
+  let a = 0, b = 0;
+  while (a < words.length && b < compare.length) {
+    if (words[a] === compare[b]) {
+      marks[a].changed = false;
+      a++; b++;
+    } else if (score[(a + 1) * stride + b] >= score[a * stride + b + 1]) {
+      a++;
+    } else {
+      b++;
+    }
+  }
+  return marks;
+}
+
 /** Hunk View: each change block with Stage / Unstage / Discard, and line picking (click, Shift+click). */
 function HunkView({
   repo,
@@ -310,6 +376,7 @@ function HunkView({
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { pre, hunks } = useMemo(() => splitHunks(lines), [lines]);
+  const replacements = useMemo(() => hunks.map(hunk => replacementLines(hunk.lines)), [hunks]);
   const [sel, setSel] = useState<{ hunk: number; lines: number[]; anchor: number } | null>(null);
   useEffect(() => setSel(null), [lines]);
   const staged = target.source.kind === "Staged";
@@ -362,6 +429,10 @@ function HunkView({
               <span className="text-[11.5px] text-fg2 truncate flex-1 mono">{h.header}</span>
               {actions && target.source.kind === "Unstaged" && (
                 <>
+                  {!target.untracked && <Button size="sm" className="h-[20px] text-[11px]" onClick={() => {
+                    void act(repo.path, { type: "stashHunk", file: target.file, hunk: hi, lines: n ? picked : null, expected: lines })
+                      .then(ok => { if (ok) setSel(null); });
+                  }}>{n ? "Stash Selected Lines" : "Stash Hunk"}</Button>}
                   <Button size="sm" variant="danger" className="h-[20px] text-[11px]" onClick={() => run("discard", hi, n ? picked : null)}>
                     {n ? `Discard ${n} Line${n === 1 ? "" : "s"}` : "Discard Hunk"}
                   </Button>
@@ -394,6 +465,8 @@ function HunkView({
               <VirtualHunkRows lines={h.lines} scrollRef={scrollRef} wordWrap={wordWrap} render={(l, i) => {
                   const change = l.kind === "Added" || l.kind === "Removed";
                   const on = picked.includes(i);
+                  const paired = replacements[hi].get(i);
+                  const words = paired === undefined ? undefined : changedWords(l.text, h.lines[paired].text);
                   return (
                     <tr
                       key={i}
@@ -418,7 +491,9 @@ function HunkView({
                       <td className="w-[44px] text-right pr-2 text-fg3 select-none align-top border-r border-white/5">{l.new_no ?? ""}</td>
                       <td className={cn("pl-2 pr-4 text-white/85 select-text", wordWrap ? "whitespace-pre-wrap break-all" : "whitespace-pre")}>
                         <span className="select-none inline-block w-3 text-fg3">{l.kind === "Added" ? "+" : l.kind === "Removed" ? "-" : " "}</span>
-                        {l.text}
+                        {words ? words.map(({ text, changed }, index) => changed
+                          ? <span key={index} className={l.kind === "Added" ? "bg-good/45" : "bg-bad/45"}>{text}</span>
+                          : text) : l.text}
                       </td>
                     </tr>
                   );

@@ -53,7 +53,18 @@ pub fn show_item_in_folder(p: &Path) -> Result<(), String> {
     }
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(p)).spawn().map(|_| ()).map_err(|_| OPEN_PATH_FAILED.into())
+        if let Ok(path) = std::path::absolute(p) {
+            if let Ok(uri) = tauri::Url::from_file_path(path) {
+                // GVariant string escaping is handled by JSON quoting for a percent-encoded file URI.
+                let list = format!("[{}]", serde_json::Value::String(uri.to_string()));
+                let status = std::process::Command::new("gdbus").args([
+                    "call", "--session", "--timeout", "3", "--dest", "org.freedesktop.FileManager1",
+                    "--object-path", "/org/freedesktop/FileManager1", "--method", "org.freedesktop.FileManager1.ShowItems", &list, "''",
+                ]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                if status.is_ok_and(|status| status.success()) { return Ok(()); }
+            }
+        }
+        open_path(p.parent().unwrap_or(p))
     }
 }
 

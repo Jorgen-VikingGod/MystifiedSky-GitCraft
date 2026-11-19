@@ -122,6 +122,13 @@ try{
   await evaluate(`await v.invoke('set_runtime_settings',{settings:{gitPath:input.gitPath,sshUseAgent:true}});`,{gitPath:tools.git});
   if(existsSync(late))throw new Error('Cancelled helper survived to write');if(result.rejected!==12)throw new Error('A cancelled slow read succeeded');return {...result,closeMs};
  });
+ await check('Filtered graph history and file history use native Git',async()=>{
+  await evaluate(`await v.openRepoPath(fixture);window.filterTab=v.store.getState().activeId;v.store.getState().setUi(filterTab,{historyFilter:{author:'Desktop Fixture',path:'tracked.txt',text:'const line999 = 999;',mode:'text'}});`);
+  await until("v.repoData(path)?.commits.length===1 && v.repoData(path)?.commits[0].summary==='History 0'","the matching commit from the beginning of the fixture history");
+  const page=await evaluate(`return await v.api.fileHistory(path,'tracked.txt',null);`);
+  if(!page.entries.some(entry=>entry.summary==='History 0'))throw new Error('The file history is missing its first change');
+  return {matches:1,fileHistoryEntries:page.entries.length};
+ });
  const violations=await evaluate('return violations;');report.violations=violations;if(violations.length)throw new Error('Content-policy violations: '+JSON.stringify(violations));
  if(report.exceptions.length)throw new Error('Unexpected renderer exceptions: '+JSON.stringify(report.exceptions));
  report.heap=await send('Runtime.getHeapUsage');

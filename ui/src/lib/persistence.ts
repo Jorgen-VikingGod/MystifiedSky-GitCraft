@@ -7,7 +7,10 @@ let dirty = false;
 function snapshot() {
   const st = useStore.getState();
   const tabs = st.tabs.filter(t => t.kind === "repo");
-  return { settings: st.settings, tabs: tabs.map(t => t.path), active: Math.max(0, tabs.findIndex(t => t.id === st.activeId)), profiles: st.profiles, activeProfile: st.activeProfile };
+  const drafts = Object.fromEntries(Object.entries(st.drafts)
+    .filter(([, draft]) => !draft.amend && (draft.summary || draft.description))
+    .map(([path, draft]) => [path, { summary: draft.summary, description: draft.description }]));
+  return { drafts, settings: st.settings, tabs: tabs.map(t => t.path), active: Math.max(0, tabs.findIndex(t => t.id === st.activeId)), profiles: st.profiles, activeProfile: st.activeProfile };
 }
 export function hasUnsavedPreferences() { return dirty; }
 export async function flushPersistence() {
@@ -23,7 +26,7 @@ export async function flushPersistence() {
 }
 export function startPersistence() {
   return useStore.subscribe((st, prev) => {
-    if (st.settings === prev.settings && st.tabs === prev.tabs && st.activeId === prev.activeId && st.profiles === prev.profiles && st.activeProfile === prev.activeProfile) return;
+    if (st.settings === prev.settings && st.tabs === prev.tabs && st.activeId === prev.activeId && st.profiles === prev.profiles && st.activeProfile === prev.activeProfile && st.drafts === prev.drafts) return;
     dirty = true;
     clearTimeout(timer);
     timer = setTimeout(() => { void flushPersistence().catch(error => useStore.getState().toast(false, "Could not save preferences: " + String(error))); }, 400);

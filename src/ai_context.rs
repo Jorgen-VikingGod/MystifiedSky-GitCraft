@@ -1,6 +1,26 @@
 //! Compact bulk dependency imports without hiding application or local patch changes.
 use std::collections::BTreeMap;
 
+pub(crate) fn sensitive_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.split('/').any(|part| matches!(part, ".ssh" | ".aws" | ".gnupg" | ".secrets")) { return true; }
+    let name = lower.rsplit('/').next().unwrap_or_default();
+    name == ".env" || name.starts_with(".env.") || name.starts_with("id_") ||
+        matches!(name, ".npmrc" | ".pypirc" | ".netrc" | "_netrc" | ".git-credentials" | "credentials.json" | "secrets.json") ||
+        [".pem", ".key", ".pfx", ".p12", ".jks", ".keystore"].iter().any(|suffix| name.ends_with(suffix))
+}
+
+pub(crate) fn redact(text: &str) -> std::borrow::Cow<'_, str> {
+    static SENSITIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = SENSITIVE.get_or_init(|| regex::Regex::new(concat!(
+        r"(?s:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z))",
+        r"|(?:gh[pousr]_|github_pat_|glpat-|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{8,}",
+        r"|(?:AKIA|ASIA)[A-Z0-9]{16}",
+        r#"|(?im)^[+\- ]*['"]?[a-z0-9_.-]*(?:api[_.-]?key|password|passwd|secret|token|authorization)['"]?[ \t]*[:=][^\r\n]+"#,
+    )).expect("valid redaction pattern"));
+    pattern.replace_all(text, "[redacted]")
+}
+
 fn dependency(path: &str) -> Option<String> {
     let parts: Vec<_> = path.split('/').collect();
     let i = parts.iter().position(|p| matches!(*p, "vendor" | "vendored" | "third_party" | "third-party"))?;
@@ -63,8 +83,13 @@ pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, Strin
         let Some(path) = records.next() else { break };
         let status = status.trim();
         if status.starts_with('R') || status.starts_with('C') {
-            retained.push(path.to_owned());
-            if let Some(new) = records.next() { retained.push(new.to_owned()); }
+            let new = records.next();
+            if !sensitive_path(path) && new.is_some_and(|new| !sensitive_path(new)) {
+                retained.push(path.to_owned());
+                if let Some(new) = new { retained.push(new.to_owned()); }
+            }
+        } else if sensitive_path(path) {
+            continue;
         } else if matches!(status, "A" | "D") && dependency(path).is_some() && !retain_import(path) {
             omitted.insert(path.to_owned(), if status == "A" { "added" } else { "removed" });
         } else { retained.push(path.to_owned()); }
@@ -121,34 +146,95 @@ pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, Strin
     Ok(output)
 }
 
-/// Include new local files without staging them or changing the index.
-pub(crate) fn untracked(dir: &std::path::Path) -> Result<String, String> {
+#[derive(Default)]
+pub(crate) struct Untracked {
+    pub files: Vec<String>,
+    pub text: String,
+}
+
+fn collect_untracked(dir: &std::path::Path) -> Result<Untracked, String> {
     use std::io::Read;
     let result = crate::git::run(dir, &["ls-files", "--others", "--exclude-standard", "-z"]);
     if !result.ok { return Err(result.message()); }
-    let mut paths: Vec<_> = result.stdout.split('\0').filter(|path| !path.is_empty()).collect();
+    let root = dir.canonicalize().map_err(|error| error.to_string())?;
+    let mut paths: Vec<_> = result.stdout.split('\0').filter(|path| !path.is_empty() && !sensitive_path(path)).collect();
     paths.sort_by_key(|path| (context_priority(path), *path));
-    let mut output = String::new(); let mut summarized = 0usize; let mut total = 0u64;
+    let mut context = Untracked::default();
+    let mut summarized = 0usize;
+    let mut total = 0u64;
     for path in paths {
-        let full = dir.join(path);
-        let metadata = std::fs::symlink_metadata(&full).map_err(|e| e.to_string())?;
+        let full = crate::files::repo_file(&root, path)?;
+        let Ok(metadata) = std::fs::symlink_metadata(&full) else { continue; };
+        if !metadata.is_file() || dependency(path).is_some() && !retain_import(path) { continue; }
         total += metadata.len();
-        if output.len() >= CONTENT_BUDGET { summarized += 1; continue; }
-        append_context(&mut output, &format!("\nNew (untracked) file {} ({} bytes):\n", serde_json::to_string(path).unwrap(), metadata.len()));
-        if metadata.file_type().is_symlink() { append_context(&mut output, "Symlink; target contents not read.\n"); continue; }
-        if dependency(path).is_some() && !retain_import(path) { append_context(&mut output, "Vendored source import; contents omitted.\n"); continue; }
-        let limit = DETAIL_PER_FILE.min(CONTENT_BUDGET.saturating_sub(output.len()));
+        if context.text.len() >= CONTENT_BUDGET || context.files.len() >= 200 { summarized += 1; continue; }
+        let Ok(full) = full.canonicalize() else { continue; };
+        if !full.starts_with(&root) { continue; }
+        let header = format!("\nNew (untracked) file {} ({} bytes):\n", serde_json::to_string(path).unwrap(), metadata.len());
+        let limit = DETAIL_PER_FILE.min(CONTENT_BUDGET.saturating_sub(context.text.len() + header.len()));
+        if limit == 0 { summarized += 1; continue; }
         let mut bytes = Vec::new();
-        std::fs::File::open(&full).map_err(|e| e.to_string())?.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if crate::files::is_binary(&bytes) { append_context(&mut output, "Binary file; contents omitted.\n"); continue; }
-        let excerpted = metadata.len() > limit as u64;
+        std::fs::File::open(&full).map_err(|error| error.to_string())?.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        if crate::files::is_binary(&bytes) { continue; }
+        let excerpted = bytes.len() > limit || metadata.len() > limit as u64;
         bytes.truncate(limit);
         let text = if let Some(encoding) = crate::prefs::encoding_for(dir) { crate::prefs::decode(&bytes, encoding) } else { String::from_utf8_lossy(&bytes).into_owned() };
-        append_context(&mut output, &text);
-        if excerpted { summarized += 1; append_context(&mut output, "\n[File excerpt only; remaining contents omitted.]\n"); }
+        context.files.push(path.to_owned());
+        append_context(&mut context.text, &header);
+        append_context(&mut context.text, &redact(&text));
+        if excerpted { summarized += 1; append_context(&mut context.text, "\n[File excerpt only; remaining contents omitted.]\n"); }
     }
-    if summarized > 0 { output.push_str(&format!("\n[AI context budget: {summarized} new files have excerpted or omitted contents; total new-file size is {total} bytes. Do not infer omitted implementation details.]\n")); }
-    Ok(output)
+    if summarized > 0 && !context.files.is_empty() { context.text.push_str(&format!("\n[AI context budget: {summarized} new files have excerpted or omitted contents; total new-file size is {total} bytes.]\n")); }
+    Ok(context)
+}
+
+#[cfg(test)]
+pub(crate) fn untracked(dir: &std::path::Path) -> Result<String, String> {
+    Ok(collect_untracked(dir)?.text)
+}
+
+#[derive(Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreviewKind { Commit, Stash, Compose }
+
+#[derive(serde::Serialize)]
+pub(crate) struct Preview { id: Option<u32>, files: Vec<String> }
+
+struct Pending {
+    id: u32,
+    dir: std::path::PathBuf,
+    kind: PreviewKind,
+    context: Untracked,
+    created: std::time::Instant,
+}
+
+static PREVIEWS: std::sync::Mutex<Vec<Pending>> = std::sync::Mutex::new(Vec::new());
+const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+pub(crate) fn preview(dir: &std::path::Path, kind: PreviewKind) -> Result<Preview, String> {
+    if kind != PreviewKind::Compose && !diff(dir, &["diff", "--cached"])?.trim().is_empty() {
+        return Ok(Preview { id: None, files: vec![] });
+    }
+    let context = collect_untracked(dir)?;
+    if context.files.is_empty() { return Ok(Preview { id: None, files: vec![] }); }
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let files = context.files.clone();
+    let dir = dir.canonicalize().map_err(|error| error.to_string())?;
+    let mut pending = PREVIEWS.lock().unwrap_or_else(|error| error.into_inner());
+    pending.retain(|item| item.created.elapsed() <= PREVIEW_TTL);
+    if pending.len() >= 8 { pending.remove(0); }
+    pending.push(Pending { id, dir, kind, context, created: std::time::Instant::now() });
+    Ok(Preview { id: Some(id), files })
+}
+
+pub(crate) fn take_preview(dir: &std::path::Path, kind: PreviewKind, id: Option<u32>) -> Result<Untracked, String> {
+    let Some(id) = id else { return Ok(Untracked::default()); };
+    let dir = dir.canonicalize().map_err(|error| error.to_string())?;
+    let mut pending = PREVIEWS.lock().unwrap_or_else(|error| error.into_inner());
+    pending.retain(|item| item.created.elapsed() <= PREVIEW_TTL);
+    let index = pending.iter().position(|item| item.id == id && item.dir == dir && item.kind == kind).ok_or("The AI file preview expired. Review the files again before sending.")?;
+    Ok(pending.remove(index).context)
 }
 
 #[cfg(test)]
@@ -160,6 +246,22 @@ mod tests {
             assert!(crate::git::run(folder.path(), &args).ok);
         }
         folder
+    }
+    #[test]
+    fn only_reviewed_sanitized_untracked_content_is_sent() {
+        let folder = fixture(); let dir = folder.path();
+        std::fs::write(dir.join(".env"), "denylisted content").unwrap();
+        std::fs::write(dir.join("notes.txt"), "safe text ghp_syntheticExampleToken").unwrap();
+        let review = preview(dir, PreviewKind::Commit).unwrap();
+        assert_eq!(review.files, ["notes.txt"]);
+        std::fs::write(dir.join("notes.txt"), "later change").unwrap();
+        assert!(take_preview(dir, PreviewKind::Stash, review.id).is_err());
+        let approved = take_preview(dir, PreviewKind::Commit, review.id).unwrap();
+        assert!(approved.text.contains("safe text [redacted]"));
+        assert!(!approved.text.contains("syntheticExampleToken"));
+        assert!(!approved.text.contains("denylisted content"));
+        assert!(!approved.text.contains("later change"));
+        assert!(take_preview(dir, PreviewKind::Commit, review.id).is_err());
     }
     #[test]
     fn existing_vendor_edits_and_literal_unicode_files_keep_their_contents() {

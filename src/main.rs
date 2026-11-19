@@ -2,6 +2,8 @@
 
 mod accounts;
 mod actions;
+mod discard_backups;
+mod diagnostics;
 mod jobs;
 mod files;
 mod git;
@@ -17,6 +19,8 @@ mod ai_cli;
 mod ai_models;
 mod extras;
 mod external;
+#[cfg(target_os = "macos")]
+mod finder_services;
 mod prefs;
 mod hosting;
 mod hosting_api;
@@ -25,6 +29,7 @@ mod manage;
 mod rewrite;
 mod metrics;
 mod sample;
+mod settings_file;
 mod shell;
 mod shot;
 mod terminal;
@@ -54,8 +59,9 @@ struct AppState {
     screenshot: Option<PathBuf>,
     /// Test aid: which screen `--screenshot` pictures (`--shot-view diff|split|history|start`).
     shot_view: Option<String>,
-    watchers: Arc<Mutex<HashMap<String, WatchSlot>>>,
+    watchers: Arc<Mutex<HashMap<(String, String), WatchSlot>>>,
     terminals: terminal::Terminals,
+    launch_paths: Mutex<HashMap<String, Vec<LaunchIntent>>>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +88,8 @@ struct HistoryCursor {
     revs: Vec<String>,
     offset: usize,
     layout: graph::LayoutCursor,
+    #[serde(default)]
+    filter: git::HistoryFilter,
 }
 
 #[derive(Serialize)]
@@ -96,7 +104,7 @@ struct HistoryPage {
 async fn history_page(path: String, cursor: HistoryCursor, max: Option<usize>, read_id: Option<String>) -> Result<HistoryPage, String> {
     blocking(move || read_jobs::scope(read_id, || {
         let mut cursor = cursor;
-        let (commits, has_more) = git::history_page(Path::new(&path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000))?;
+        let (commits, has_more) = git::history_page(Path::new(&path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000), &cursor.filter)?;
         let graph = cursor.layout.append(&commits);
         cursor.offset += commits.len();
         Ok(HistoryPage { commits, graph, has_more, history_cursor: has_more.then_some(cursor) })
@@ -115,6 +123,46 @@ async fn read_blocking<T: Send + 'static>(id: Option<String>, f: impl FnOnce() -
     blocking(move || read_jobs::scope(id, f)).await
 }
 
+async fn ai_blocking<T: Send + 'static>(id: Option<String>, f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    blocking(move || read_jobs::scope_for(id, std::time::Duration::from_secs(300), f)).await
+}
+
+#[tauri::command]
+async fn copy_diagnostics(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<String, String> {
+    if state.screenshot.is_some() { return Ok("GitCraft verification fixture".into()); }
+    let version = app.package_info().version.to_string();
+    blocking(move || diagnostics::report(&version)).await
+}
+
+#[tauri::command]
+async fn check_git_version(program: String) -> Result<(), String> {
+    blocking(move || git::check_version(&program)).await?
+}
+
+#[tauri::command]
+async fn history_fetch_info(path: String, read_id: Option<String>) -> Result<extras::HistoryFetchInfo, String> {
+    read_blocking(read_id, move || extras::history_fetch_info(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn repo_reflog(path: String, read_id: Option<String>) -> Result<Vec<extras::ReflogEntry>, String> {
+    read_blocking(read_id, move || extras::reflog(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn commit_template(path: String, read_id: Option<String>) -> Result<Option<(String, String)>, String> {
+    read_blocking(read_id, move || extras::commit_template(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn commit_signature(path: String, sha: String, read_id: Option<String>) -> Result<String, String> {
+    read_blocking(read_id, move || {
+        let dir = Path::new(&path);
+        let output = git::run(dir, &["log", "-1", "--no-show-signature", "--format=%G?", "--end-of-options", &sha, "--"]);
+        if output.ok { Ok(output.stdout.trim().to_owned()) } else { Err(output.message()) }
+    }).await?
+}
+
 #[tauri::command]
 fn launch_options(state: State<'_, AppState>) -> LaunchOptions {
     LaunchOptions { screenshot: state.screenshot.is_some(), shot_view: state.shot_view.clone(), version: env!("CARGO_PKG_VERSION").to_string(), metrics: metrics::metrics() }
@@ -131,12 +179,14 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
             return Err(format!("The folder {path} doesn't exist"));
         }
         let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
+        let operation = operation::lock_for(&root);
+        if let Ok(_guard) = operation.try_lock() { rewrite::cleanup_replay_files(&root); }
         let view = view.unwrap_or_default();
         let data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view)?;
         let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
         let mut layout = graph::LayoutCursor::new(pinned_sha.as_deref());
         let graph = layout.append(&data.commits);
-        let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: data.commits.len(), layout });
+        let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: data.commits.len(), layout, filter: view.filter.clone() });
         // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
         let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
         Ok(RepoView {
@@ -154,7 +204,7 @@ async fn open_repo(path: String, max: Option<usize>, view: Option<git::RefView>,
 #[tauri::command]
 async fn commit_details(path: String, sha: String, read_id: Option<String>) -> Result<git::Commit, String> {
     blocking(move || read_jobs::scope(read_id, || {
-        let output = git::run(Path::new(&path), &["log", "--no-walk", "-1", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", &sha, "--"]);
+        let output = git::run(Path::new(&path), &["log", "--no-walk", "-1", "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", &sha, "--"]);
         if !output.ok { return Err(output.message()); }
         git::parse_commits(&output.stdout).into_iter().next().ok_or_else(|| "The selected commit is no longer available.".into())
     })).await?
@@ -208,13 +258,13 @@ async fn save_file(path: String, file: String, content: String, expected: Option
 }
 
 #[tauri::command]
-async fn file_history(path: String, file: String, read_id: Option<String>) -> Result<Vec<files::HistoryEntry>, String> {
-    blocking(move || read_jobs::scope(read_id, || files::history(Path::new(&path), &file, metrics::FILE_HISTORY_MAX))).await?
+async fn file_history(path: String, file: String, cursor: Option<files::FileHistoryCursor>, read_id: Option<String>) -> Result<files::FileHistoryPage, String> {
+    read_blocking(read_id, move || files::file_history_page(Path::new(&path), &file, cursor, metrics::FILE_HISTORY_MAX)).await?
 }
 
 #[tauri::command]
-async fn blame(path: String, file: String, rev: Option<String>, read_id: Option<String>) -> Result<Vec<files::BlameLine>, String> {
-    blocking(move || read_jobs::scope(read_id, || files::blame(Path::new(&path), &file, rev.as_deref()))).await?
+async fn blame(path: String, file: String, rev: Option<String>, ignore_revs: Option<bool>, read_id: Option<String>) -> Result<Vec<files::BlameLine>, String> {
+    blocking(move || read_jobs::scope(read_id, || files::blame(Path::new(&path), &file, rev.as_deref(), ignore_revs.unwrap_or(true)))).await?
 }
 
 #[tauri::command]
@@ -262,8 +312,8 @@ async fn gitflow_config(path: String, read_id: Option<String>) -> Result<manage:
 }
 
 #[tauri::command]
-async fn cleanup_list(path: String, read_id: Option<String>) -> Result<Vec<manage::CleanupBranch>, String> {
-    read_blocking(read_id, move || manage::cleanup_list(Path::new(&path))).await
+async fn cleanup_list(path: String, detect_patches: Option<bool>, read_id: Option<String>) -> Result<Vec<manage::CleanupBranch>, String> {
+    read_blocking(read_id, move || manage::review_cleanup(Path::new(&path), detect_patches.unwrap_or(false))).await
 }
 
 #[tauri::command]
@@ -313,8 +363,8 @@ async fn set_git_config(path: Option<String>, scope: String, key: String, value:
 }
 
 #[tauri::command]
-async fn generate_ssh_key(email: String, name: String) -> Result<String, String> {
-    blocking(move || accounts::generate_ssh_key(&email, &name)).await?
+async fn generate_ssh_key(email: String, name: String, passphrase: String, add_to_agent: bool) -> Result<accounts::GeneratedSshKey, String> {
+    blocking(move || accounts::generate_ssh_key(&email, &name, &passphrase, add_to_agent)).await?
 }
 
 #[tauri::command]
@@ -403,14 +453,14 @@ async fn hosting_status(gitlab_host: String) -> Result<HostingStatus, String> {
 
 /// Store (or with an empty value, remove) a token or API key in the OS credential store.
 #[tauri::command]
-fn set_secret(name: String, value: String) -> Result<(), String> {
+async fn set_secret(name: String, value: String) -> Result<(), String> {
     let allowed = hosting::SERVICES.iter().any(|id| hosting::secret_name(id) == name) || ["anthropic-key", "openai-key", "google-key", "ollama-key", "custom-ai-key"].contains(&name.as_str());
-    if !allowed {
-        return Err("unknown secret".into());
-    }
-    hosting::secret_set(&name, value.trim())?;
-    if name.ends_with("-token") { hosting::sync_git_credentials(""); }
-    Ok(())
+    if !allowed { return Err("unknown secret".into()); }
+    blocking(move || {
+        hosting::save_secret_manually(&name, value.trim())?;
+        if name.ends_with("-token") { hosting::sync_git_credentials(""); }
+        Ok(())
+    }).await?
 }
 
 #[tauri::command]
@@ -419,8 +469,20 @@ async fn repo_remote(path: String, gitlab_host: String, read_id: Option<String>)
 }
 
 #[tauri::command]
-async fn list_prs_page(path: String, gitlab_host: String, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::PullRequest>>, String> {
-    blocking(move || read_jobs::scope(read_id, || hosting::pull_requests_page(&remote_of(&path, &gitlab_host)?, cursor.as_deref()))).await?
+async fn commit_checks(path: String, gitlab_host: String, sha: String, number: Option<u64>, remote_name: Option<String>, read_id: Option<String>) -> Result<Vec<hosting::CommitCheck>, String> {
+    blocking(move || read_jobs::scope(read_id, || {
+        let remote = if let Some(name) = remote_name {
+            let output = git::run(Path::new(&path), &["remote", "get-url", "--", &name]);
+            if !output.ok { return Err(output.message()); }
+            hosting::parse_remote(output.stdout.trim(), &gitlab_host).ok_or("This branch's remote is outside the configured hosting services.")?
+        } else { remote_of(&path, &gitlab_host)? };
+        hosting::commit_checks(&remote, &sha, number)
+    })).await?
+}
+
+#[tauri::command]
+async fn list_prs_page(path: String, gitlab_host: String, cursor: Option<String>, filter: Option<hosting::PullFilter>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::PullRequest>>, String> {
+    blocking(move || read_jobs::scope(read_id, || hosting::pull_requests_page(&remote_of(&path, &gitlab_host)?, cursor.as_deref(), filter.unwrap_or_default()))).await?
 }
 
 #[tauri::command]
@@ -429,8 +491,8 @@ async fn list_prs(path: String, gitlab_host: String, read_id: Option<String>) ->
 }
 
 #[tauri::command]
-async fn pr_details(path: String, gitlab_host: String, number: u64, read_id: Option<String>) -> Result<hosting::PullRequest, String> {
-    read_blocking(read_id, move || hosting::pull_request(&remote_of(&path, &gitlab_host)?, number)).await?
+async fn pr_details(path: String, gitlab_host: String, number: u64, read_id: Option<String>) -> Result<hosting::PullRequestDetails, String> {
+    read_blocking(read_id, move || hosting::pull_request_details(&remote_of(&path, &gitlab_host)?, number)).await?
 }
 
 #[tauri::command]
@@ -442,6 +504,14 @@ async fn pr_checkout_target(path: String, gitlab_host: String, number: u64, read
 }
 
 /// Issues for a repository: from its own issue tracker choice (Preferences > Issue Tracker), else its host.
+#[tauri::command]
+async fn issue_comments_page(path: String, gitlab_host: String, number: u64, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::Comment>>, String> {
+    blocking(move || read_jobs::scope(read_id, || {
+        let remote = remote_of(&path, &gitlab_host)?;
+        pagination::one_page(cursor, || hosting::issue_comments(&remote, number))
+    })).await?
+}
+
 #[tauri::command]
 async fn list_issues_page(path: String, gitlab_host: String, tracker: Option<hosting::Tracker>, cursor: Option<String>, read_id: Option<String>) -> Result<pagination::Page<Vec<hosting::Issue>>, String> {
     blocking(move || read_jobs::scope(read_id, || pagination::one_page(cursor, || match tracker.filter(|t| !t.kind.is_empty()) {
@@ -489,7 +559,7 @@ async fn integration_statuses(ids: Vec<String>) -> Result<Vec<hosting::ServiceSt
 async fn integration_sign_in(id: String, method: String) -> Result<String, String> {
     blocking(move || {
         let token = if method == "gh" { hosting::gh_cli_token()? } else { hosting::browser_sign_in(&id)? };
-        hosting::secret_set(&hosting::secret_name(&id), &token)?;
+        hosting::save_sign_in(&id, &token, method != "gh")?;
         hosting::sync_git_credentials("");
         hosting::whoami_id(&id)
     })
@@ -567,8 +637,49 @@ async fn cancel_pr_merge(path: String, gitlab_host: String, number: u64) -> Resu
 }
 
 #[tauri::command]
-async fn merge_pr(path: String, gitlab_host: String, number: u64, method: String) -> Result<(), String> {
-    blocking(move || hosting::merge_pr(&remote_of(&path, &gitlab_host)?, number, &method)).await?
+async fn merge_pr(path: String, gitlab_host: String, number: u64, method: String, expected: Option<String>, squash_message: Option<String>) -> Result<(), String> {
+    blocking(move || hosting::merge_pr(&remote_of(&path, &gitlab_host)?, number, &method, expected.as_deref(), squash_message.as_deref())).await?
+}
+
+#[tauri::command]
+async fn pull_review_data(path: String, gitlab_host: String, number: u64, expected: String, read_id: Option<String>) -> Result<hosting::ReviewData, String> {
+    blocking(move || read_jobs::scope(read_id, || hosting::review_data(&remote_of(&path, &gitlab_host)?, number, &expected))).await?
+}
+
+#[tauri::command]
+async fn submit_pull_review(path: String, gitlab_host: String, number: u64, expected: String, action: hosting::ReviewAction) -> Result<(), String> {
+    blocking(move || hosting::submit_review(&remote_of(&path, &gitlab_host)?, number, &expected, action)).await?
+}
+
+#[tauri::command]
+async fn delete_merged_source(path: String, gitlab_host: String, number: u64, expected: String, remote: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let engine = state.engine.clone();
+    blocking(move || {
+        let target = remote_of(&path, &gitlab_host)?;
+        let pr = hosting::merged_source(&target, number, &expected)?;
+        if !remote {
+            let result = engine.perform(&path, actions::Action::DeleteMergedLocal { name: pr.source, expected });
+            return if result.ok { Ok(()) } else { Err(result.message) };
+        }
+        let source = hosting::parse_remote(&pr.source_url, &gitlab_host)
+            .filter(|source| source.service == target.service && source.host == target.host)
+            .ok_or("The hosting service did not return a verified HTTPS source repository.")?;
+        let dir = Path::new(&path);
+        let reference = format!("refs/heads/{}", pr.source);
+        if !git::run(dir, &["check-ref-format", &reference]).ok { return Err("The source branch name is invalid.".into()); }
+        let head = git::run(dir, &["ls-remote", "--symref", "--", &pr.source_url, "HEAD"]);
+        if !head.ok { return Err(head.message()); }
+        let default = head.stdout.lines().find_map(|line| line.strip_prefix("ref: ").and_then(|line| line.split_once('\t')).filter(|(_, name)| *name == "HEAD").map(|(reference, _)| reference));
+        if default.is_none() || default == Some(reference.as_str()) {
+            return Err(format!("Could not confirm that {} is safe to delete from {}.", pr.source, source.web));
+        }
+        let guard = format!("--force-with-lease={reference}:{expected}");
+        let refspec = format!(":{reference}");
+        let operation = operation::lock_for(dir);
+        let _operation = operation.lock().unwrap_or_else(|error| error.into_inner());
+        let deleted = git::run(dir, &["push", &guard, "--", &pr.source_url, &refspec]);
+        if deleted.ok { Ok(()) } else { Err(deleted.message()) }
+    }).await?
 }
 
 #[tauri::command]
@@ -591,23 +702,36 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn ai_commit_message(path: String, sha: Option<String>, config: ai::AiConfig) -> Result<(String, String), String> {
-    blocking(move || ai::with_config(config, || ai::commit_message(Path::new(&path), sha.as_deref()))).await?
+async fn ai_file_preview(path: String, kind: ai_context::PreviewKind) -> Result<ai_context::Preview, String> {
+    blocking(move || ai_context::preview(Path::new(&path), kind)).await?
 }
 
 #[tauri::command]
-async fn ai_stash_message(path: String, config: ai::AiConfig) -> Result<String, String> {
-    blocking(move || ai::with_config(config, || ai::stash_message(Path::new(&path)))).await?
+async fn ai_commit_message(path: String, sha: Option<String>, config: ai::AiConfig, preview: Option<u32>, read_id: Option<String>) -> Result<(String, String), String> {
+    ai_blocking(read_id, move || {
+        let dir = Path::new(&path);
+        let files = ai_context::take_preview(dir, ai_context::PreviewKind::Commit, preview)?;
+        ai::with_config(config, || ai::commit_message(dir, sha.as_deref(), &files.text))
+    }).await?
 }
 
 #[tauri::command]
-async fn ai_explain_commit(path: String, sha: String, config: ai::AiConfig) -> Result<String, String> {
-    blocking(move || ai::with_config(config, || ai::explain_commit(Path::new(&path), &sha))).await?
+async fn ai_stash_message(path: String, config: ai::AiConfig, preview: Option<u32>, read_id: Option<String>) -> Result<String, String> {
+    ai_blocking(read_id, move || {
+        let dir = Path::new(&path);
+        let files = ai_context::take_preview(dir, ai_context::PreviewKind::Stash, preview)?;
+        ai::with_config(config, || ai::stash_message(dir, &files.text))
+    }).await?
 }
 
 #[tauri::command]
-async fn ai_explain_branch(path: String, branch: String, base: Option<String>, config: ai::AiConfig) -> Result<String, String> {
-    blocking(move || ai::with_config(config, || {
+async fn ai_explain_commit(path: String, sha: String, config: ai::AiConfig, read_id: Option<String>) -> Result<String, String> {
+    ai_blocking(read_id, move || ai::with_config(config, || ai::explain_commit(Path::new(&path), &sha))).await?
+}
+
+#[tauri::command]
+async fn ai_explain_branch(path: String, branch: String, base: Option<String>, config: ai::AiConfig, read_id: Option<String>) -> Result<String, String> {
+    ai_blocking(read_id, move || ai::with_config(config, || {
         let base = base.or_else(|| extras::default_target(Path::new(&path))).ok_or("No branch to compare with")?;
         ai::explain_branch(Path::new(&path), &branch, &base)
     }))
@@ -620,8 +744,8 @@ fn set_ai_config(config: ai::AiConfig) {
 }
 
 #[tauri::command]
-async fn ai_test_connection(config: ai::AiConfig) -> Result<String, String> {
-    blocking(move || ai::with_config(config, ai::test_connection)).await?
+async fn ai_test_connection(config: ai::AiConfig, read_id: Option<String>) -> Result<String, String> {
+    ai_blocking(read_id, move || ai::with_config(config, ai::test_connection)).await?
 }
 
 #[tauri::command]
@@ -636,18 +760,22 @@ async fn ai_find_program(provider: String) -> Result<ai_cli::DetectedProgram, St
 }
 
 #[tauri::command]
-async fn ai_pull_request(path: String, source: String, target: String, config: ai::AiConfig) -> Result<(String, String), String> {
-    blocking(move || ai::with_config(config, || ai::pull_request_text(Path::new(&path), &source, &target))).await?
+async fn ai_pull_request(path: String, source: String, target: String, config: ai::AiConfig, read_id: Option<String>) -> Result<(String, String), String> {
+    ai_blocking(read_id, move || ai::with_config(config, || ai::pull_request_text(Path::new(&path), &source, &target))).await?
 }
 
 #[tauri::command]
-async fn ai_resolve_conflict(base: String, ours: String, theirs: String, file: String, config: ai::AiConfig) -> Result<String, String> {
-    blocking(move || ai::with_config(config, || ai::resolve_conflict(&base, &ours, &theirs, &file))).await?
+async fn ai_resolve_conflict(base: String, ours: String, theirs: String, file: String, config: ai::AiConfig, read_id: Option<String>) -> Result<String, String> {
+    ai_blocking(read_id, move || ai::with_config(config, || ai::resolve_conflict(&base, &ours, &theirs, &file))).await?
 }
 
 #[tauri::command]
-async fn ai_compose(path: String, config: ai::AiConfig) -> Result<Vec<ai::ComposedCommit>, String> {
-    blocking(move || ai::with_config(config, || ai::compose(Path::new(&path)))).await?
+async fn ai_compose(path: String, config: ai::AiConfig, preview: Option<u32>, read_id: Option<String>) -> Result<Vec<ai::ComposedCommit>, String> {
+    ai_blocking(read_id, move || {
+        let dir = Path::new(&path);
+        let files = ai_context::take_preview(dir, ai_context::PreviewKind::Compose, preview)?;
+        ai::with_config(config, || ai::compose(dir, files))
+    }).await?
 }
 
 /// Save a patch (uncommitted changes when `shas` is empty, else those commits) to a file the person picks.
@@ -746,8 +874,18 @@ async fn repo_summary(path: String) -> Result<extras::RepoSummary, String> {
 }
 
 #[tauri::command]
-async fn pr_template(path: String) -> Result<Option<String>, String> {
-    blocking(move || extras::pr_template(Path::new(&path))).await
+async fn pr_default_target(path: String, branch: String, read_id: Option<String>) -> Result<Option<String>, String> {
+    read_blocking(read_id, move || extras::default_branch_for(Path::new(&path), &branch).map(|(_, branch)| branch)).await
+}
+
+#[tauri::command]
+async fn pr_templates(path: String, read_id: Option<String>) -> Result<Vec<extras::PullRequestTemplate>, String> {
+    read_blocking(read_id, move || extras::pr_templates(Path::new(&path))).await
+}
+
+#[tauri::command]
+async fn range_diff(path: String, before: String, after: String, read_id: Option<String>) -> Result<String, String> {
+    read_blocking(read_id, move || extras::range_diff(Path::new(&path), &before, &after)).await?
 }
 
 #[tauri::command]
@@ -795,6 +933,27 @@ async fn sample_repo() -> Result<String, String> {
 #[tauri::command]
 async fn conflict_sample() -> Result<String, String> {
     blocking(|| sample::ensure_conflict_sample().map(|p| p.to_string_lossy().into_owned())).await?
+}
+
+#[tauri::command]
+async fn discarded_changes(path: String, read_id: Option<String>) -> Result<Vec<discard_backups::DiscardBackup>, String> {
+    read_blocking(read_id, move || discard_backups::list(Path::new(&path))).await?
+}
+
+#[tauri::command]
+async fn validate_ref_name(path: String, kind: String, name: String, read_id: Option<String>) -> Result<(), String> {
+    read_blocking(read_id, move || actions::validate_ref_name(Path::new(&path), &kind, &name)).await?
+}
+
+#[tauri::command]
+async fn head_is_upstream(path: String, sha: String, read_id: Option<String>) -> Result<bool, String> {
+    read_blocking(read_id, move || {
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Ok(false); }
+        let dir = Path::new(&path);
+        let upstream = git::run(dir, &["rev-parse", "--verify", "@{upstream}"]);
+        if !upstream.ok { return Ok(false); }
+        Ok(git::run(dir, &["merge-base", "--is-ancestor", &sha, upstream.stdout.trim()]).ok)
+    }).await?
 }
 
 #[tauri::command]
@@ -858,6 +1017,8 @@ struct CloneOptions {
     sparse_paths: Option<Vec<String>>,
     /// Leave file contents out of the first download (--filter blob:none).
     blobless: Option<bool>,
+    folder_name: Option<String>,
+    initialize_submodules: Option<bool>,
 }
 
 /// The `git clone` arguments in a fixed order: branch, depth, progress, since, custom flags, sparse, filter.
@@ -873,6 +1034,7 @@ fn clone_args(o: &CloneOptions) -> Result<Vec<String>, String> {
     if let Some(since) = o.since.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
         a.extend(["--shallow-since".to_string(), since.to_string()]);
     }
+    if o.initialize_submodules == Some(true) { a.push("--recurse-submodules".into()); }
     if let Some(flags) = o.custom_flags.as_deref() {
         a.extend(external::argument_fields(flags)?);
     }
@@ -885,26 +1047,97 @@ fn clone_args(o: &CloneOptions) -> Result<Vec<String>, String> {
     Ok(a)
 }
 
+fn valid_clone_folder(name: &str) -> bool {
+    !name.is_empty() && !matches!(name, "." | "..") && !name.ends_with([' ', '.']) &&
+        !name.chars().any(|character| character.is_control() || matches!(character, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')) &&
+        (!cfg!(windows) || {
+            let base = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+            !matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") &&
+                !["COM", "LPT"].iter().any(|prefix| base.strip_prefix(prefix).is_some_and(|suffix| matches!(suffix, "1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"|"¹"|"²"|"³")))
+        })
+}
+
+fn clone_folder_base(url: &str) -> String {
+    let parsed = url.contains("://").then(|| tauri::Url::parse(url).ok()).flatten();
+    let path = parsed.as_ref().map(|url| url.path()).unwrap_or(url);
+    let part = path.trim_end_matches(['/', '\\']).rsplit(['/', '\\', ':']).next().unwrap_or_default();
+    let name = part.strip_suffix(".git").unwrap_or(part);
+    if valid_clone_folder(name) { name.into() } else { "repository".into() }
+}
+
+fn available_clone_folder(parent: &Path, base: &str) -> Result<String, String> {
+    for n in 1..=1000 {
+        let name = if n == 1 { base.to_owned() } else { format!("{base}-{n}") };
+        match std::fs::symlink_metadata(parent.join(&name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(name),
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {}
+        }
+    }
+    Err("No available clone folder name was found. Choose a different name or parent folder.".into())
+}
+
+#[tauri::command]
+async fn suggest_clone_folder(url: String, parent: String) -> Result<String, String> {
+    blocking(move || available_clone_folder(Path::new(&parent), &clone_folder_base(url.trim()))).await?
+}
+
 #[tauri::command]
 async fn clone_repo(url: String, parent: String, options: Option<CloneOptions>, state: State<'_, AppState>) -> Result<String, String> {
+    let url = url.trim().to_owned();
+    if url.is_empty() || url.starts_with('-') || url.contains(['\r', '\n', '\0']) {
+        return Err("Enter a repository URL or path, without command options.".into());
+    }
     let engine = state.engine.clone();
     let parent = PathBuf::from(parent);
     tokio::fs::create_dir_all(&parent).await.map_err(err)?;
     blocking(move || {
         let opts = options.unwrap_or_default();
-        let name = url.trim_end_matches('/').rsplit(['/', '\\', ':']).next().unwrap_or("repo").trim_end_matches(".git").to_string();
+        let base = clone_folder_base(&url);
+        let name = match opts.folder_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) if !valid_clone_folder(name) => return Err("Use a single valid folder name inside the selected parent folder.".into()),
+            Some(name) => {
+                let available = available_clone_folder(&parent, name)?;
+                if available != name { return Err(format!("Folder {name} already exists. Try {available}.")); }
+                name.to_owned()
+            }
+            None => available_clone_folder(&parent, &base)?,
+        };
         let dest = parent.join(&name);
         let dest_s = dest.to_string_lossy().into_owned();
         let mut args: Vec<String> = vec!["clone".into()];
-        args.extend(clone_args(&opts)?);
-        args.push(url.trim().to_string());
+        let clone_options = clone_args(&opts)?;
+        let no_worktree = clone_options.iter().any(|flag| matches!(flag.as_str(), "--bare" | "--mirror" | "--no-checkout" | "-n"));
+        let defer_checkout = !no_worktree && !manage::git_lfs_available(&parent);
+        args.extend(clone_options.iter().cloned());
+        if defer_checkout { args.push("--no-checkout".into()); }
+        args.extend(["--".into(), url]);
         args.push(dest_s);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let o = engine.job("clone", "clone", &parent, &refs);
         if !o.ok {
             return Err(o.message());
         }
-        if opts.sparse == Some(true) {
+        if defer_checkout {
+            if manage::tree_uses_lfs(&dest, "HEAD")? {
+                return Err(format!("{} The Git history was downloaded to {}.", manage::LFS_REQUIRED, dest.display()));
+            }
+            let head = git::run(&dest, &["rev-parse", "--verify", "HEAD"]);
+            if head.ok {
+                let out = engine.git(&dest, &["checkout", "-q", "HEAD"]);
+                if !out.ok { return Err(out.message()); }
+            }
+            let requested: Vec<_> = clone_options.iter().filter_map(|arg| arg.strip_prefix("--recurse-submodules=")).collect();
+            if opts.initialize_submodules == Some(true) || !requested.is_empty() || clone_options.iter().any(|arg| arg == "--recurse-submodules" || arg == "--recursive") {
+                let mut update = vec!["submodule", "update", "--init", "--recursive"];
+                if clone_options.iter().any(|arg| arg == "--shallow-submodules") { update.push("--depth=1"); }
+                if clone_options.iter().any(|arg| arg == "--remote-submodules") { update.push("--remote"); }
+                if !requested.is_empty() { update.push("--"); update.extend(requested); }
+                let out = engine.job("clone", "submodules", &dest, &update);
+                if !out.ok { return Err(format!("The repository was cloned, but its submodules could not be initialized: {}", out.message())); }
+            }
+        }
+        if opts.sparse == Some(true) && !no_worktree {
             // Only the chosen paths are checked out; with none, only the files in the top folder.
             let mut set: Vec<String> = vec!["sparse-checkout".into(), "set".into(), "--no-cone".into()];
             let paths: Vec<String> = opts.sparse_paths.unwrap_or_default().into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
@@ -925,8 +1158,8 @@ async fn clone_repo(url: String, parent: String, options: Option<CloneOptions>, 
 
 /// File > Open External Terminal (Preferences > External Tools > Terminal).
 #[tauri::command]
-fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: Option<String>) -> Result<(), String> {
-    external::open_terminal(&path, tool.as_deref().unwrap_or("default"), exe.as_deref().unwrap_or(""), args.as_deref().unwrap_or(""))
+async fn open_terminal(path: String, tool: Option<String>, exe: Option<String>, args: Option<String>) -> Result<(), String> {
+    blocking(move || external::open_terminal(&path, tool.as_deref().unwrap_or("default"), exe.as_deref().unwrap_or(""), args.as_deref().unwrap_or(""))).await?
 }
 
 #[tauri::command]
@@ -948,14 +1181,12 @@ fn open_default(path: String, file: String) -> Result<(), String> {
 
 /// File menu "Show in File Manager": opens the folder with the file selected (its folder when the file is gone).
 #[tauri::command]
-fn reveal_file(path: String, file: String) -> Result<(), String> {
-    let p = files::repo_file(Path::new(&path), &file)?;
-    // Opens the folder with the file selected (SHOpenFolderAndSelectItems). For a file
-    // that is gone, GitCraft opens the folder it was in instead.
-    if !p.exists() {
-        return shell::open_path(p.parent().unwrap_or(Path::new(&path)));
-    }
-    shell::show_item_in_folder(&p)
+async fn reveal_file(path: String, file: String) -> Result<(), String> {
+    blocking(move || {
+        let p = files::repo_file(Path::new(&path), &file)?;
+        if !p.exists() { return shell::open_path(p.parent().unwrap_or(Path::new(&path))); }
+        shell::show_item_in_folder(&p)
+    }).await?
 }
 
 /// File menu "Copy file contents to clipboard": the working copy, or the file as it was in `rev`.
@@ -968,31 +1199,136 @@ fn settings_file() -> PathBuf {
     sample::data_dir().join("settings.json")
 }
 
-#[tauri::command]
-fn load_settings(state: State<'_, AppState>) -> serde_json::Value {
-    if state.screenshot.is_some() {
-        return serde_json::Value::Null; // pictures always start from the same state
-    }
-    std::fs::read_to_string(settings_file())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null)
+fn window_settings_file(label: &str) -> PathBuf {
+    if label == "main" { settings_file() }
+    else { sample::data_dir().join("windows").join(format!("{label}.json")) }
 }
 
 #[tauri::command]
-fn save_settings(settings: serde_json::Value, state: State<'_, AppState>) -> Result<(), String> {
-    if state.screenshot.is_some() {
-        return Ok(());
+fn load_settings(state: State<'_, AppState>, window: tauri::WebviewWindow) -> Result<serde_json::Value, String> {
+    if state.screenshot.is_some() { return Ok(serde_json::Value::Null); }
+    let file = window_settings_file(window.label());
+    if window.label() != "main" && !file.exists() && !file.with_extension("json.bak").exists() {
+        let desktop = settings_file::load(&settings_file())?;
+        return Ok(serde_json::json!({ "settings": desktop["settings"], "profiles": desktop["profiles"], "activeProfile": desktop["activeProfile"] }));
     }
-    let f = settings_file();
-    if let Some(d) = f.parent() {
-        std::fs::create_dir_all(d).map_err(err)?;
+    settings_file::load(&file)
+}
+
+#[tauri::command]
+fn save_settings(settings: serde_json::Value, state: State<'_, AppState>, window: tauri::WebviewWindow) -> Result<(), String> {
+    if state.screenshot.is_some() { return Ok(()); }
+    settings_file::save(&window_settings_file(window.label()), &settings)
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum LaunchIntent {
+    Repository { path: String },
+    Clone { url: String },
+}
+
+fn clone_launch(value: &str) -> Option<LaunchIntent> {
+    if value.len() > 8192 || value.chars().any(char::is_control) { return None; }
+    let launch = tauri::Url::parse(value).ok()?;
+    if launch.scheme() != "gitcraft" || launch.host_str() != Some("clone") || !matches!(launch.path(), "" | "/") ||
+        launch.port().is_some() || !launch.username().is_empty() || launch.password().is_some() || launch.fragment().is_some() {
+        return None;
     }
-    // Replace the settings only after the complete JSON is written, so an interrupted save
-    // cannot truncate the last usable preferences file.
-    let pending = f.with_extension("json.tmp");
-    std::fs::write(&pending, serde_json::to_string_pretty(&settings).map_err(err)?).map_err(err)?;
-    std::fs::rename(pending, f).map_err(err)
+    let mut fields = launch.query_pairs();
+    let (name, value) = fields.next()?;
+    if name != "url" || fields.next().is_some() || value.chars().any(char::is_control) { return None; }
+    let url = tauri::Url::parse(&value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() ||
+        url.password().is_some() || url.query().is_some() || url.fragment().is_some() || matches!(url.path(), "" | "/") {
+        return None;
+    }
+    Some(LaunchIntent::Clone { url: url.into() })
+}
+
+fn startup_paths(args: &[String], cwd: &Path) -> Vec<LaunchIntent> {
+    let args = args.get(1..).unwrap_or_default();
+    let args = if args.first().is_some_and(|arg| arg == "--") { &args[1..] } else { args };
+    let Some(argument) = args.first().filter(|arg| !arg.starts_with('-')) else { return Vec::new(); };
+    if argument.starts_with("gitcraft:") { return clone_launch(argument).into_iter().collect(); }
+    let argument = explorer_argument(argument);
+    let path = cwd.join(argument.as_ref());
+    if path.is_dir() { vec![LaunchIntent::Repository { path: path.to_string_lossy().into_owned() }] } else { Vec::new() }
+}
+
+/// Explorer passes the folder as `"%1"`. For a drive root that is `"C:\"`, and Windows argument
+/// parsing reads the `\"` as an escaped quote, so the program receives `C:"`. Restore the separator.
+fn explorer_argument(argument: &str) -> std::borrow::Cow<'_, str> {
+    match argument.strip_suffix('"') {
+        Some(folder) if cfg!(windows) => std::borrow::Cow::Owned(format!("{folder}\\")),
+        _ => std::borrow::Cow::Borrowed(argument),
+    }
+}
+
+fn deliver_launch(app: &tauri::AppHandle, paths: Vec<LaunchIntent>) {
+    let target = app.get_webview_window("main").or_else(|| app.webview_windows().into_values().next());
+    let Some(window) = target else { return; };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    if paths.is_empty() { return; }
+    if let Some(state) = app.try_state::<AppState>() {
+        state.launch_paths.lock().unwrap_or_else(|error| error.into_inner())
+            .entry(window.label().to_owned()).or_default().extend(paths);
+        let _ = window.emit_to(tauri::EventTarget::webview_window(window.label()), "open-launch-paths", ());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn feature_clone_launch_requires_a_reviewable_web_url() {
+    assert!(matches!(clone_launch("gitcraft://clone?url=https%3A%2F%2Fexample.invalid%2Fteam%2Fproject.git"), Some(LaunchIntent::Clone { .. })));
+    for invalid in [
+        "gitcraft://clone?url=file%3A%2F%2F%2Fproject",
+        "gitcraft://clone?url=https%3A%2F%2Fname%40example.invalid%2Fproject",
+        "gitcraft://clone?url=https%3A%2F%2Fexample.invalid%2Fproject%3Ftoken%3Dsecret",
+        "gitcraft://clone?url=https%3A%2F%2Fexample.invalid%2Fproject&url=other",
+    ] { assert!(clone_launch(invalid).is_none()); }
+}
+
+#[cfg(test)]
+#[test]
+fn explorer_drive_roots_keep_their_separator() {
+    if cfg!(windows) {
+        assert_eq!(explorer_argument("C:\""), "C:\\");
+        assert_eq!(explorer_argument("D:\\repo\""), "D:\\repo\\");
+    } else {
+        assert_eq!(explorer_argument("folder\""), "folder\"");
+    }
+    assert_eq!(explorer_argument(r"C:\repo"), r"C:\repo");
+}
+
+#[tauri::command]
+async fn open_repository_window(path: String, state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    if state.screenshot.is_some() { return Err("Repository windows are unavailable in verification mode.".into()); }
+    let root = blocking(move || git::repo_root(Path::new(&path))).await?
+        .ok_or("Choose the folder of an existing Git repository.")?;
+    let path = root.to_string_lossy().into_owned();
+    let label = format!("repository-{}", files::content_token(Some(path.as_bytes())));
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        return window.set_focus().map_err(err);
+    }
+    state.launch_paths.lock().unwrap_or_else(|error| error.into_inner())
+        .insert(label.clone(), vec![LaunchIntent::Repository { path }]);
+    let result = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title(format!("{} – GitCraft", git::repo_name(&root)))
+        .inner_size(930.0, 669.0).min_inner_size(760.0, 520.0).center().build();
+    if result.is_err() {
+        state.launch_paths.lock().unwrap_or_else(|error| error.into_inner()).remove(&label);
+    }
+    result.map(|_| ()).map_err(err)
+}
+
+#[tauri::command]
+fn take_launch_paths(state: State<'_, AppState>, window: tauri::WebviewWindow) -> Vec<LaunchIntent> {
+    state.launch_paths.lock().unwrap_or_else(|error| error.into_inner()).remove(window.label()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1016,37 +1352,38 @@ fn cancel_read(id: String) { read_jobs::cancel(&id); }
 
 /// Watch a repository and tell the window when something changed (rules in src/watch.rs).
 #[tauri::command]
-async fn watch_repo(path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn watch_repo(path: String, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     let generation = Arc::new(());
+    let key = (window.label().to_owned(), path.clone());
     static NEXT_WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let read_id = format!("watch-{}", NEXT_WATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let watchers = state.watchers.clone();
     {
         let mut map = watchers.lock().unwrap();
-        if map.contains_key(&path) { return Ok(()); }
-        map.insert(path.clone(), WatchSlot { read_id: read_id.clone(), generation: generation.clone(), watcher: None });
+        if map.contains_key(&key) { return Ok(()); }
+        map.insert(key.clone(), WatchSlot { read_id: read_id.clone(), generation: generation.clone(), watcher: None });
     }
     blocking(move || {
-        let key = path.clone();
+        let payload_path = path.clone();
         let result = read_jobs::scope(Some(read_id), || watch::start(Path::new(&path), move |full| {
-            let _ = app.emit("repo-changed", serde_json::json!({ "path": key, "full": full }));
+            let _ = window.emit_to(tauri::EventTarget::webview_window(window.label()), "repo-changed", serde_json::json!({ "path": payload_path, "full": full }));
         }));
         let mut map = watchers.lock().unwrap();
-        if !map.get(&path).is_some_and(|slot| Arc::ptr_eq(&slot.generation, &generation)) {
+        if !map.get(&key).is_some_and(|slot| Arc::ptr_eq(&slot.generation, &generation)) {
             drop(map);
             drop(result); // stop a superseded watcher outside the map lock
             return Ok(());
         }
         match result {
-            Ok(watcher) => { map.get_mut(&path).unwrap().watcher = Some(watcher); Ok(()) }
-            Err(error) => { map.remove(&path); Err(error) }
+            Ok(watcher) => { map.get_mut(&key).unwrap().watcher = Some(watcher); Ok(()) }
+            Err(error) => { map.remove(&key); Err(error) }
         }
     }).await?
 }
 
 #[tauri::command]
-async fn unwatch_repo(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let removed = state.watchers.lock().unwrap().remove(&path);
+async fn unwatch_repo(path: String, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let removed = state.watchers.lock().unwrap_or_else(|error| error.into_inner()).remove(&(window.label().to_owned(), path));
     if let Some(slot) = &removed { if slot.watcher.is_none() { read_jobs::cancel(&slot.read_id); } }
     blocking(move || drop(removed)).await
 }
@@ -1059,12 +1396,14 @@ fn screenshot_ready(window: tauri::WebviewWindow, state: State<'_, AppState>, ap
     Ok(())
 }
 
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn take_and_exit(window: &tauri::WebviewWindow, out: &Path, app: &tauri::AppHandle) {
     #[cfg(windows)]
     let res = match window.hwnd() {
         Ok(h) => shot::capture_window(h.0 as isize, out),
         Err(e) => Err(e.to_string()),
     };
+
     #[cfg(not(windows))]
     let res = shot::capture_window(0, out);
     match res {
@@ -1075,9 +1414,13 @@ fn take_and_exit(window: &tauri::WebviewWindow, out: &Path, app: &tauri::AppHand
 }
 
 fn main() {
+    if accounts::handle_ssh_askpass() { return; }
+    #[cfg(target_os = "macos")]
+    external::add_macos_tool_paths();
     let args: Vec<String> = std::env::args().collect();
-    let shot_view = args.iter().position(|a| a == "--shot-view").and_then(|i| args.get(i + 1)).cloned();
-    let screenshot = args.iter().position(|a| a == "--screenshot").and_then(|i| args.get(i + 1)).map(|p| {
+    let verification = cfg!(any(debug_assertions, feature = "verification"));
+    let shot_view = args.iter().position(|a| a == "--shot-view").filter(|_| verification).and_then(|i| args.get(i + 1)).cloned();
+    let screenshot = args.iter().position(|a| a == "--screenshot").filter(|_| verification).and_then(|i| args.get(i + 1)).map(|p| {
         let p = PathBuf::from(p);
         if p.is_absolute() {
             p
@@ -1086,11 +1429,50 @@ fn main() {
         }
     });
 
-    tauri::Builder::default()
+    if screenshot.is_none() { diagnostics::install(); }
+    let builder = tauri::Builder::default();
+    let builder = if screenshot.is_none() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            deliver_launch(app, startup_paths(&args, Path::new(&cwd)));
+        }))
+    } else { builder };
+    let builder = if screenshot.is_none() {
+        use tauri_plugin_window_state::StateFlags;
+        builder.plugin(tauri_plugin_window_state::Builder::default()
+            .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED).build())
+    } else { builder };
+    let launch_paths = startup_paths(&args, &std::env::current_dir().unwrap_or_default());
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = if screenshot.is_none() { builder.plugin(tauri_plugin_deep_link::init()) } else { builder };
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Arc::new(Mutex::new(HashMap::new())), terminals: terminal::Terminals::default() })
+        .manage(AppState { engine: Arc::new(Engine::default()), screenshot: screenshot.clone(), shot_view, watchers: Arc::new(Mutex::new(HashMap::new())), terminals: terminal::Terminals::default(), launch_paths: Mutex::new(HashMap::from([("main".into(), launch_paths)])) })
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) { return; }
+            let Some(state) = window.try_state::<AppState>() else { return; };
+            let mut watchers = state.watchers.lock().unwrap_or_else(|error| error.into_inner());
+            let stale: Vec<_> = watchers.keys().filter(|(label, _)| label == window.label()).cloned().collect();
+            let removed: Vec<_> = stale.into_iter().filter_map(|key| watchers.remove(&key)).collect();
+            drop(watchers);
+            for slot in &removed {
+                if slot.watcher.is_none() { read_jobs::cancel(&slot.read_id); }
+            }
+            tauri::async_runtime::spawn_blocking(move || drop(removed));
+        })
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            if screenshot.is_none() {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                finder_services::register(app.handle().clone());
+                let app_handle = app.handle().clone();
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    deliver_launch(&app_handle, urls.iter().filter_map(|url| clone_launch(url.as_str())).collect());
+                }
+                app.deep_link().on_open_url(move |event| {
+                    deliver_launch(&app_handle, event.urls().iter().filter_map(|url| clone_launch(url.as_str())).collect());
+                });
+            }
             // Long jobs report progress to the window ("job-progress" events).
             let handle = app.handle().clone();
             let engine = app.state::<AppState>().engine.clone();
@@ -1101,7 +1483,7 @@ fn main() {
             let args: Vec<String> = std::env::args().collect();
             if let Some((w, h)) = args
                 .iter()
-                .position(|a| a == "--shot-size")
+                .position(|a| a == "--shot-size").filter(|_| verification)
                 .and_then(|i| args.get(i + 1))
                 .and_then(|s| s.split_once('x'))
                 .and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?)))
@@ -1126,6 +1508,12 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             launch_options,
+            check_git_version,
+            copy_diagnostics,
+            commit_signature,
+            repo_reflog,
+            history_fetch_info,
+            commit_template,
             open_repo,
             history_page,
             commit_files,
@@ -1144,6 +1532,7 @@ fn main() {
             read_ssh_public_key,
             gitflow_config,
             update_config,
+            ai_file_preview,
             ai_commit_message,
             ai_stash_message,
             ai_explain_commit,
@@ -1159,7 +1548,9 @@ fn main() {
             pick_patch_file,
             conflict_check,
             agent_sessions,
-            pr_template,
+            pr_templates,
+            range_diff,
+            pr_default_target,
             repo_summary,
             set_runtime_settings,
             tool_versions,
@@ -1177,10 +1568,12 @@ fn main() {
             set_secret,
             repo_remote,
             list_prs_page,
+            commit_checks,
             list_prs,
             pr_details,
             pr_checkout_target,
             list_issues_page,
+            issue_comments_page,
             list_issues,
             pr_comments_page,
             launchpad_page,
@@ -1188,6 +1581,9 @@ fn main() {
             pr_comment,
             create_pr,
             merge_pr,
+            delete_merged_source,
+            pull_review_data,
+            submit_pull_review,
             cancel_pr_merge,
             launchpad,
             create_issue,
@@ -1227,15 +1623,21 @@ fn main() {
             activity_log_snapshot,
             sample_repo,
             last_commit_message,
+            discarded_changes,
+            head_is_upstream,
+            validate_ref_name,
             pick_folder,
             init_repo,
             clone_repo,
+            suggest_clone_folder,
             open_terminal,
             open_file_manager,
             open_default,
             reveal_file,
             file_text,
             load_settings,
+            take_launch_paths,
+            open_repository_window,
             save_settings,
             desktop_validation_state,
             desktop_validation_accounts,
@@ -1263,6 +1665,7 @@ mod clone_tests {
             sparse: Some(true),
             sparse_paths: None,
             blobless: Some(true),
+            ..Default::default()
         };
         assert_eq!(
             clone_args(&all).unwrap(),

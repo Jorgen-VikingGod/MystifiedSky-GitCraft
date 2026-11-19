@@ -20,7 +20,7 @@ pub(crate) fn with_parameter(url: &str, key: &str, value: &str) -> String {
 
 fn array_key(value: &Value) -> Option<&str> {
     if value.is_array() { return Some(""); }
-    ["values", "value", "items", "issues"].into_iter().find(|key| value[*key].is_array())
+    ["values", "value", "items", "issues", "check_runs"].into_iter().find(|key| value[*key].is_array())
 }
 
 fn next(url: &str, page: &HttpPage, count: usize) -> Option<String> {

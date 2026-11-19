@@ -77,6 +77,7 @@ pub struct RepoData {
     pub head_branch: Option<String>,
     pub head_sha: String,
     pub status: WorkStatus,
+    pub bisect: Option<BisectProgress>,
     pub state_note: Option<String>, // "merging", "rebasing" ...
     /// More commits exist beyond the ones loaded (lazy loading in the graph).
     pub has_more: bool,
@@ -86,6 +87,27 @@ pub struct RepoData {
     pub conflict_labels: Option<(String, String)>,
     #[serde(skip)]
     pub index_of: HashMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BisectProgress {
+    pub tested: usize,
+    pub first_bad: Option<String>,
+}
+
+pub fn bisect_progress(gitdir: &Path) -> Option<BisectProgress> {
+    use std::io::Read;
+    if !gitdir.join("BISECT_START").is_file() { return None; }
+    let mut text = String::new();
+    if let Ok(log) = std::fs::File::open(gitdir.join("BISECT_LOG")) {
+        let _ = log.take(256 * 1024).read_to_string(&mut text);
+    }
+    let tested = text.lines().filter(|line| {
+        ["git bisect good ", "git bisect bad ", "git bisect skip "].iter().any(|prefix| line.starts_with(prefix))
+    }).count();
+    let first_bad = text.lines().filter_map(|line| line.strip_prefix("# first bad commit: [")
+        .and_then(|line| line.split_once(']')).map(|(sha, _)| sha)).rfind(|sha| matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).map(str::to_owned);
+    Some(BisectProgress { tested, first_bad })
 }
 
 /// One finished git command, kept for the activity log.
@@ -185,6 +207,29 @@ pub fn credential_env(tokens: &[(String, String, String)]) -> Vec<(String, Strin
     env
 }
 
+pub fn check_version(program: &str) -> Result<(), String> {
+    let program = if program.trim().is_empty() { "git" } else { program.trim() };
+    let mut command = Command::new(program);
+    command.arg("--version");
+    english_diagnostics(&mut command);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = crate::read_jobs::run_bounded(command, None, std::time::Duration::from_secs(5), "Git version check timed out.");
+    const REQUIREMENT: &str = "GitCraft requires Git 2.38 or newer.";
+    if !output.ok {
+        return Err(format!("{REQUIREMENT} Git could not start. Check Preferences > Experimental > Git Executable."));
+    }
+    let version = output.stdout.trim().strip_prefix("git version ").unwrap_or_default();
+    let mut parts = version.split('.');
+    let numbers = parts.next().and_then(|major| major.parse::<u32>().ok())
+        .zip(parts.next().and_then(|minor| minor.parse::<u32>().ok()));
+    match numbers {
+        Some(installed) if installed >= (2, 38) => Ok(()),
+        Some(_) => Err(format!("{REQUIREMENT} The configured executable reports Git {version}.")),
+        None => Err(format!("{REQUIREMENT} The configured executable did not report a Git version.")),
+    }
+}
+
 pub fn git_cmd(dir: &Path) -> Command {
     // Preferences > Experimental > Git Executable, and SSH > private key (when the SSH agent isn't used).
     let rt = crate::prefs::runtime();
@@ -193,53 +238,121 @@ pub fn git_cmd(dir: &Path) -> Command {
     if let Some(ssh) = crate::prefs::ssh_command(&rt) {
         c.env("GIT_SSH_COMMAND", ssh);
     }
-    if let Ok(t) = HOST_TOKENS.read() {
-        if !t.is_empty() {
-            c.envs(credential_env(&t));
-        }
-    }
+    english_diagnostics(&mut c);
     c.env("GIT_TERMINAL_PROMPT", "0");
     c.env("GIT_EDITOR", "true");
     c.env("GIT_SEQUENCE_EDITOR", "true");
     #[cfg(windows)]
-    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    {
+        // Windows Git cannot see Linux permission bits through \\wsl$ shares. A repository created
+        // inside WSL keeps core.fileMode=true, so host Git would otherwise stage every executable
+        // script as a mode change to 100644. Keep the modes already recorded in the index.
+        if wsl_location(dir).is_some() { c.args(["-c", "core.fileMode=false"]); }
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     c
 }
 
+pub(crate) fn english_diagnostics(command: &mut Command) {
+    if let Some(locale) = std::env::var_os("LC_ALL").filter(|locale| !locale.is_empty()) {
+        command.env_remove("LC_ALL").env("LC_CTYPE", locale);
+    }
+    command.env("LC_MESSAGES", "C").env("LANGUAGE", "C");
+}
+
+fn command_args<'a>(mut args: &'a [&'a str]) -> &'a [&'a str] {
+    while let Some((first, rest)) = args.split_first() {
+        if !first.starts_with('-') { break; }
+        args = if matches!(*first, "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env") {
+            rest.get(1..).unwrap_or_default()
+        } else { rest };
+    }
+    args
+}
+
+fn uses_network_credentials(args: &[&str]) -> bool {
+    matches!(command_args(args),
+        ["fetch" | "pull" | "push" | "clone" | "ls-remote", ..]
+            | ["submodule", "update" | "add", ..]
+            | ["lfs", "fetch" | "pull" | "push" | "lock" | "unlock" | "locks", ..])
+}
+
+#[cfg(windows)]
+pub(crate) fn wsl_location(dir: &Path) -> Option<(&str, String)> {
+    use std::path::{Component, Prefix};
+    let mut components = dir.components();
+    let Component::Prefix(prefix) = components.next()? else { return None; };
+    let (server, distro) = match prefix.kind() {
+        Prefix::UNC(server, distro) | Prefix::VerbatimUNC(server, distro) => (server.to_str()?, distro.to_str()?),
+        _ => return None,
+    };
+    if !(server.eq_ignore_ascii_case("wsl$") || server.eq_ignore_ascii_case("wsl.localhost")) ||
+        distro.is_empty() || distro.starts_with('-') || distro.chars().any(char::is_control) {
+        return None;
+    }
+    let mut linux = String::new();
+    for component in components {
+        if let Component::Normal(part) = component {
+            linux.push('/');
+            linux.push_str(part.to_str()?);
+        } else if component != Component::RootDir { return None; }
+    }
+    if linux.is_empty() { linux.push('/'); }
+    Some((distro, linux))
+}
+
+#[cfg(windows)]
+fn wsl_read_command(dir: &Path, args: &[&str]) -> Option<Command> {
+    let operation = command_args(args).first().copied()?;
+    // These reads use Git objects or repo-relative paths. Operations that pass
+    // Windows paths, editor programs or credentials use the configured host Git.
+    if !matches!(operation, "status" | "log" | "show" | "diff" | "ls-files" | "for-each-ref" | "cat-file" | "rev-list" | "blame" | "check-ignore") ||
+        args.iter().any(|arg| Path::new(arg).is_absolute() || arg.contains(":/") || arg.contains(":\\")) {
+        return None;
+    }
+    let (distro, linux) = wsl_location(dir)?;
+    let system = std::env::var_os("SystemRoot")?;
+    let mut command = Command::new(Path::new(&system).join("System32/wsl.exe"));
+    command.args(["--distribution", distro, "--cd", &linux, "--exec", "env", "LC_MESSAGES=C", "LANGUAGE=C",
+        "GIT_TERMINAL_PROMPT=0", "git", "--no-optional-locks"]).args(args).creation_flags(0x0800_0000);
+    Some(command)
+}
+
+pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    if let Some(command) = wsl_read_command(dir, args) { return command; }
+    let mut command = git_cmd(dir);
+    command.args(args);
+    if uses_network_credentials(args) {
+        let tokens = HOST_TOKENS.read().unwrap_or_else(|error| error.into_inner());
+        command.envs(credential_env(&tokens));
+    }
+    command
+}
+
 pub fn run(dir: &Path, args: &[&str]) -> GitOut {
-    let verb = args.iter().find(|arg| !arg.starts_with('-')).copied().unwrap_or("");
+    let verb = command_args(args).first().copied().unwrap_or("");
     if crate::read_jobs::has_context() || matches!(verb, "log" | "ls-remote" | "blame" | "status" | "show" | "diff" | "ls-files" | "cat-file" | "rev-list" | "for-each-ref") {
         return run_limited(dir, args, 64 * 1024 * 1024);
     }
-    match git_cmd(dir).args(args).output() {
-        Ok(o) => GitOut {
-            ok: o.status.success(),
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-        },
-        Err(e) => GitOut { ok: false, stdout: String::new(), stderr: format!("Could not start git: {e}") },
-    }
+    crate::read_jobs::run_mutation(git_command(dir, args), None)
 }
 
 pub fn run_limited(dir: &Path, args: &[&str], limit: usize) -> GitOut {
-    let mut command = git_cmd(dir); command.args(args);
-    crate::read_jobs::run(command, limit, None)
+    crate::read_jobs::run(git_command(dir, args), limit, None)
 }
 
 pub fn run_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> GitOut {
-    let mut c = git_cmd(dir);
-    c.args(args);
-    for (k, v) in env {
-        c.env(k, v);
-    }
-    match c.output() {
-        Ok(o) => GitOut {
-            ok: o.status.success(),
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-        },
-        Err(e) => GitOut { ok: false, stdout: String::new(), stderr: format!("Could not start git: {e}") },
-    }
+    #[cfg(windows)]
+    let mut command = if wsl_location(dir).is_some() && !env.is_empty() {
+        let mut command = git_cmd(dir);
+        command.args(args);
+        command
+    } else { git_command(dir, args) };
+    #[cfg(not(windows))]
+    let mut command = git_command(dir, args);
+    command.envs(env.iter().copied());
+    crate::read_jobs::run_mutation(command, None)
 }
 
 pub fn repo_root(dir: &Path) -> Option<PathBuf> {
@@ -248,6 +361,43 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
         Some(PathBuf::from(o.stdout.trim()))
     } else {
         None
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct HistoryFilter {
+    pub author: Option<String>,
+    pub path: Option<String>,
+    pub text: Option<String>,
+    pub mode: Option<String>,
+}
+
+impl HistoryFilter {
+    fn arguments(&self) -> Result<(Vec<String>, Option<&str>), String> {
+        let mut options = Vec::new();
+        if let Some(author) = self.author.as_deref().filter(|value| !value.is_empty()) {
+            options.extend(["--use-mailmap".into(), "--fixed-strings".into(), "--regexp-ignore-case".into(), format!("--author={author}")]);
+        }
+        if let Some(text) = self.text.as_deref().filter(|value| !value.is_empty()) {
+            let option = match self.mode.as_deref() {
+                Some("regex") => "-G",
+                None | Some("text") => "-S",
+                _ => return Err("Choose a supported content search mode.".into()),
+            };
+            options.push(format!("{option}{text}"));
+            options.push("--no-textconv".into());
+        }
+        let path = self.path.as_deref().filter(|value| !value.is_empty());
+        if let Some(path) = path {
+            if Path::new(path).is_absolute() || path.split('/').any(|component| component == "..")
+                || path.contains(['\\', '\0']) || path.as_bytes().get(1) == Some(&b':') {
+                return Err("Enter a repository-relative path using forward slashes.".into());
+            }
+        }
+        if self.author.iter().chain(self.text.iter()).any(|value| value.contains('\0') || value.len() > 4096) {
+            return Err("History filters must be at most 4,096 bytes and cannot contain NUL characters.".into());
+        }
+        Ok((options, path))
     }
 }
 
@@ -265,6 +415,8 @@ pub struct RefView {
     /// UI Customization > Branch visibility: Smart Branch Visibility.
     #[serde(default)]
     pub smart: bool,
+    #[serde(default)]
+    pub filter: HistoryFilter,
 }
 
 /// Smart Branch Visibility: the checked-out branch, its upstream and the branch it will merge into
@@ -302,7 +454,7 @@ pub fn walkable_refs(dir: &Path) -> Vec<String> {
     }
     // One answer per ref: "<sha>" when it peels to a commit, "<input> missing" when it doesn't (or is broken).
     let input: String = names.iter().map(|n| format!("{n}^{{commit}}\n")).collect();
-    let mut command = git_cmd(dir); command.args(["cat-file", "--batch-check=%(objectname)"]);
+    let command = git_command(dir, &["cat-file", "--batch-check=%(objectname)"]);
     let out = crate::read_jobs::run_bytes(command, 64 * 1024 * 1024, Some(input.into_bytes()));
     if !out.ok { return Vec::new(); }
     let answers = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -354,6 +506,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
     } else {
         view
     };
+    let (filters, path) = view.filter.arguments()?;
     let mut d = RepoData::default();
 
     // History, newest first, every branch.
@@ -367,9 +520,11 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         resolved.stdout.lines().map(str::to_owned).collect()
     } else { requested_revs };
     d.history_revs = revs.clone();
-    let mut log_args: Vec<&str> = vec!["log"];
+    let mut log_args: Vec<&str> = vec!["--literal-pathspecs", "log"];
+    log_args.extend(filters.iter().map(String::as_str));
     log_args.extend(revs.iter().map(|s| s.as_str()));
-    log_args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
+    log_args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
+    log_args.extend(path);
 
     // The ten reads don't depend on each other, and on Windows each Git process costs 20-50 ms just to start,
     // so they run at the same time instead of one after another.
@@ -389,7 +544,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         }));
         let head = s.spawn(crate::read_jobs::inherit(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])));
         let head_sha = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "HEAD"])));
-        let log = s.spawn(crate::read_jobs::inherit(|| if resolved.ok { history_log(dir, &revs, 0, max_commits) } else { run(dir, &log_args) }));
+        let log = s.spawn(crate::read_jobs::inherit(|| if resolved.ok { history_log(dir, &revs, 0, max_commits, &filters, path) } else { run(dir, &log_args) }));
         let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"])));
         let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain"])));
         let sm = s.spawn(crate::read_jobs::inherit(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"])));
@@ -449,9 +604,11 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         if start.is_empty() {
             log
         } else {
-            let mut args: Vec<&str> = vec!["log"];
+            let mut args: Vec<&str> = vec!["--literal-pathspecs", "log"];
+            args.extend(filters.iter().map(String::as_str));
             args.extend(start.iter().map(|s| s.as_str()));
-            args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
+            args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
+            args.extend(path);
             let result = run(dir, &args);
             let mut resolve = vec!["rev-parse", "--revs-only"];
             resolve.extend(start.iter().map(String::as_str));
@@ -514,6 +671,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
 
     let gitdir = gitdir.stdout.trim().to_string();
     let gd = dir.join(gitdir);
+    d.bisect = bisect_progress(&gd);
     if gd.join("MERGE_HEAD").exists() {
         d.state_note = Some("merging".into());
         d.merge_msg = crate::rewrite::merge_message(dir);
@@ -717,9 +875,8 @@ pub fn rename_source(dir: &Path, src: &DiffSource, path: &str, parent: Option<&s
     let mut records = output.stdout.split('\0');
     while let Some(status) = records.next() {
         let Some(old) = records.next() else { break };
-        if status.starts_with('R') || status.starts_with('C') {
-            if records.next() == Some(path) { return old.into(); }
-        }
+        if (status.starts_with('R') || status.starts_with('C'))
+            && records.next() == Some(path) { return old.into(); }
     }
     path.into()
 }
@@ -845,18 +1002,23 @@ pub fn parse_commits(text: &str) -> Vec<Commit> {
     fields.chunks_exact(7).filter_map(parse_commit_fields).collect()
 }
 
-fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize) -> GitOut {
-    let mut command = git_cmd(dir);
-    command.args(["log", "--stdin", "--date-order", &format!("--skip={offset}"), &format!("-n{}", max + 1),
-        "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--"]);
+fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize, filters: &[String], path: Option<&str>) -> GitOut {
+    let skip = format!("--skip={offset}");
+    let limit = format!("-n{}", max + 1);
+    let mut args = vec!["--literal-pathspecs", "log"];
+    args.extend(filters.iter().map(String::as_str));
+    args.extend(["--stdin", "--date-order", &skip, &limit, "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
+    args.extend(path);
+    let command = git_command(dir, &args);
     crate::read_jobs::run(command, 64 * 1024 * 1024, Some((revs.join("\n") + "\n").into_bytes()))
 }
 
-pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize) -> Result<(Vec<Commit>, bool), String> {
+pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize, filter: &HistoryFilter) -> Result<(Vec<Commit>, bool), String> {
     if revs.is_empty() || revs.iter().any(|r| !matches!(r.len(), 40 | 64) || !r.bytes().all(|b| b.is_ascii_hexdigit())) {
         return Err("History changed; reload the repository to continue.".into());
     }
-    let output = history_log(dir, revs, offset, max);
+    let (filters, path) = filter.arguments()?;
+    let output = history_log(dir, revs, offset, max, &filters, path);
     if !output.ok { return Err(output.message()); }
     let mut commits = parse_commits(&output.stdout);
     let has_more = commits.len() > max;
@@ -867,6 +1029,15 @@ pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize) -> R
 #[cfg(test)]
 mod paging_tests {
     use super::*;
+    #[test]
+    fn only_explicit_network_commands_qualify_for_hosting_credentials() {
+        for args in [vec!["commit", "--message", "push"], vec!["-c", "test=fetch", "checkout", "main"], vec!["stash", "push"], vec!["remote", "add", "origin"]] {
+            assert!(!uses_network_credentials(&args));
+        }
+        for args in [vec!["fetch"], vec!["-c", "test=value", "push"], vec!["lfs", "pull"], vec!["submodule", "update"], vec!["ls-remote"]] {
+            assert!(uses_network_credentials(&args));
+        }
+    }
     #[test]
     fn history_pages_keep_their_snapshot_when_a_branch_moves() {
         let temp = tempfile::tempdir().unwrap();
@@ -881,14 +1052,14 @@ mod paging_tests {
         assert!(original.has_more);
         let all = load_view(dir, 20, &RefView::default());
         assert!(run(dir, &["commit", "--allow-empty", "-m", "new tip"]).ok);
-        let (page, more) = history_page(dir, &original.history_revs, 2, 2).unwrap();
+        let (page, more) = history_page(dir, &original.history_revs, 2, 2, &HistoryFilter::default()).unwrap();
         assert!(!more);
         let many_tips = vec![original.history_revs[0].clone(); 1000];
-        let (many, _) = history_page(dir, &many_tips, 0, 2).unwrap();
+        let (many, _) = history_page(dir, &many_tips, 0, 2, &HistoryFilter::default()).unwrap();
         assert_eq!(many[0].sha, original.commits[0].sha);
         let actual: Vec<_> = original.commits.iter().chain(page.iter()).map(|c| &c.sha).collect();
         assert_eq!(actual, all.commits.iter().map(|c| &c.sha).collect::<Vec<_>>());
-        assert!(history_page(dir, &["--all".into()], 0, 2).is_err());
+        assert!(history_page(dir, &["--all".into()], 0, 2, &HistoryFilter::default()).is_err());
     }
 }
 

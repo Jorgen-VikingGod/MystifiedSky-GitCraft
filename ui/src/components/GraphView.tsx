@@ -8,7 +8,7 @@ import type { Commit, GitRef, RepoView, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
 import { DEFAULT_COLUMNS, useStore, useTabUi, type GraphColumns, type GraphColumn } from "@/lib/store";
 import { ColumnResize } from "./ColumnResize";
-import { act, loadMoreRepo, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
+import { act, editHistoryFilter, runBisect, loadMoreRepo, clearSolo, showAllRefs, toggleHidden, WIP_COMMIT_EVENT } from "@/lib/repo";
 import { commitMenu } from "@/lib/menus";
 import { CommitRefs } from "./CommitRefs";
 import { CtxMenu, DropMenu, type MenuEntry } from "./ui/menu";
@@ -258,11 +258,23 @@ export function GraphView({ repo, tabId }: Props) {
     return () => { clearTimeout(t); controller.abort(); };
   }, [first, last, extras.join(), repo.path, visibleCommitIds]);
 
+  const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+  useEffect(() => {
+    const update = () => setDpr(window.devicePixelRatio || 1);
+    const scale = window.matchMedia?.(`(resolution: ${dpr}dppx)`);
+    scale?.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    update();
+    return () => {
+      scale?.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [dpr]);
+
   // Draw the visible part of the graph on the canvas.
   useLayoutEffect(() => {
     const cv = canvasRef.current;
     if (!cv) return;
-    const dpr = window.devicePixelRatio || 1;
     const w = refW + graphW;
     cv.width = Math.ceil(Math.max(1, w) * dpr);
     cv.height = Math.ceil(viewH * dpr);
@@ -353,7 +365,7 @@ export function GraphView({ repo, tabId }: Props) {
       }
       g.globalAlpha = 1;
     }
-  }, [repo.graph, repo.commits, first, last, scrollTop, viewH, refW, graphW, off, headLane, headIdx, refsBySha, m, cols.graph, cols.refs, q, matchSet]);
+  }, [repo.graph, repo.commits, first, last, scrollTop, viewH, refW, graphW, off, headLane, headIdx, refsBySha, m, cols.graph, cols.refs, q, matchSet, dpr]);
 
   const select = (sel: { type: "wip" } | { type: "commit"; sha: string }) => setUi(tabId, { selection: sel, diff: null, multi: [], compareWorkdir: null, history: null });
 
@@ -560,7 +572,9 @@ export function GraphView({ repo, tabId }: Props) {
             placeholder="Search commits by message, author or sha"
             className="flex-1 h-[24px] px-2 rounded-[3px] bg-field border border-white/10 outline-none focus:border-accent text-[12.5px] min-w-0"
           />
-          <span className="text-[11.5px] text-fg2 whitespace-nowrap">{q ? `${matches.length} found` : ""}</span>
+          <button className="text-link text-[11.5px] whitespace-nowrap hover:underline" onClick={() => editHistoryFilter(tabId)}>History filters</button>
+          <span className="text-[11.5px] text-fg2 whitespace-nowrap" role="status">{q ? `${matches.length} in ${repo.commits.length.toLocaleString()} loaded commits` : ""}</span>
+          {q && repo.has_more && <button className="text-link hover:underline text-[11.5px] whitespace-nowrap" onClick={more} disabled={loadingMore}>Search older commits</button>}
           <button className="text-fg2 hover:text-white" onClick={() => jump(-1)} title="Previous (Shift+Enter)">
             <ChevronUp size={15} />
           </button>
@@ -572,6 +586,15 @@ export function GraphView({ repo, tabId }: Props) {
           </button>
         </div>
       )}
+      {ui.historyFilter && (
+        <div className="flex items-center gap-2 px-3 h-7 bg-panel text-[12px] shrink-0">
+          <span className="flex-1 truncate text-fg2">
+            Filtered history · {[ui.historyFilter.author, ui.historyFilter.path, ui.historyFilter.text].filter(Boolean).join(" · ")}
+          </span>
+          <button className="text-link hover:underline" onClick={() => editHistoryFilter(tabId)}>Edit</button>
+          <button className="text-link hover:underline" onClick={() => setUi(tabId, { historyFilter: undefined })}>Clear filters</button>
+        </div>
+      )}
       {solo.length > 0 && (
         <div className="flex items-center gap-2 px-3 h-[28px] bg-warn/20 border-b border-warn/40 text-[12px] shrink-0">
           <span className="flex-1 truncate">
@@ -580,6 +603,18 @@ export function GraphView({ repo, tabId }: Props) {
           <Button size="sm" className="h-[20px]" onClick={() => clearSolo(repo.path)}>
             Stop soloing
           </Button>
+        </div>
+      )}
+      {repo.bisect && (
+        <div className="flex flex-wrap items-center gap-2 bg-warn/10 border-b border-warn/30 px-3 py-1.5 text-[12px]">
+          <span className="flex-1" role="status">{repo.bisect.first_bad
+            ? `First bad commit ${repo.bisect.first_bad.slice(0, 10)}`
+            : `Bisect in progress · ${repo.bisect.tested} marked · testing ${repo.head_sha.slice(0, 10)}`}</span>
+          {!repo.bisect.first_bad && <>
+            {(["good", "bad", "skip"] as const).map(mode =>
+              <button key={mode} className="text-link hover:underline capitalize" onClick={() => runBisect(repo.path, mode, repo.head_sha)}>{mode}</button>)}
+          </>}
+          <button className="text-link hover:underline" onClick={() => runBisect(repo.path, "reset")}>Reset bisect</button>
         </div>
       )}
       {repo.state_note && <StateBanner repo={repo} />}

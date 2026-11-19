@@ -7,10 +7,68 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Added
 
 - Join the GitCraft community from the Help menu.
+- Copy diagnostics from Help, open a repository in another window, and open clone URLs in a prefilled dialog.
+- Bisect from the graph. Stash selected changes, retain staged changes, or stash only untracked files.
+- Keep Undo and Redo across restarts. Review squash-merged, rebase-merged, and gone-upstream branches during branch cleanup.
+- Edit and fix up commits during an interactive rebase, autosquash matching commits, and run a shell command after a selected commit.
+- View CI checks and filter pull requests by state, author, or review request. Review changes and comment on diff lines in GitHub and GitLab.
+- Render hosted descriptions and comments as Markdown. Edit squash messages and remove merged source branches after review.
+- Publish to organizations and groups, and connect to Gitea, Forgejo, Codeberg, or Azure DevOps Server 2022.
+- Lock and unlock Git LFS files, show who owns a lock, and keep lockable files read-only until locked.
+- Search and follow links in the terminal, copy and paste from its context menu, and use the shell's Tab completion.
+- Follow the system theme and high-contrast settings. Use Spanish for the main navigation and start screen.
+
+- Build Windows and Linux ARM64 packages alongside the existing releases.
+
+- Recover commits from the reflog, view signature verification in commit details, and reopen GitCraft with the previous window size and position.
+- Keep new commit drafts across restarts, honor Git commit templates, and sign off commits from Commit options.
+- Fetch earlier commits in shallow clones or download filtered objects in partial clones. Enable reuse of recorded conflict resolutions per repository.
+
+- Filter repository history by author, path, added or removed text, or changed lines matching a regular expression. Open a file's containing folder history and page farther back in file history.
+- Compare two versions of a commit series with range-diff. Run garbage collection, write the commit graph, or fetch and prune remotes from Repository maintenance.
+- Choose a pull request template when the repository has multiple templates. Set pull mode, rebase autostash, and recursive submodule updates per repository.
+- Highlight changed words in hunk diffs. Blame can use or bypass ignored revisions, and commit history shows canonical names from the repository's mailmap.
 
 ### Fixed
 
+- Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
+- Poll file changes on network folders that lack reliable file notifications.
+
 - Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.
+
+- Ask whether to save, discard or keep editing before leaving an unsaved file or conflict resolution.
+
+- Launch external editors and terminals with platform-appropriate tools, use native window controls and select files in supported Linux file managers.
+
+- Preserve server policy errors when a push is blocked, time out stalled Git commands, and clean up interactive replay files after completion. Rewording uses the configured Git executable and runs hooks by default.
+
+- Preserve staged and unstaged changes separately when creating and restoring a stash.
+- Recover recently discarded changes after a restart. Warn before removing a dirty worktree or amending an already-pushed commit.
+- Recover corrupt settings from a backup and open secondary launches in the existing window.
+- Name the clone folder, initialize submodules, and request older history from graph search.
+- Validate branch and tag names as you type, make branch rename and pull undoable, and protect the default branch during cleanup.
+- Report integration rate limits and network errors, and show provider-supported pull-request merge methods and blocking checks.
+- Generate SSH keys with an optional passphrase and add them to the SSH agent. Hide unusable GPG signing keys.
+- Preserve non-UTF-8 patch contents, report unreadable patches, and recognize nested Git LFS tracking patterns.
+- Distinguish Control and Command shortcuts, show secondary shortcut clashes, sort release tags by version, and redraw the graph when display scaling changes.
+- Time out background fetches without opening a sign-in prompt, skip refreshing unchanged refs, and help set an upstream before pulling.
+- Use the upstream remote to suggest a conflict comparison branch and pull-request target. Escape Jira project filters and explain credential-store errors.
+- Refresh browser-managed integration sign-ins when credentials expire. Check for Git 2.38 or newer and run lint and dependency checks in CI.
+- Blame falls back to an ordinary blame when the repository's ignored-revisions list contains an invalid entry.
+- Keep executable permissions when staging or committing in repositories stored inside WSL.
+- Open a drive root from the Explorer "Open in GitCraft" menu.
+
+### Security
+
+- Limit GitCraft hosting credentials to explicit network commands and refuse editor saves that resolve outside the repository.
+
+- Review untracked AI context before sending it, omit known credential files and redact common token formats.
+
+- Apply the renderer content policy to Windows release builds.
+- Cancel in-flight AI requests, keep AI credentials on the configured endpoint, and send Trello credentials in the authorization header.
+- Open Windows Terminal in folders whose names contain a semicolon without running part of the name as a command.
+- Refuse editor saves through symbolic links into a repository's Git metadata, and never read a blame revision as a Git option.
+- Pin GitHub Actions to commit hashes and wait seven days before Dependabot proposes new dependency releases.
 
 ## [0.1.29] - 2026-11-18
 

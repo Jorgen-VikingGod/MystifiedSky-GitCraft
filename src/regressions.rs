@@ -39,6 +39,193 @@ fn glib_code_scanning_type_and_container_contracts() {
 use crate::{actions::{Action, Engine}, git};
 use std::path::Path;
 
+#[test]
+fn feature_bisect_reports_first_bad_and_restores_branch() {
+    let fixture = fixture("gitcraft-bisect-");
+    let dir = fixture.path();
+    let good = head(dir);
+    for label in ["first bad", "second bad", "latest bad"] {
+        assert!(git::run(dir, &["commit", "-qm", label, "--allow-empty"]).ok);
+    }
+    let bad = head(dir);
+    let repo = dir.to_string_lossy();
+    let engine = Engine::default();
+    let start = engine.perform(&repo, Action::Bisect { mode: "start".into(), commit: Some(bad.clone()), good: Some(good) });
+    assert!(start.ok, "{}", start.message);
+    for _ in 0..4 {
+        if git::bisect_progress(&dir.join(".git")).unwrap().first_bad.is_some() { break; }
+        let result = engine.perform(&repo, Action::Bisect { mode: "bad".into(), commit: Some(head(dir)), good: None });
+        assert!(result.ok, "{}", result.message);
+    }
+    let first = git::bisect_progress(&dir.join(".git")).unwrap().first_bad.unwrap();
+    assert_eq!(git::run(dir, &["log", "-1", "--format=%s", &first]).stdout.trim(), "first bad");
+    assert!(engine.perform(&repo, Action::Bisect { mode: "reset".into(), commit: None, good: None }).ok);
+    assert_eq!(head(dir), bad);
+    assert!(git::bisect_progress(&dir.join(".git")).is_none());
+}
+
+#[test]
+fn feature_cleanup_finds_squash_and_gone_upstream() {
+    let fixture = fixture("gitcraft-cleanup-squash-");
+    let dir = fixture.path();
+    let g = |args: &[&str]| { let output = git::run(dir, args); assert!(output.ok, "{}", output.message()); };
+    g(&["checkout", "-qb", "topic"]);
+    for (file, body) in [("first.txt", "first\n"), ("second.txt", "second\n")] {
+        std::fs::write(dir.join(file), body).unwrap();
+        g(&["add", file]);
+        g(&["commit", "-qm", file]);
+    }
+    g(&["checkout", "-q", "main"]);
+    g(&["merge", "--squash", "topic"]); g(&["commit", "-qm", "combined"]);
+    g(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
+    g(&["config", "branch.topic.remote", "origin"]);
+    g(&["config", "branch.topic.merge", "refs/heads/topic"]);
+    let rows = crate::manage::review_cleanup(dir, true);
+    let topic = rows.iter().find(|branch| branch.name == "topic").unwrap();
+    assert!(!topic.merged);
+    assert!(topic.patch_equivalent && topic.upstream_gone, "{topic:?}");
+}
+
+#[test]
+fn feature_lfs_preflight_reads_target_tree_without_switching() {
+    let fixture = fixture("gitcraft-lfs-checkout-preflight-");
+    let dir = fixture.path();
+    let original = head(dir);
+    let g = |args: &[&str]| { let output = git::run(dir, args); assert!(output.ok, "{}", output.message()); };
+    g(&["checkout", "-qb", "large-files"]);
+    std::fs::create_dir(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("nested/file.large"), "version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 1\n").unwrap();
+    g(&["add", "nested/file.large"]);
+    std::fs::write(dir.join("nested/.gitattributes"), "*.large filter=lfs\n").unwrap();
+    g(&["add", "nested/.gitattributes"]);
+    g(&["commit", "-qm", "LFS attributes"]);
+    g(&["checkout", "-q", "main"]);
+    assert!(!crate::manage::tree_uses_lfs(dir, "HEAD").unwrap());
+    assert!(crate::manage::tree_uses_lfs(dir, "large-files").unwrap());
+    assert_eq!(head(dir), original);
+    assert!(!dir.join("nested/file.large").exists());
+    assert!(git::status(dir).staged.is_empty());
+}
+
+#[test]
+fn feature_undo_and_redo_survive_engine_restart() {
+    let fixture = fixture("gitcraft-undo-reopen-");
+    let dir = fixture.path();
+    let repo = dir.to_string_lossy();
+    assert!(git::run(dir, &["checkout", "-qb", "topic"]).ok);
+    assert!(git::run(dir, &["commit", "-qm", "topic", "--allow-empty"]).ok);
+    let topic = head(dir);
+    assert!(git::run(dir, &["checkout", "-q", "main"]).ok);
+    assert!(Engine::default().perform(&repo, Action::DeleteBranch { name: "topic".into() }).ok);
+    let pins = git::run(dir, &["for-each-ref", "--format=%(objectname)", "refs/gitcraft/undo/"]);
+    assert!(pins.stdout.lines().any(|sha| sha == topic));
+    let undo = Engine::default().perform(&repo, Action::Undo);
+    assert!(undo.ok, "{}", undo.message);
+    assert_eq!(git::run(dir, &["rev-parse", "refs/heads/topic"]).stdout.trim(), topic);
+    let redo = Engine::default().perform(&repo, Action::Redo);
+    assert!(redo.ok, "{}", redo.message);
+    assert!(!git::run(dir, &["show-ref", "--verify", "refs/heads/topic"]).ok);
+}
+
+#[test]
+fn feature_stash_modes_keep_the_live_index_and_unselected_work() {
+    let fixture = fixture("gitcraft-selective-stash-");
+    let dir = fixture.path();
+    let repo = dir.to_string_lossy();
+    let engine = Engine::default();
+    std::fs::write(dir.join("file.txt"), "base\ntracked edit\n").unwrap();
+    std::fs::write(dir.join("staged.txt"), "staged\n").unwrap();
+    assert!(git::run(dir, &["add", "--", "staged.txt"]).ok);
+    std::fs::write(dir.join("untracked.txt"), "untracked\n").unwrap();
+    let before = git::run(dir, &["write-tree"]).stdout;
+    let result = engine.perform(&repo, Action::StashUntracked { message: "Untracked".into() });
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(git::run(dir, &["write-tree"]).stdout, before);
+    assert!(!dir.join("untracked.txt").exists());
+    assert!(git::run(dir, &["show", "stash@{0}^3:untracked.txt"]).ok);
+    assert!(!git::run(dir, &["show", "stash@{0}:staged.txt"]).ok);
+    assert_eq!(std::fs::read_to_string(dir.join("file.txt")).unwrap(), "base\ntracked edit\n");
+
+    let expected = git::file_diff_opts(dir, &git::DiffSource::Unstaged, "file.txt", false, None, false);
+    let result = engine.perform(&repo, Action::StashHunk { file: "file.txt".into(), hunk: 0, lines: None, expected });
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(git::run(dir, &["write-tree"]).stdout, before);
+    assert_eq!(std::fs::read_to_string(dir.join("file.txt")).unwrap(), "base\n");
+    assert_eq!(git::run(dir, &["show", "stash@{0}:file.txt"]).stdout, "base\ntracked edit\n");
+    assert!(git::run(dir, &["stash", "apply", "--index", "stash@{0}"]).ok);
+    assert_eq!(git::run(dir, &["write-tree"]).stdout, before);
+
+    let result = engine.perform(&repo, Action::StashKeepIndex { message: "Keep staged".into() });
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(git::run(dir, &["write-tree"]).stdout, before);
+    assert_eq!(std::fs::read_to_string(dir.join("file.txt")).unwrap(), "base\n");
+}
+
+#[test]
+fn feature_rebase_fixup_exec_and_edit() {
+    use crate::rewrite::{self, Step, TodoItem};
+    let fixture = fixture("gitcraft-rebase-workflow-");
+    let dir = fixture.path();
+    let repo = dir.to_string_lossy();
+    let base = head(dir);
+    std::fs::write(dir.join("second.txt"), "second\n").unwrap();
+    assert!(git::run(dir, &["add", "second.txt"]).ok);
+    assert!(git::run(dir, &["commit", "-qm", "second"]).ok);
+    let second = head(dir);
+    std::fs::write(dir.join("fixup.txt"), "fixup\n").unwrap();
+    assert!(git::run(dir, &["add", "fixup.txt"]).ok);
+    let engine = Engine::default();
+    let result = engine.perform(&repo, Action::CreateFixup { target: second.clone() });
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(git::run(dir, &["log", "-1", "--format=%s"]).stdout.trim(), "fixup! second");
+    let fixup = head(dir);
+    let items = vec![
+        TodoItem { action: Step::Pick, sha: second.clone(), message: None },
+        TodoItem { action: Step::Fixup, sha: fixup.clone(), message: None },
+        TodoItem { action: Step::Exec, sha: fixup, message: Some("test -f fixup.txt".into()) },
+    ];
+    let result = engine.perform(&repo, Action::InteractiveRebase { expected: rewrite::plan_state(dir, &base).unwrap(), base: base.clone(), items, skip_hooks: false });
+    assert!(result.ok && !rewrite::edit_stop(dir), "{}", result.message);
+    assert_eq!(git::run(dir, &["log", "-1", "--format=%s"]).stdout.trim(), "second");
+    assert_eq!(git::run(dir, &["rev-list", "--count", "HEAD"]).stdout.trim(), "2");
+
+    let items = vec![TodoItem { action: Step::Edit, sha: head(dir), message: None }];
+    let result = engine.perform(&repo, Action::InteractiveRebase { expected: rewrite::plan_state(dir, &base).unwrap(), base, items, skip_hooks: false });
+    assert!(result.ok && rewrite::edit_stop(dir), "{}", result.message);
+    assert!(git::run(dir, &["commit", "--amend", "-qm", "edited"]).ok);
+    assert!(engine.perform(&repo, Action::ContinueRebase).ok);
+    assert_eq!(git::run(dir, &["log", "-1", "--format=%s"]).stdout.trim(), "edited");
+    assert!(!rewrite::edit_stop(dir));
+}
+
+#[test]
+fn feature_git_lfs_distinguishes_lock_ownership_and_reads_attributes() {
+    let locks = crate::manage::parse_lfs_locks(r#"{
+        "ours":[{"id":"1","path":"mine.large","owner":{"name":"Fixture"}}],
+        "theirs":[{"id":"2","path":"theirs.large","owner":{"name":"Another user"}}]
+    }"#).unwrap();
+    assert_eq!(locks.len(), 2);
+    assert!(locks[0].ours);
+    assert!(!locks[1].ours);
+    assert!(crate::manage::parse_lfs_locks("{}").is_err());
+    let fixture = fixture("gitcraft-lfs-lockable-");
+    let dir = fixture.path();
+    std::fs::create_dir(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("nested/.gitattributes"), "*.large filter=lfs lockable\n*.small filter=lfs -lockable\n").unwrap();
+    assert!(crate::manage::lfs_lockable(dir, "nested/ours.large").unwrap());
+    assert!(!crate::manage::lfs_lockable(dir, "ours.large").unwrap());
+    assert!(!crate::manage::lfs_lockable(dir, "nested/ours.small").unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn feature_wsl_paths_preserve_distro_and_linux_filename() {
+    use crate::git::wsl_location;
+    assert_eq!(wsl_location(Path::new(r"\\wsl$\Ubuntu\home\a b\repo")), Some(("Ubuntu", "/home/a b/repo".to_owned())));
+    assert_eq!(wsl_location(Path::new(r"\\?\UNC\wsl.localhost\Debian\home\repo")), Some(("Debian", "/home/repo".to_owned())));
+    assert!(wsl_location(Path::new(r"\\work\Ubuntu\repo")).is_none());
+}
+
 fn fixture(label: &str) -> tempfile::TempDir {
     let folder = tempfile::Builder::new().prefix(label).tempdir().unwrap();
     for args in [vec!["init", "-q", "-b", "main"], vec!["config", "core.autocrlf", "false"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"], vec!["config", "commit.gpgsign", "false"]] {
@@ -172,7 +359,7 @@ fn undo_and_redo_refuse_unrelated_branches_and_external_commits() {
     let folder = fixture("gitcraft-undo-"); let path = folder.path(); let repo = path.to_string_lossy(); let engine = Engine::default();
     let original = head(path);
     std::fs::write(path.join("file.txt"), "app commit\n").unwrap();
-    assert!(engine.perform(&repo, Action::Commit { summary: "app".into(), description: "".into(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false }).ok);
+    assert!(engine.perform(&repo, Action::Commit { summary: "app".into(), description: "".into(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
     let app_commit = head(path);
     assert!(git::run(path, &["checkout", "-qb", "other"]).ok);
     assert!(git::run(path, &["commit", "--allow-empty", "-qm", "external"]).ok);
@@ -222,7 +409,7 @@ fn clearing_or_matching_push_url_removes_an_old_override() {
 #[test]
 fn interactive_reword_supports_apostrophes_in_repository_paths() {
     let folder = fixture("gitcraft-O'Connor-"); let path = folder.path();
-    let result = crate::rewrite::interactive_rebase(path, "--root", &[crate::rewrite::TodoItem { action: crate::rewrite::Step::Reword, sha: head(path), message: Some("updated".into()) }]);
+    let result = crate::rewrite::interactive_rebase(path, "--root", &[crate::rewrite::TodoItem { action: crate::rewrite::Step::Reword, sha: head(path), message: Some("updated".into()) }], false);
     assert!(result.ok, "{}", result.message());
     assert_eq!(git::run(path, &["log", "-1", "--format=%s"]).stdout.trim(), "updated");
 }
@@ -370,7 +557,7 @@ fn patch_import_preserves_preexisting_resolution_and_merge_export_is_explicit() 
     assert!(git::run(d,&["checkout","-qb","side"]).ok);std::fs::write(d.join("side.txt"),"side").unwrap();assert!(git::run(d,&["add","side.txt"]).ok);assert!(git::run(d,&["commit","-qm","side"]).ok);
     assert!(git::run(d,&["checkout","main"]).ok);assert!(git::run(d,&["merge","--no-ff","-m","merge","side"]).ok);
     assert!(crate::extras::make_patch(d,&[head(d)]).unwrap_err().contains("Merge commits"));
-    assert!(crate::extras::make_patch(d,&[root]).unwrap().contains("Subject: [PATCH] base"));
+    assert!(String::from_utf8(crate::extras::make_patch(d,&[root]).unwrap()).unwrap().contains("Subject: [PATCH] base"));
 }
 
 #[test]
@@ -411,9 +598,14 @@ fn replay_plan_continues_remaining_commits_after_a_conflict() {
     std::fs::write(d.join("second.txt"),"second\n").unwrap();assert!(git::run(d,&["add","second.txt"]).ok);assert!(git::run(d,&["commit","-qm","second"]).ok);let second=head(d);
     assert!(git::run(d,&["checkout","main"]).ok);std::fs::write(d.join("file.txt"),"target\n").unwrap();assert!(git::run(d,&["commit","-qam","target"]).ok);let original=head(d);
     let plan=vec![TodoItem {action:Step::Pick,sha:first,message:None},TodoItem {action:Step::Reword,sha:second,message:Some("renamed second".into())}];
-    let out=crate::rewrite::interactive_cherry_pick(d,&plan,&|a|git::run(d,a));assert!(!out.ok);assert!(d.join(".git/rebase-merge").exists());
+    let out=crate::rewrite::interactive_cherry_pick(d,&plan,false);assert!(!out.ok);assert!(d.join(".git/rebase-merge").exists());
+    let work = std::fs::read_dir(d.join(".git")).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("gitcraft-replay-")).unwrap().path();
+    assert!(work.join("message-1").is_file());
+    crate::rewrite::cleanup_replay_files(d);
+    assert!(work.exists());
     std::fs::write(d.join("file.txt"),"resolved\n").unwrap();assert!(git::run(d,&["add","file.txt"]).ok);
-    let out=git::run(d,&["-c","core.editor=true","rebase","--continue"]);assert!(out.ok,"{}",out.message());
+    let out=Engine::default().perform(&d.to_string_lossy(),Action::ContinueRebase);assert!(out.ok,"{}",out.message);
+    assert!(!work.exists());
     assert!(d.join("second.txt").exists());assert_eq!(git::run(d,&["log","-1","--format=%s"]).stdout.trim(),"renamed second");
     assert!(git::run(d,&["merge-base","--is-ancestor",&original,"HEAD"]).ok);
 }
@@ -425,9 +617,9 @@ fn rebase_refuses_a_plan_after_external_commits_or_checkout() {
     let expected=crate::rewrite::plan_state(d,&base).unwrap();
     let item=crate::rewrite::TodoItem {action:crate::rewrite::Step::Pick,sha:head(d),message:None};
     std::fs::write(d.join("C.txt"),"C").unwrap();assert!(git::run(d,&["add","C.txt"]).ok);assert!(git::run(d,&["commit","-qm","C"]).ok);let current=head(d);
-    let e=Engine::default();assert!(!e.perform(&d.to_string_lossy(),Action::InteractiveRebase {base:base.clone(),items:vec![item.clone()],expected:expected.clone()}).ok);assert_eq!(head(d),current);assert!(d.join("C.txt").exists());
+    let e=Engine::default();assert!(!e.perform(&d.to_string_lossy(),Action::InteractiveRebase {base:base.clone(),items:vec![item.clone()],expected:expected.clone(),skip_hooks:false}).ok);assert_eq!(head(d),current);assert!(d.join("C.txt").exists());
     assert!(git::run(d,&["checkout","-qb","other"]).ok);
-    assert!(!e.perform(&d.to_string_lossy(),Action::InteractiveRebase {base,items:vec![item],expected}).ok);assert_eq!(head(d),current);
+    assert!(!e.perform(&d.to_string_lossy(),Action::InteractiveRebase {base,items:vec![item],expected,skip_hooks:false}).ok);assert_eq!(head(d),current);
 }
 
 #[test]
@@ -451,7 +643,7 @@ fn finder_preserves_unicode_names_and_blame_supports_sha256() {
     let f=tempfile::tempdir().unwrap();let d=f.path();assert!(git::run(d,&["init","-q","--object-format=sha256"]).ok);
     for args in [vec!["config","user.name","SHA256 Test"],vec!["config","user.email","sha@example.test"],vec!["config","commit.gpgsign","false"]] {assert!(git::run(d,&args).ok);}
     std::fs::write(d.join("file.txt"),"one\ntwo\n").unwrap();assert!(git::run(d,&["add","."]).ok);assert!(git::run(d,&["commit","-qm","sha256"]).ok);
-    let rows=crate::files::blame(d,"file.txt",None).unwrap();assert_eq!(rows.len(),2);assert_eq!(rows[0].sha.len(),64);assert_eq!(rows[0].author,"SHA256 Test");
+    let rows=crate::files::blame(d,"file.txt",None,true).unwrap();assert_eq!(rows.len(),2);assert_eq!(rows[0].sha.len(),64);assert_eq!(rows[0].author,"SHA256 Test");
 }
 
 #[test]
@@ -503,7 +695,7 @@ fn untracked_stash_entries_have_their_own_preview_revision() {
 fn unborn_patch_exports_working_edits_relative_to_the_empty_tree() {
     let f=tempfile::tempdir().unwrap();let d=f.path();assert!(git::run(d,&["init","-q"]).ok);
     std::fs::write(d.join("new.txt"),"v1\n").unwrap();assert!(git::run(d,&["add","new.txt"]).ok);std::fs::write(d.join("new.txt"),"v2\n").unwrap();
-    let patch=crate::extras::make_patch(d,&[]).unwrap();assert!(patch.contains("+v2"));assert!(!patch.contains("+v1"));assert!(!git::run(d,&["rev-parse","--verify","HEAD"]).ok);
+    let patch=String::from_utf8(crate::extras::make_patch(d,&[]).unwrap()).unwrap();assert!(patch.contains("+v2"));assert!(!patch.contains("+v1"));assert!(!git::run(d,&["rev-parse","--verify","HEAD"]).ok);
 }
 
 #[test]
@@ -524,7 +716,8 @@ fn legacy_partial_patches_are_rejected_without_altering_file_or_index_bytes() {
     let bytes=b"base\ncaf\xe9\n".to_vec();std::fs::write(d.join("file.txt"),&bytes).unwrap();
     assert!(crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Stage,0,None).is_err());
     assert!(crate::files::apply_part(d,"file.txt",false,crate::files::PatchOp::Discard,0,None).is_err());
-    assert!(crate::extras::make_patch(d,&[]).is_err());
+    let patch = crate::extras::make_patch(d, &[]).unwrap();
+    assert!(patch.windows(6).any(|part| part == b"+caf\xe9\n"));
     assert_eq!(git::git_cmd(d).args(["show",":file.txt"]).output().unwrap().stdout,index);
     assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),bytes);
     assert!(git::run(d,&["add","file.txt"]).ok);
@@ -555,7 +748,7 @@ fn sparse_patterns_accept_root_and_nested_files() {
 fn selected_gpg_program_and_fingerprints_are_discovered_together() {
     let f=fixture("gitcraft-configured-gpg-");let d=f.path();
     let fingerprint="123456789012345678901234ABCDEF0123456789";
-    let output=format!("sec:u:4096:1:ABCDEF0123456789:::::::::\nfpr:::::::::{fingerprint}:\nuid:::::::::Configured User:\n");
+    let output=format!("sec:u:4096:1:ABCDEF0123456789:0:0:::::scSC:\nfpr:::::::::{fingerprint}:\nuid:::::::::Configured User:\n");
     #[cfg(windows)] let program={let p=d.join("configured-gpg.cmd");let script=format!("@echo off\r\n{}\r\nexit /b 0\r\n",output.lines().map(|l|format!("echo {l}")).collect::<Vec<_>>().join("\r\n"));std::fs::write(&p,script).unwrap();p};
     #[cfg(unix)] let program={use std::os::unix::fs::PermissionsExt;let p=d.join("configured-gpg");std::fs::write(&p,format!("#!/bin/sh\ncat <<'END'\n{output}END\n")).unwrap();std::fs::set_permissions(&p,std::fs::Permissions::from_mode(0o700)).unwrap();p};
     assert!(git::run(d,&["config","gpg.program",&program.to_string_lossy()]).ok);
@@ -677,7 +870,7 @@ fn textconv_never_enters_partial_mutations_or_working_patch_exports() {
     let shown=git::file_diff_opts(d,&git::DiffSource::Unstaged,"file.txt",false,None,false);
     let raw=git::diff_text_checked(d,&git::DiffSource::Unstaged,"file.txt",None,false).unwrap();
     assert!(raw.contains("+secret"));assert!(!raw.contains("+public"));
-    let exported=crate::extras::make_patch(d,&[]).unwrap();assert!(exported.contains("+secret"));assert!(!exported.contains("+public"));
+    let exported=String::from_utf8(crate::extras::make_patch(d,&[]).unwrap()).unwrap();assert!(exported.contains("+secret"));assert!(!exported.contains("+public"));
     crate::files::apply_part_checked(d,"file.txt",false,crate::files::PatchOp::Stage,0,None,&shown).unwrap();
     assert_eq!(git::run(d,&["show",":file.txt"]).stdout,"base\nsecret\n");
     assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),b"base\nsecret\n");
@@ -703,7 +896,7 @@ fn first_ordinary_commit_undo_redo_preserves_index_and_working_files() {
         for args in [["config","user.name","Fixture"],["config","user.email","fixture@example.invalid"],["config","commit.gpgsign","false"],["config","core.autocrlf","false"]] {assert!(git::run(&path,&args).ok);}
         std::fs::write(path.join("first.txt"),"staged\n").unwrap();assert!(git::run(&path,&["add","first.txt"]).ok);
         let engine=Engine::default();let repo=path.to_string_lossy();
-        assert!(engine.perform(&repo,Action::Commit {summary:"first".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}).ok);
+        assert!(engine.perform(&repo,Action::Commit {summary:"first".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false, sign_off: false}).ok);
         let committed=head(&path);let branch=git::run(&path,&["symbolic-ref","HEAD"]).stdout.trim().to_owned();
         std::fs::write(path.join("first.txt"),"later working edit\n").unwrap();
         assert!(engine.undo_info(&repo).undo.is_some());assert!(engine.perform(&repo,Action::Undo).ok);assert!(!git::run(&path,&["rev-parse","--verify","HEAD"]).ok);
@@ -859,12 +1052,12 @@ fn stash_and_commit_all_refuse_unresolved_operations_without_changing_the_index(
         assert!(git::run(d,&["checkout","-q","main"]).ok);std::fs::write(d.join("file.txt"),"main\n").unwrap();assert!(git::run(d,&["commit","-qam","main"]).ok);
         assert!(!git::run(d,&[operation,"side"]).ok);let before=head(d);let index=git::run(d,&["ls-files","--stage","-z"]).stdout;let working=std::fs::read(d.join("file.txt")).unwrap();
         let engine=Engine::default();let repo=d.to_string_lossy();
-        let actions=[Action::Stash {message:"unsafe".into()},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:true,skip_hooks:false,strip_comments:false},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}];
+        let actions=[Action::Stash {message:"unsafe".into()},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:true,skip_hooks:false,strip_comments:false, sign_off: false},Action::Commit {summary:"unsafe".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false, sign_off: false}];
         for action in actions {assert!(!engine.perform(&repo,action).ok);assert_eq!(git::run(d,&["ls-files","--stage","-z"]).stdout,index);assert_eq!(std::fs::read(d.join("file.txt")).unwrap(),working);assert_eq!(head(d),before);}
         if operation=="merge" {
             assert!(d.join(".git/MERGE_HEAD").exists());std::fs::write(d.join("file.txt"),"resolved\n").unwrap();assert!(git::run(d,&["add","file.txt"]).ok);
             assert!(!engine.perform(&repo,Action::Stash {message:"still merging".into()}).ok);
-            assert!(engine.perform(&repo,Action::Commit {summary:"resolved".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false}).ok);
+            assert!(engine.perform(&repo,Action::Commit {summary:"resolved".into(),description:String::new(),amend:false,stage_all:false,skip_hooks:false,strip_comments:false, sign_off: false}).ok);
             assert_eq!(git::run(d,&["rev-list","--parents","-n","1","HEAD"]).stdout.split_whitespace().count(),3);
         }
     }
@@ -875,7 +1068,7 @@ fn ordinary_commit_cleanup_honors_the_configured_comment_character() {
     for character in ["#",";"] {for strip in [false,true] {
         let folder=fixture("gitcraft-comment-cleanup-");let d=folder.path();assert!(git::run(d,&["config","core.commentChar",character]).ok);
         std::fs::write(d.join("file.txt"),"change\n").unwrap();
-        let result=Engine::default().perform(&d.to_string_lossy(),Action::Commit {summary:"Subject".into(),description:format!("{character} Template comment\nKept description"),amend:false,stage_all:true,skip_hooks:false,strip_comments:strip});assert!(result.ok,"{}",result.message);
+        let result=Engine::default().perform(&d.to_string_lossy(),Action::Commit {summary:"Subject".into(),description:format!("{character} Template comment\nKept description"),amend:false,stage_all:true,skip_hooks:false,strip_comments:strip, sign_off: false});assert!(result.ok,"{}",result.message);
         let body=git::run(d,&["log","-1","--format=%B"]).stdout;assert_eq!(body.contains("Template comment"),!strip);assert!(body.contains("Kept description"));
     }}
 }
@@ -966,4 +1159,222 @@ fn dense_diff_payloads_are_bounded_and_never_applied_as_partial_patches() {
     assert!(git::run(d,&["add","dense.txt"]).ok);
     assert_eq!(git::file_diff_opts(d,&git::DiffSource::Staged,"dense.txt",false,None,false)[0].kind,git::DiffLineKind::Limit);
     assert_eq!(git::run(d,&["show",":dense.txt"]).stdout,"x\n".repeat(100000));
+}
+
+#[test]
+fn legacy_encoded_mailbox_patch_preserves_commit_and_file_bytes() {
+    let fixture = fixture("gitcraft-patch-encoding-");
+    let dir = fixture.path();
+    let base = head(dir);
+    std::fs::write(dir.join("file.txt"), b"caf\xe9\n").unwrap();
+    assert!(git::run(dir, &["commit", "-qam", "Keep legacy text"]).ok);
+    let patch = crate::extras::make_patch(dir, &[head(dir)]).unwrap();
+    assert!(patch.starts_with(b"From "));
+    assert!(patch.windows(5).any(|part| part == b"caf\xe9\n"));
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), patch).unwrap();
+    assert!(git::run(dir, &["checkout", "-q", "-b", "import", &base]).ok);
+    let output = crate::extras::apply_patch_file(dir, file.path(), &|args| git::run(dir, args));
+    assert!(output.ok, "{}", output.message());
+    assert_eq!(git::run(dir, &["log", "-1", "--format=%s"]).stdout.trim(), "Keep legacy text");
+    assert_eq!(std::fs::read(dir.join("file.txt")).unwrap(), b"caf\xe9\n");
+    let missing = dir.join("missing.patch");
+    assert!(!crate::extras::apply_patch_file(dir, &missing, &|_| panic!("Unreadable patch ran Git")).ok);
+}
+
+#[test]
+fn default_target_prefers_configured_remote_and_preserves_slashes() {
+    let fixture = fixture("gitcraft-default-target-fork-");
+    let dir = fixture.path();
+    let oid = head(dir);
+    for input in [
+        vec!["remote", "add", "origin", "https://origin.example.invalid/repo"],
+        vec!["remote", "add", "team/upstream", "https://upstream.example.invalid/repo"],
+        vec!["update-ref", "refs/remotes/origin/main", &oid],
+        vec!["update-ref", "refs/remotes/team/upstream/release/current", &oid],
+        vec!["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        vec!["symbolic-ref", "refs/remotes/team/upstream/HEAD", "refs/remotes/team/upstream/release/current"],
+        vec!["config", "branch.main.remote", "team/upstream"],
+    ] {
+        let result = git::run(dir, &input);
+        assert!(result.ok, "{}", result.message());
+    }
+    assert_eq!(crate::extras::default_branch_for(dir, "main"), Some(("team/upstream/release/current".into(), "release/current".into())));
+}
+
+#[test]
+fn configured_commit_template_and_signoff_use_git_settings() {
+    let fixture = fixture("gitcraft-template-signoff-");
+    let dir = fixture.path();
+    std::fs::write(dir.join("commit-template.txt"), "Template summary\n\nTemplate body\n# Guidance only\n").unwrap();
+    assert!(git::run(dir, &["config", "commit.template", "commit-template.txt"]).ok);
+    assert!(git::run(dir, &["config", "core.commentChar", "#"]).ok);
+    assert_eq!(crate::extras::commit_template(dir).unwrap(), Some(("Template summary".into(), "Template body".into())));
+    std::fs::write(dir.join("file.txt"), "signed off\n").unwrap();
+    assert!(git::run(dir, &["add", "--", "file.txt"]).ok);
+    let result = Engine::default().perform(&dir.to_string_lossy(), Action::Commit {
+        summary: "Signed off".into(), description: String::new(), amend: false, stage_all: false,
+        skip_hooks: false, strip_comments: false, sign_off: true,
+    });
+    assert!(result.ok, "{}", result.message);
+    assert!(git::run(dir, &["log", "-1", "--format=%B"]).stdout.contains("Signed-off-by:"));
+}
+
+#[test]
+fn history_fetch_restores_a_shallow_local_clone() {
+    let source = fixture("gitcraft-history-origin-");
+    for name in ["middle", "latest"] {
+        assert!(git::run(source.path(), &["commit", "--allow-empty", "-qm", name]).ok);
+    }
+    let destination = tempfile::tempdir().unwrap();
+    let remote = tauri::Url::from_file_path(source.path()).unwrap();
+    let clone = git::run(destination.path(), &["clone", "--depth=1", "--origin", "upstream", remote.as_str(), "."]);
+    assert!(clone.ok, "{}", clone.message());
+    let options = crate::extras::history_fetch_info(destination.path()).unwrap();
+    assert!(options.shallow);
+    assert_eq!(options.remotes, ["upstream"]);
+    let result = Engine::default().perform(&destination.path().to_string_lossy(), Action::FetchHistory {
+        remote: "upstream".into(), mode: "unshallow".into(),
+    });
+    assert!(result.ok, "{}", result.message);
+    let options = crate::extras::history_fetch_info(destination.path()).unwrap();
+    assert!(!options.shallow);
+    assert_eq!(git::run(destination.path(), &["rev-list", "--count", "HEAD"]).stdout.trim(), "3");
+}
+
+#[test]
+fn lfs_patterns_include_nested_paths_and_spaces_when_lfs_is_installed() {
+    let root = fixture("gitcraft-lfs-rules-");
+    let dir = root.path();
+    if !git::run(dir, &["lfs", "version"]).ok { return; }
+    std::fs::create_dir(dir.join("nested")).unwrap();
+    std::fs::write(dir.join(".gitattributes"), "*.large filter=lfs diff=lfs\n").unwrap();
+    std::fs::write(dir.join("nested/.gitattributes"), "\"file with space.bin\" filter=lfs\n").unwrap();
+    let patterns = crate::manage::lfs_info(dir).patterns;
+    assert!(patterns.iter().any(|pattern| pattern == "*.large"), "{patterns:?}");
+    assert!(patterns.iter().any(|pattern| pattern == "nested/file with space.bin"), "{patterns:?}");
+}
+
+#[test]
+fn history_filters_use_git_pickaxe_and_survive_paging() {
+    let fixture = fixture("gitcraft-history-filter-");
+    let dir = fixture.path();
+    let g = |args: &[&str]| { let output = git::run(dir, args); assert!(output.ok, "{}", output.message()); };
+    g(&["config", "user.name", "Jess [Fixture]"]);
+    std::fs::create_dir(dir.join("project")).unwrap();
+    std::fs::write(dir.join("project/test.txt"), "a target's line\n").unwrap();
+    g(&["add", "--", "project"]);
+    g(&["commit", "-qm", "add target"]);
+    let first = head(dir);
+    std::fs::write(dir.join("project/test.txt"), "a different line\n").unwrap();
+    g(&["commit", "-qam", "remove target"]);
+    let second = head(dir);
+    std::fs::write(dir.join("file.txt"), "target outside folder\n").unwrap();
+    g(&["commit", "-qam", "outside"]);
+    let filter = git::HistoryFilter {
+        author: Some("[fixture]".into()), path: Some("project".into()), text: Some("target".into()), mode: Some("text".into()),
+    };
+    let view = git::RefView { filter: filter.clone(), ..Default::default() };
+    let data = git::load_view_checked(dir, 1, &view).unwrap();
+    assert!(data.has_more);
+    assert_eq!(data.commits[0].sha, second);
+    let (page, more) = git::history_page(dir, &data.history_revs, 1, 1, &filter).unwrap();
+    assert!(!more);
+    assert_eq!(page[0].sha, first);
+    let regex = git::HistoryFilter { text: Some("target.*line".into()), mode: Some("regex".into()), ..filter };
+    let regex_view = git::RefView { filter: regex, ..Default::default() };
+    let data = git::load_view_checked(dir, 10, &regex_view).unwrap();
+    assert_eq!(data.commits.iter().map(|commit| commit.sha.as_str()).collect::<Vec<_>>(), [second.as_str(), first.as_str()]);
+}
+
+#[test]
+fn file_history_keeps_its_tip_and_follows_renames_between_pages() {
+    let fixture = fixture("gitcraft-file-history-paging-");
+    let dir = fixture.path();
+    let base = head(dir);
+    assert!(git::run(dir, &["mv", "file.txt", "renamed.txt"]).ok);
+    assert!(git::run(dir, &["commit", "-qm", "rename"]).ok);
+    let renamed = head(dir);
+    std::fs::write(dir.join("renamed.txt"), "one\n").unwrap();
+    assert!(git::run(dir, &["commit", "-qam", "one"]).ok);
+    let first = crate::files::file_history_page(dir, "renamed.txt", None, 1).unwrap();
+    assert_eq!(first.entries[0].commit.sha, head(dir));
+    std::fs::write(dir.join("renamed.txt"), "two\n").unwrap();
+    assert!(git::run(dir, &["commit", "-qam", "two"]).ok);
+    let second = crate::files::file_history_page(dir, "renamed.txt", first.cursor, 1).unwrap();
+    assert_eq!(second.entries[0].commit.sha, renamed);
+    let last = crate::files::file_history_page(dir, "renamed.txt", second.cursor, 1).unwrap();
+    assert_eq!(last.entries[0].commit.sha, base);
+    assert_eq!(last.entries[0].path, "file.txt");
+    assert!(last.cursor.is_none());
+}
+
+#[test]
+fn pull_request_templates_include_nested_templates_for_both_services() {
+    let fixture = fixture("gitcraft-pr-template-selection-");
+    let dir = fixture.path();
+    std::fs::create_dir_all(dir.join(".github/PULL_REQUEST_TEMPLATE")).unwrap();
+    std::fs::create_dir_all(dir.join(".gitlab/merge_request_templates")).unwrap();
+    std::fs::write(dir.join(".github/PULL_REQUEST_TEMPLATE/Feature.md"), "Feature").unwrap();
+    std::fs::write(dir.join(".gitlab/merge_request_templates/Fix.md"), "Fix").unwrap();
+    let templates = crate::extras::pr_templates(dir);
+    assert_eq!(templates.len(), 2);
+    assert_eq!(templates[0].name, ".github/PULL_REQUEST_TEMPLATE/Feature.md");
+    assert_eq!(templates[1].body, "Fix");
+}
+
+#[test]
+fn range_diff_compares_patches_and_maintenance_writes_graph() {
+    let fixture = fixture("gitcraft-range-maintenance-");
+    let dir = fixture.path();
+    let base = head(dir);
+    std::fs::write(dir.join("file.txt"), "new line\n").unwrap();
+    assert!(git::run(dir, &["commit", "-qam", "original subject"]).ok);
+    let before = head(dir);
+    assert!(git::run(dir, &["commit", "--amend", "-qm", "revised subject"]).ok);
+    let after = head(dir);
+    let output = crate::extras::range_diff(dir, &format!("{base}..{before}"), &format!("{base}..{after}")).unwrap();
+    assert!(output.contains("original subject") && output.contains("revised subject"), "{output}");
+    assert_eq!(head(dir), after);
+    let graph = Engine::default().perform(&dir.to_string_lossy(), Action::MaintainRepository { task: "commitGraph".into() });
+    assert!(graph.ok, "{}", graph.message);
+    assert!(dir.join(".git/objects/info/commit-graph").is_file());
+}
+
+#[test]
+fn blame_can_ignore_a_revision_and_respects_mailmap() {
+    let fixture = fixture("gitcraft-blame-options-");
+    let dir = fixture.path();
+    let original = head(dir);
+    std::fs::write(dir.join("file.txt"), "base  \n").unwrap();
+    assert!(git::run(dir, &["commit", "-qam", "adjust whitespace"]).ok);
+    let edited = head(dir);
+    std::fs::write(dir.join(".git-blame-ignore-revs"), format!("{edited}\n")).unwrap();
+    std::fs::write(dir.join(".mailmap"), "Canonical Tester <canonical@example.test> Test <test@example.com>\n").unwrap();
+    let tracking = crate::files::blame(dir, "file.txt", None, false).unwrap();
+    let ignoring = crate::files::blame(dir, "file.txt", None, true).unwrap();
+    assert_eq!(tracking[0].sha, edited);
+    assert_eq!(ignoring[0].sha, original);
+    assert_eq!(ignoring[0].author, "Canonical Tester");
+    assert_eq!(git::load_view_checked(dir, 10, &Default::default()).unwrap().commits[0].author, "Canonical Tester");
+}
+
+#[test]
+fn pull_rebase_autostash_restores_dirty_tracked_changes() {
+    let remote = fixture("gitcraft-pull-autostash-remote-");
+    let local = tempfile::tempdir().unwrap();
+    let url = tauri::Url::from_file_path(remote.path()).unwrap();
+    let clone = git::run(local.path(), &["clone", "-c", "core.autocrlf=false", url.as_str(), "."]);
+    assert!(clone.ok, "{}", clone.message());
+    assert!(git::run(local.path(), &["config", "user.name", "Autostash Fixture"]).ok);
+    assert!(git::run(local.path(), &["config", "user.email", "autostash@example.test"]).ok);
+    std::fs::write(remote.path().join("incoming.txt"), "from upstream\n").unwrap();
+    assert!(git::run(remote.path(), &["add", "incoming.txt"]).ok);
+    assert!(git::run(remote.path(), &["commit", "-qm", "incoming"]).ok);
+    let edit = "local unstaged edit\n";
+    std::fs::write(local.path().join("file.txt"), edit).unwrap();
+    let result = Engine::default().perform(&local.path().to_string_lossy(), Action::Pull { mode: "rebase".into(), autostash: Some(true) });
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(head(local.path()), head(remote.path()));
+    assert_eq!(std::fs::read_to_string(local.path().join("file.txt")).unwrap(), edit);
 }

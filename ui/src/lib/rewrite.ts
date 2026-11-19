@@ -65,16 +65,45 @@ export function openCherryPick(tabId: string, repo: RepoView, shas: string[]) {
 
 /** Turn the shown plan (newest first) into git's order (oldest first). */
 export function todo(plan: RebasePlan): TodoItem[] {
-  return [...plan.items].reverse().map((i) => ({ action: i.action, sha: i.sha, message: i.action === "reword" ? i.message : null }));
+  return [...plan.items].reverse().flatMap((item) => {
+    const result: TodoItem[] = [{ action: item.action, sha: item.sha, message: item.action === "reword" ? item.message : null }];
+    if (item.action !== "drop" && item.command?.trim()) result.push({ action: "exec", sha: item.sha, message: item.command.trim() });
+    return result;
+  });
 }
 
-export async function runPlan(tabId: string, path: string, plan: RebasePlan) {
+export function autosquash(items: RebaseItem[]): RebaseItem[] {
+  const ordered: RebaseItem[] = [];
+  const targets = new Map<string, string>();
+  for (const item of [...items].reverse()) {
+    const marker = /^(fixup|squash)! (.+)$/.exec(item.summary);
+    if (!marker) {
+      ordered.push(item);
+      continue;
+    }
+    const subject = marker[2].replace(/^(?:(?:fixup|squash)! )+/, "");
+    const eligible = ordered.filter(candidate => candidate.action !== "drop" && !targets.has(candidate.sha));
+    const target = eligible.find(candidate => candidate.summary === subject || (/^[a-f0-9]{4,64}$/i.test(subject) && candidate.sha.startsWith(subject)))
+      ?? eligible.find(candidate => candidate.summary.startsWith(subject));
+    if (!target) {
+      ordered.push(item);
+      continue;
+    }
+    let position = ordered.indexOf(target) + 1;
+    while (position < ordered.length && targets.get(ordered[position].sha) === target.sha) position++;
+    targets.set(item.sha, target.sha);
+    ordered.splice(position, 0, { ...item, action: marker[1] === "fixup" ? "fixup" : "squash" });
+  }
+  return ordered.reverse();
+}
+
+export async function runPlan(tabId: string, path: string, plan: RebasePlan, skipHooks = false) {
   const st = useStore.getState();
   const items = todo(plan);
   const ok =
     plan.mode === "rebase"
-      ? await act(path, { type: "interactiveRebase", base: plan.base, items, expected: plan.expected! })
-      : await act(path, { type: "interactiveCherryPick", items: items.filter((i) => i.action !== "drop") });
+      ? await act(path, { type: "interactiveRebase", base: plan.base, items, expected: plan.expected!, skipHooks })
+      : await act(path, { type: "interactiveCherryPick", items: items.filter((i) => i.action !== "drop"), skipHooks });
   st.setUi(tabId, { rebase: null, multi: [] });
   return ok;
 }

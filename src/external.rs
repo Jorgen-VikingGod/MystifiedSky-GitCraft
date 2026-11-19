@@ -1,7 +1,7 @@
 //! Preferences > External Tools: open a repository or file in the chosen editor, and a terminal in the chosen
 //! terminal app (custom executables take arguments with $REPO_PATH and $FILE).
 
-use std::process::Command;
+use std::{path::{Path, PathBuf}, process::Command};
 
 fn spawn(mut c: Command) -> Result<(), String> {
     #[cfg(windows)]
@@ -56,27 +56,55 @@ pub fn editor_command(tool: &str) -> Option<&'static str> {
         "windsurf" => "windsurf",
         "zed" => "zed",
         "sublime" => "subl",
-        "notepadpp" => "notepad++",
-        "idea" => "idea64",
-        "webstorm" => "webstorm64",
-        "rider" => "rider64",
-        "vs" => "devenv",
+        "notepadpp" if cfg!(windows) => "notepad++",
+        "idea" => if cfg!(windows) { "idea64" } else { "idea" },
+        "webstorm" => if cfg!(windows) { "webstorm64" } else { "webstorm" },
+        "rider" => if cfg!(windows) { "rider64" } else { "rider" },
+        "vs" if cfg!(windows) => "devenv",
         _ => return None,
     })
 }
 
 /// Resolve native programs and launcher scripts without asking a command shell to parse a file path.
-fn program_path(name: &str) -> std::path::PathBuf {
-    let extensions: &[&str] = if cfg!(windows) { &["exe", "com", "cmd", "bat"] } else { &[""] };
-    if let Some(paths) = std::env::var_os("PATH") {
-        for folder in std::env::split_paths(&paths) {
-            for ext in extensions {
-                let candidate = folder.join(if ext.is_empty() { name.to_owned() } else { format!("{name}.{ext}") });
-                if candidate.is_file() { return candidate; }
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
+    let path = Path::new(name);
+    if path.is_absolute() { return path.is_file().then(|| path.to_path_buf()); }
+    if path.components().count() != 1 { return None; }
+    let extensions: &[&str] = if cfg!(windows) && path.extension().is_none() { &["exe", "com", "cmd", "bat"] } else { &[""] };
+    let folders = std::env::var_os("PATH")?;
+    for folder in std::env::split_paths(&folders).filter(|path| path.is_absolute()) {
+        for ext in extensions {
+            let candidate = folder.join(if ext.is_empty() { name.to_owned() } else { format!("{name}.{ext}") });
+            if candidate.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if !candidate.metadata().is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0) { continue; }
+                }
+                return Some(candidate);
             }
         }
     }
-    name.into()
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn git_for_windows_program(relative: &str) -> Option<PathBuf> {
+    let git = find_program(&crate::prefs::git_program())?;
+    git.parent()?.ancestors().take(4).map(|root| root.join(relative)).find(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn add_macos_tool_paths() {
+    // Finder uses a system-only PATH. Preserve the user's existing tool order when
+    // launched from a shell and place missing package managers before the OS shims.
+    let existing = std::env::var_os("PATH").filter(|path| !path.is_empty()).unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    let mut folders: Vec<_> = std::env::split_paths(&existing).filter(|path| path.is_absolute()).collect();
+    let package_managers = if cfg!(target_arch = "aarch64") { ["/opt/homebrew/bin", "/usr/local/bin"] } else { ["/usr/local/bin", "/opt/homebrew/bin"] };
+    let missing = package_managers.into_iter().map(PathBuf::from).filter(|path| path.is_dir() && !folders.contains(path)).collect::<Vec<_>>();
+    let system = folders.iter().position(|path| path == Path::new("/usr/bin")).unwrap_or(folders.len());
+    folders.splice(system..system, missing);
+    if let Ok(path) = std::env::join_paths(folders) { std::env::set_var("PATH", path); }
 }
 
 fn editor_process(program: &std::path::Path, target: &str, repo: &str) -> Command {
@@ -97,10 +125,36 @@ pub fn open_editor(repo: &str, file: Option<&str>, tool: &str, exe: &str, file_a
         c.args(split_args(template, repo, full_file.as_deref().unwrap_or(""))).current_dir(repo);
         return spawn(c);
     }
-    let cmd = editor_command(tool).unwrap_or("code");
-    let target = full_file.unwrap_or_else(|| ".".into());
-    // Rust handles .cmd/.bat launchers with its own argument escaping.
-    spawn(editor_process(&program_path(cmd), &target, repo))
+    let cmd = editor_command(tool).ok_or_else(|| "Choose a supported editor in Preferences > External Tools.".to_owned())?;
+    let target = full_file.unwrap_or_else(|| repo.into());
+    if let Some(program) = find_program(cmd) { return spawn(editor_process(&program, &target, repo)); }
+    #[cfg(target_os = "macos")]
+    {
+        let app = match tool {
+            "vscode" => "Visual Studio Code", "cursor" => "Cursor", "windsurf" => "Windsurf",
+            "zed" => "Zed", "sublime" => "Sublime Text", "idea" => "IntelliJ IDEA",
+            "webstorm" => "WebStorm", "rider" => "Rider", _ => return Err(format!("Editor launcher {cmd} wasn't found.")),
+        };
+        // Wait for Launch Services to confirm that the requested app was found.
+        return open_mac_app(app, &target);
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err(format!("Editor launcher {cmd} wasn't found. Choose its executable in Preferences > External Tools."))
+}
+
+#[cfg(target_os = "macos")]
+fn open_mac_app(app: &str, path: &str) -> Result<(), String> {
+    let result = Command::new("/usr/bin/open").args(["-a", app, path]).output().map_err(|error| error.to_string())?;
+    if result.status.success() { Ok(()) } else { Err(format!("Could not open {app}: {}", String::from_utf8_lossy(&result.stderr).trim())) }
+}
+
+fn spawn_terminal(mut command: Command) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
+    }
+    command.spawn().map(|_| ()).map_err(|error| format!("Could not start {:?}: {error}", command.get_program()))
 }
 
 /// Open a terminal app in the repository folder.
@@ -109,46 +163,93 @@ pub fn open_terminal(repo: &str, tool: &str, exe: &str, args: &str) -> Result<()
         if exe.trim().is_empty() {
             return Err("Choose the terminal executable in Preferences > External Tools.".into());
         }
-        let mut c = Command::new(exe.trim());
-        c.args(split_args(args, repo, "")).current_dir(repo);
-        return spawn(c);
+        let mut command = Command::new(exe.trim());
+        command.args(split_args(args, repo, "")).current_dir(repo);
+        return spawn_terminal(command);
     }
-    if !cfg!(windows) {
-        let mut c = Command::new(if cfg!(target_os = "macos") { "open" } else { "x-terminal-emulator" });
-        if cfg!(target_os = "macos") {
-            c.args(["-a", "Terminal", repo]);
-        }
-        c.current_dir(repo);
-        return spawn(c);
-    }
-    let has_wt = Command::new("where").arg("wt").output().map(|o| o.status.success()).unwrap_or(false);
-    let mut c = Command::new("cmd");
-    match tool {
-        "wt" => c.args(["/C", "start", "", "wt", "-d", repo]),
-        "default" if has_wt => c.args(["/C", "start", "", "wt", "-d", repo]),
-        "powershell" => c.args(["/C", "start", "", "powershell", "-NoExit"]),
-        "pwsh" => c.args(["/C", "start", "", "pwsh", "-NoExit"]),
-        "gitbash" => {
-            let git = Command::new("where").arg("git").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string()).unwrap_or_default();
-            let gb = std::path::Path::new(&git).parent().and_then(|p| p.parent()).map(|p| p.join("git-bash.exe")).filter(|p| p.exists());
-            match gb {
-                Some(p) => {
-                    let p = p.to_string_lossy().into_owned();
-                    c.args(["/C", "start", "", &p, &format!("--cd={repo}")])
-                }
-                None => return Err("Git Bash wasn't found.".into()),
+    #[cfg(windows)]
+    { return spawn_terminal(windows_terminal(repo, tool)?); }
+    #[cfg(target_os = "macos")]
+    {
+        return match tool {
+            "default" => open_mac_app("Terminal", repo),
+            "iterm" => open_mac_app("iTerm", repo),
+            "warp" => open_mac_app("Warp", repo),
+            "ghostty" => {
+                let result = Command::new("/usr/bin/open").args(["-n", "-a", "Ghostty", "--args", &format!("--working-directory={repo}")]).output().map_err(|error| error.to_string())?;
+                if result.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&result.stderr).trim().into()) }
             }
+            _ => Err("Choose a supported terminal in Preferences > External Tools.".into()),
+        };
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if tool != "default" { return Err("Choose a supported terminal in Preferences > External Tools.".into()); }
+        let configured = std::env::var("TERMINAL").ok();
+        let program = configured.as_deref().and_then(find_program).or_else(|| {
+            ["xdg-terminal-exec", "x-terminal-emulator", "gnome-terminal", "konsole", "xfce4-terminal", "kitty", "alacritty", "wezterm", "xterm"].into_iter().find_map(find_program)
+        }).ok_or("No terminal launcher found. Choose one in Preferences > External Tools.")?;
+        let mut command = Command::new(&program);
+        match program.file_name().and_then(|name| name.to_str()) {
+            Some("gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty") => { command.arg(format!("--working-directory={repo}")); }
+            Some("kitty") => { command.args(["--directory", repo]); }
+            Some("wezterm") => { command.args(["start", "--cwd", repo]); }
+            _ => {}
         }
-        _ => c.args(["/C", "start", "", "cmd"]),
+        command.current_dir(repo);
+        spawn_terminal(command)
+    }
+}
+
+/// Escape a value for Windows Terminal's own `;` subcommand separator.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wt_literal(value: &str) -> String {
+    value.replace(';', "\\;")
+}
+
+#[cfg(windows)]
+fn windows_terminal(repo: &str, tool: &str) -> Result<Command, String> {
+    let mut command = match tool {
+        "default" | "wt" if tool == "wt" || find_program("wt.exe").is_some() => {
+            let mut command = Command::new("wt.exe");
+            // Windows Terminal splits its own command line at `;` (new tab or pane), even inside
+            // a quoted argument. `\;` is its escape for a literal semicolon in a folder name.
+            command.args(["-d", &wt_literal(repo)]);
+            command
+        }
+        "powershell" | "pwsh" => {
+            let mut command = Command::new(if tool == "pwsh" { "pwsh.exe" } else { "powershell.exe" });
+            command.arg("-NoExit");
+            command
+        }
+        "gitbash" => {
+            let program = git_for_windows_program("git-bash.exe").ok_or("Git Bash wasn't found next to the configured Git executable.")?;
+            let mut command = Command::new(program);
+            command.arg(format!("--cd={repo}"));
+            command
+        }
+        "default" | "cmd" => Command::new("cmd.exe"),
+        _ => return Err("Choose a supported terminal in Preferences > External Tools.".into()),
     };
-    c.current_dir(repo);
-    spawn(c)
+    command.current_dir(repo);
+    Ok(command)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_terminal_treats_the_repository_as_an_argument() {
+        for folder in ["R&D", "a^b", "100%", "x|y", "has space", "x;calc"] {
+            let path = format!(r"C:\repo\{folder}");
+            let command = windows_terminal(&path, "wt").unwrap();
+            assert_eq!(command.get_program(), "wt.exe");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), [std::ffi::OsStr::new("-d"), std::ffi::OsStr::new(&wt_literal(&path))]);
+            assert_eq!(command.get_current_dir(), Some(Path::new(&path)));
+        }
+    }
     #[cfg(windows)]
     #[test]
     fn batch_editor_receives_shell_characters_as_one_literal_file_argument() {
@@ -161,6 +262,12 @@ mod tests {
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(text.contains(target), "{text}");
         assert!(!text.contains("Microsoft Windows"), "Filename executed as a shell command: {text}");
+    }
+
+    #[test]
+    fn windows_terminal_semicolons_stay_in_the_folder_argument() {
+        assert_eq!(wt_literal(r"C:\repo\x;calc"), r"C:\repo\x\;calc");
+        assert_eq!(wt_literal(r"C:\repo\plain"), r"C:\repo\plain");
     }
 
     #[test]

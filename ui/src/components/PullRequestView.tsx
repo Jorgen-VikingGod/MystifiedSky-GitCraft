@@ -1,10 +1,13 @@
+import { PullReview } from "./PullReview";
+import { CommitChecks } from "./CommitChecks";
+import { HostedMarkdown } from "./HostedMarkdown";
 import { useShallow } from "zustand/react/shallow";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, GitPullRequest, CircleDot, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { RepoView } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { act, confirmThen } from "@/lib/repo";
+import { act, confirmThen, refresh } from "@/lib/repo";
 import { branchFromIssue, hosting, issueIdentity } from "@/lib/hosting";
 import { Button } from "./ui/button";
 import { Avatar } from "./Icons";
@@ -28,12 +31,20 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
     queryFn: ({pageParam, signal}) => hosting.commentsPage(repo.path, number, pageParam, signal), getNextPageParam: page => page.cursor ?? undefined });
   const commentRows = useMemo(() => [...new Map((comments.data?.pages.flatMap(page => page.items) ?? []).map(c => [c.id || JSON.stringify([c.author,c.created,c.body]), c])).values()], [comments.data]);
   const [text, setText] = useState("");
-  const [method, setMethod] = useState("merge");
+  const [method, setMethod] = useState("");
+  const [squashMessage, setSquashMessage] = useState("");
+  const [merged, setMerged] = useState<{ number: number; source: string; sha: string } | null>(null);
+  const [remoteDeleted, setRemoteDeleted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [merging, setMerging] = useState(false);
-  const serverDefault = remote.data?.service === "bitbucket-server";
-  const selectedMethod = serverDefault ? "default" : method;
-  const methodLabel = serverDefault ? "server default strategy" : method;
+  const methods = pr?.merge_methods ?? (remote.data?.service === "bitbucket-server" ? ["default"] : []);
+  const selectedMethod = methods.includes(method) ? method : methods[0] ?? "";
+  const labels: Record<string, string> = {
+    default: "Server default", unsquashed: "Merge without squashing", merge: "Merge commit", squash: "Squash and merge",
+    rebase: "Rebase and merge", fast_forward: "Fast-forward", rebase_merge: "Rebase with merge commit",
+  };
+  const methodLabel = selectedMethod === "default" ? "server default strategy" : labels[selectedMethod];
+  const mergeStatus = pr?.merge_status || (pr?.draft ? "Draft pull requests cannot be merged." : null);
   const close = () => s.setUi(tabId, { pr: null });
   const checkout = async () => {
     setBusy(true);
@@ -59,18 +70,39 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
     confirmThen(`Merge #${number}?`, `This merges ${pr?.source} into ${pr?.target} on the server (${methodLabel}).`, "Merge", async () => {
       setBusy(true); setMerging(true);
       try {
-        await hosting.merge(repo.path, number, selectedMethod);
+        await hosting.merge(repo.path, number, selectedMethod, pr?.source_sha || undefined, selectedMethod === "squash" ? squashMessage.trim() || undefined : undefined);
+        if (pr?.source_sha) setMerged({ number, source: pr.source, sha: pr.source_sha });
         s.toast(true, `Merged #${number}`);
         qc.invalidateQueries({ queryKey: ["prs", repo.path] });
         qc.invalidateQueries({ queryKey: ["prsPages", repo.path] });
         qc.invalidateQueries({ queryKey: ["launchpadPages"] });
         qc.invalidateQueries({ queryKey: ["pr", repo.path, number] });
         void act(repo.path, { type: "fetch" }, true);
-        close();
       } catch (e) {
         s.toast(false, String(e));
       } finally { setBusy(false); setMerging(false); }
     });
+
+  const mergedSource = merged?.number === number ? merged
+    : pr?.source_sha && ["merged", "completed"].includes(pr.state.toLowerCase()) ? { number, source: pr.source, sha: pr.source_sha } : null;
+  const localSource = mergedSource && repo.head_branch !== mergedSource.source &&
+    repo.refs.some(ref => ref.kind === "Local" && ref.name === mergedSource.source && ref.sha === mergedSource.sha);
+  const deleteSource = (fromRemote: boolean) => {
+    if (!mergedSource) return;
+    const where = fromRemote ? "the source repository" : "this clone";
+    confirmThen("Delete merged branch?", "Delete " + mergedSource.source + " from " + where + " if it still matches the merged commit?", "Delete Branch", async () => {
+      setBusy(true);
+      try {
+        await hosting.deleteMergedSource(repo.path, number, mergedSource.sha, fromRemote);
+        if (fromRemote) {
+          setRemoteDeleted(true);
+          await act(repo.path, { type: "fetch" }, true);
+        } else await refresh(repo.path);
+        s.toast(true, "Deleted " + mergedSource.source + " from " + where);
+      } catch (error) { s.toast(false, String(error)); }
+      finally { setBusy(false); }
+    });
+  };
 
   return (
     <div className="h-full flex flex-col bg-app min-w-0">
@@ -106,18 +138,28 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
             <Button size="sm" disabled={busy} onClick={checkout} title="Check out this pull request’s exact source commit in detached HEAD mode">
               Checkout {pr.source}
             </Button>
-            <select disabled={busy || !remote.data} value={selectedMethod} onChange={(e) => setMethod(e.target.value)} className="h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none">
-              {serverDefault ? <option value="default">Server default</option> : <>
-                <option value="merge">Merge commit</option>
-                <option value="squash">Squash and merge</option>
-                <option value="rebase">Rebase and merge</option>
-              </>}
-            </select>
-            <Button size="sm" variant="success" disabled={busy || pr.draft || !remote.data} onClick={merge} title={pr.draft ? "Draft pull requests can't be merged" : ""}>
+            {!mergedSource && !!methods.length && <select aria-label="Merge method" disabled={busy} value={selectedMethod} onChange={(e) => setMethod(e.target.value)} className="h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none">
+              {methods.map(method => <option key={method} value={method}>{labels[method]}</option>)}
+            </select>}
+            {!mergedSource && <Button size="sm" variant="success" disabled={busy || !!mergeStatus || !selectedMethod} onClick={merge} title={mergeStatus ?? undefined}>
               Merge Pull Request
-            </Button>
+            </Button>}
+            <Button size="sm" disabled={busy || prs.isFetching} onClick={() => void prs.refetch()}>Refresh merge status</Button>
+            {mergedSource && <>
+              {!remoteDeleted && <Button size="sm" disabled={busy} onClick={() => deleteSource(true)}>Delete remote source branch</Button>}
+              {localSource && <Button size="sm" disabled={busy} onClick={() => deleteSource(false)}>Delete local source branch</Button>}
+            </>}
           </div>
-          <div className="rounded border border-white/10 bg-panel p-3 text-[13px] text-fg whitespace-pre-wrap break-words mb-4 select-text">{pr.body || <span className="text-fg3">No description.</span>}</div>
+          {!mergedSource && selectedMethod === "squash" && !mergeStatus && <label className="block mb-3 text-[12.5px] text-fg2">
+            Squash commit message
+            <textarea value={squashMessage} onChange={event => setSquashMessage(event.target.value)} maxLength={16000}
+              className="mt-1 w-full min-h-14 bg-field border border-line rounded px-2 py-1 text-fg" placeholder="Leave blank to use the server default" disabled={busy} />
+          </label>}
+          {mergedSource && <div role="status" className="mb-3 text-[12.5px] text-good">Merged</div>}
+          {!mergedSource && (mergeStatus || !selectedMethod) && <div className="mb-3 text-[12.5px] text-fg2">{mergeStatus ?? "The hosting service did not provide an available merge method. Check it in the browser."}</div>}
+          <div className="rounded border border-white/10 bg-panel p-3 text-[13px] text-fg whitespace-pre-wrap break-words mb-4 select-text">{pr.body ? <HostedMarkdown text={pr.body} base={pr.url} /> : <span className="text-fg3">No description.</span>}</div>
+          {pr.source_sha && <CommitChecks key={pr.source_sha} path={repo.path} sha={pr.source_sha} number={number} />}
+          {pr.source_sha && ["github", "github-enterprise", "gitlab", "gitlab-self"].includes(remote.data?.service ?? "") && <PullReview key={pr.source_sha} path={repo.path} request={pr} />}
           <div className="text-[12px] font-semibold tracking-wider text-fg2 mb-2">COMMENTS</div>
           {comments.isLoading && <div className="text-fg3 text-[12.5px]">Loading comments…</div>}
           {!comments.isLoading && !comments.isError && commentRows.length === 0 && <div className="text-fg3 text-[12.5px] mb-2">No comments yet.</div>}
@@ -128,7 +170,7 @@ export function PullRequestView({ repo, tabId, number }: { repo: RepoView; tabId
                 <div className="text-[12px] text-fg2">
                   <span className="text-white">{c.author}</span> · <Since iso={c.created} />
                 </div>
-                <div className="text-[13px] text-fg whitespace-pre-wrap break-words select-text">{c.body}</div>
+                <div className="text-[13px] text-fg whitespace-pre-wrap break-words select-text"><HostedMarkdown text={c.body} base={pr.url} /></div>
               </div>
             </div>
           ))}
@@ -184,9 +226,28 @@ export function IssueView({ repo, tabId, number }: { repo: RepoView; tabId: stri
           <Button size="sm" variant="primary" className="mb-4" onClick={() => branchFromIssue(repo.path, issue)}>
             Create branch for this issue
           </Button>
-          <div className="rounded border border-white/10 bg-panel p-3 text-[13px] text-fg whitespace-pre-wrap break-words select-text">{issue.body || <span className="text-fg3">No description.</span>}</div>
+          <div className="rounded border border-white/10 bg-panel p-3 text-[13px] text-fg whitespace-pre-wrap break-words select-text">{issue.body ? <HostedMarkdown text={issue.body} base={issue.url} /> : <span className="text-fg3">No description.</span>}</div>
+          {["github", "gitlab", "bitbucket", "gitea", "forgejo", "codeberg"].includes(issue.tracker ?? "") && <IssueComments key={issue.number} path={repo.path} number={issue.number} url={issue.url} />}
         </div>
       )}
     </div>
   );
+}
+
+function IssueComments({ path, number, url }: { path: string; number: number; url: string }) {
+  const comments = useInfiniteQuery({ queryKey: ["issueComments", path, number, url], initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => hosting.issueCommentsPage(path, number, pageParam, signal),
+    getNextPageParam: page => page.cursor ?? undefined });
+  const rows = useMemo(() => [...new Map((comments.data?.pages.flatMap(page => page.items) ?? []).map(row => [row.id, row])).values()], [comments.data]);
+  return <div className="mt-4 text-[12px]">
+    <div className="font-semibold tracking-wider text-fg2 mb-2">COMMENTS</div>
+    {comments.isLoading && <p className="text-fg3">Loading comments…</p>}
+    {comments.isSuccess && !rows.length && <p className="text-fg3">No comments yet.</p>}
+    {rows.map(comment => <div className="mb-3" key={comment.id}>
+      <p className="text-fg2">{comment.author} · <Since iso={comment.created} /></p>
+      <HostedMarkdown text={comment.body} base={url} />
+    </div>)}
+    {comments.error && <div role="alert" className="text-bad">{String(comments.error)} <button onClick={() => comments.isFetchNextPageError ? comments.fetchNextPage() : comments.refetch()}>Retry comments</button></div>}
+    {comments.hasNextPage && <button className="text-link" disabled={comments.isFetchingNextPage} onClick={() => comments.fetchNextPage()}>Load more comments</button>}
+  </div>;
 }

@@ -41,11 +41,15 @@ function copy(source, name) {
 
 bundle("windows", "-setup.exe", ["windows-x86_64", "windows-x86_64-nsis"]);
 bundle("windows", ".msi", ["windows-x86_64-msi"]);
+bundle("windows-arm64", "-setup.exe", ["windows-aarch64", "windows-aarch64-nsis"]);
 bundle("macos", ".dmg");
 bundle("macos", ".app.tar.gz", ["darwin-aarch64", "darwin-x86_64"]);
 bundle("linux", ".AppImage", ["linux-x86_64"]);
 bundle("linux", ".deb");
 bundle("linux", ".rpm");
+bundle("linux-arm64", ".AppImage", ["linux-aarch64"]);
+bundle("linux-arm64", ".deb");
+bundle("linux-arm64", ".rpm");
 
 writeFileSync(join(output, "latest.json"), JSON.stringify({
   version,

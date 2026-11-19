@@ -80,7 +80,7 @@ GitCraft is available for **Windows, Linux, and macOS**.
 
 | Windows | Linux | macOS |
 | --- | --- | --- |
-| x64 · Installer or MSI | x64 · AppImage, DEB, or RPM | Intel & Apple silicon · Universal DMG |
+| x64 · Installer or MSI<br>ARM64 · Installer | x64 & ARM64 · AppImage, DEB, or RPM | Intel & Apple silicon · Universal DMG |
 
 <p align="center">
   <a href="https://github.com/MystifiedSky/GitCraft/releases/latest"><b>Get the latest release →</b></a>

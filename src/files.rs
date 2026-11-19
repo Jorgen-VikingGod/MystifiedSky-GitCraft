@@ -3,17 +3,13 @@
 
 use crate::git::{self, run, Commit, DiffSource, FileChange, WORKDIR};
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Runs git and returns raw stdout bytes (file contents may not be UTF-8).
 fn run_bytes(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let o = git::git_cmd(dir).args(args).output().ok()?;
-    if o.status.success() {
-        Some(o.stdout)
-    } else {
-        None
-    }
+    let output = crate::read_jobs::run_bytes(git::git_command(dir, args), 64 * 1024 * 1024, None);
+    output.ok.then_some(output.stdout)
 }
 
 /// Contents of `file` at `rev`: a commit sha, ":" for the index (staging area), or WORKDIR.
@@ -63,6 +59,7 @@ pub struct FileVersions {
     pub encoding: String,
     /// The working-folder copy can be edited and saved.
     pub editable: bool,
+    pub lockable: bool,
     pub decoding_loss: bool,
 }
 
@@ -133,10 +130,11 @@ pub fn versions_with_limit(dir: &Path, src: &DiffSource, file: &str, parent: Opt
     let original = if untracked { file.to_owned() } else { git::rename_source(dir, src, file, parent) };
     let old = if untracked { Ok(None) } else { old_rev.as_deref().map(|r| preview_contents(dir, r, &original, limit)).unwrap_or(Ok(None)) };
     let new = preview_contents(dir, &new_rev, file, limit);
+    let lockable = new_rev == WORKDIR && crate::manage::lfs_lockable(dir, file).unwrap_or(false);
     let (Ok(old), Ok(new)) = (old, new) else {
-        return FileVersions { too_large: true, preview_limit: limit, ..Default::default() };
+        return FileVersions { too_large: true, preview_limit: limit, lockable, ..Default::default() };
     };
-    let mut v = FileVersions { encoding: "UTF-8".into(), editable: new_rev == WORKDIR, ..Default::default() };
+    let mut v = FileVersions { encoding: "UTF-8".into(), editable: new_rev == WORKDIR, lockable, ..Default::default() };
     if new_rev == WORKDIR { v.new_token = Some(content_token(new.as_deref())); }
     if let Some(mime) = mime_of(file) {
         let enc = |b: &Vec<u8>| format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(b));
@@ -339,8 +337,6 @@ pub fn check_hunks_exact(text: &str, patch: &str, reverse: bool) -> Result<(), S
 }
 
 pub fn apply_patch(dir: &Path, patch: &str, cached: bool, reverse: bool) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Stdio;
     let mut args = vec!["apply", "--recount", "--whitespace=nowarn"];
     if cached {
         args.push("--cached");
@@ -349,19 +345,92 @@ pub fn apply_patch(dir: &Path, patch: &str, cached: bool, reverse: bool) -> Resu
         args.push("--reverse");
     }
     args.push("-");
-    let mut child = git::git_cmd(dir)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    child.stdin.take().ok_or("no stdin")?.write_all(patch.as_bytes()).map_err(|e| e.to_string())?;
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
-    if o.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+    let output = crate::read_jobs::run_mutation(git::git_command(dir, &args), Some(patch.as_bytes().to_vec()));
+    if output.ok { Ok(()) } else { Err(output.message()) }
+}
+
+fn with_head_index(dir: &Path, action: impl FnOnce(&Path, &str) -> git::GitOut) -> git::GitOut {
+    let folder = match tempfile::tempdir() {
+        Ok(folder) => folder,
+        Err(error) => return git::GitOut::failed(&error.to_string()),
+    };
+    let index = folder.path().join("index");
+    let Some(index) = index.to_str() else { return git::GitOut::failed("The temporary index path is not valid UTF-8."); };
+    let result = git::run_env(dir, &["read-tree", "HEAD"], &[("GIT_INDEX_FILE", index)]);
+    if result.ok { action(folder.path(), index) } else { result }
+}
+
+pub fn stash_untracked(dir: &Path, message: &str) -> git::GitOut {
+    let untracked = git::run_limited(dir, &["ls-files", "--others", "--exclude-standard", "-z"], 8 * 1024 * 1024);
+    if !untracked.ok { return untracked; }
+    if untracked.stdout.is_empty() { return git::GitOut::failed("There are no untracked files to stash."); }
+    if untracked.stdout.contains('\u{fffd}') || !untracked.stdout.ends_with('\0') {
+        return git::GitOut::failed("Could not read all untracked paths safely.");
+    }
+    let deleted = git::run_limited(dir, &["diff", "--cached", "--no-renames", "--name-only", "--diff-filter=D", "-z"], 8 * 1024 * 1024);
+    if !deleted.ok { return deleted; }
+    if !deleted.stdout.is_empty() {
+        let paths = untracked.stdout.split_terminator('\0').collect::<std::collections::HashSet<_>>();
+        let ancestors = paths.iter().flat_map(|path| path.match_indices('/').map(|(i, _)| &path[..i])).collect::<std::collections::HashSet<_>>();
+        for path in deleted.stdout.split_terminator('\0') {
+            if paths.contains(path) || ancestors.contains(path) || path.match_indices('/').any(|(i, _)| paths.contains(&path[..i])) {
+                return git::GitOut::failed("An untracked file overlaps a staged deletion. Commit or unstage that deletion first.");
+            }
+        }
+    }
+    with_head_index(dir, |folder, index| {
+        let spec = folder.join("paths");
+        if let Err(error) = std::fs::write(&spec, untracked.stdout.as_bytes()) { return git::GitOut::failed(&error.to_string()); }
+        let pathspec = format!("--pathspec-from-file={}", spec.display());
+        git::run_env(dir, &["--literal-pathspecs", "stash", "push", "--include-untracked", "-m", message, &pathspec, "--pathspec-file-nul"], &[("GIT_INDEX_FILE", index)])
+    })
+}
+
+pub fn stash_hunk(dir: &Path, file: &str, hunk: usize, lines: Option<&[usize]>, expected: &[git::DiffLine]) -> git::GitOut {
+    if git::file_diff_opts(dir, &DiffSource::Unstaged, file, false, None, false) != expected {
+        return git::GitOut::failed("The displayed diff changed. Refresh it and select the change again.");
+    }
+    let diff = match git::diff_text_checked(dir, &DiffSource::Unstaged, file, None, false) {
+        Ok(diff) => diff,
+        Err(error) => return git::GitOut::failed(&error),
+    };
+    let (Some(forward), Some(reverse)) = (partial_patch(&diff, hunk, lines, false), partial_patch(&diff, hunk, lines, true)) else {
+        return git::GitOut::failed("The selected hunk is unavailable.");
+    };
+    let run_input = |args: &[&str], index: Option<&str>, patch: &str| {
+        let mut command = git::git_command(dir, args);
+        if let Some(index) = index { command.env("GIT_INDEX_FILE", index); }
+        crate::read_jobs::run_mutation(command, Some(patch.as_bytes().to_vec()))
+    };
+    let checked = run_input(&["apply", "--check", "--recount", "--reverse", "-"], None, &reverse);
+    if !checked.ok { return checked; }
+    let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
+    if !head.ok { return head; }
+    let head = head.stdout.trim();
+    let snapshot = with_head_index(dir, |_, index| {
+        let base = git::run_env(dir, &["write-tree"], &[("GIT_INDEX_FILE", index)]);
+        if !base.ok { return base; }
+        let patched = run_input(&["apply", "--cached", "--recount", "--whitespace=nowarn", "-"], Some(index), &forward);
+        if !patched.ok {
+            return git::GitOut::failed("The selected change overlaps staged changes. Stash the file or unstage the overlapping changes first.");
+        }
+        let tree = git::run_env(dir, &["write-tree"], &[("GIT_INDEX_FILE", index)]);
+        if !tree.ok { return tree; }
+        if tree.stdout == base.stdout { return git::GitOut::failed("No changed lines were selected."); }
+        let index_commit = git::run(dir, &["commit-tree", base.stdout.trim(), "-p", head, "-m", "index for selected changes"]);
+        if !index_commit.ok { return index_commit; }
+        git::run(dir, &["commit-tree", tree.stdout.trim(), "-p", head, "-p", index_commit.stdout.trim(), "-m", "Selected changes"])
+    });
+    if !snapshot.ok { return snapshot; }
+    if git::file_diff_opts(dir, &DiffSource::Unstaged, file, false, None, false) != expected {
+        return git::GitOut::failed("The displayed diff changed. Refresh it and select the change again.");
+    }
+    let message = format!("Selected changes in {file}");
+    let saved = git::run(dir, &["stash", "store", "-m", &message, snapshot.stdout.trim()]);
+    if !saved.ok { return saved; }
+    match apply_patch(dir, &reverse, false, true) {
+        Ok(()) => saved,
+        Err(error) => git::GitOut::failed(&format!("The selection was saved to the stash. Git could not remove it from the working folder: {error}")),
     }
 }
 
@@ -374,8 +443,30 @@ pub fn content_token(bytes: Option<&[u8]>) -> String {
 }
 
 pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option<&str>, utf8: bool) -> Result<(), String> {
+    let root = dir.canonicalize().map_err(|error| error.to_string())?;
+    let path = repo_file(&root, file)?;
+    let destination = match std::fs::symlink_metadata(&path) {
+        Ok(_) => path.canonicalize(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or("File has no parent directory")?;
+            let name = path.file_name().ok_or("File has no name")?;
+            parent.canonicalize().map(|parent| parent.join(name))
+        }
+        Err(error) => Err(error),
+    }.map_err(|error| error.to_string())?;
+    if !destination.starts_with(&root) || destination == root {
+        return Err("The file resolves outside this repository and cannot be saved here.".into());
+    }
+    // A tracked symlink can also point into Git's own metadata (config, hooks). Never write there.
+    let git_dir = git::run(&root, &["rev-parse", "--absolute-git-dir"]);
+    let metadata = if git_dir.ok { Path::new(git_dir.stdout.trim()).canonicalize().ok() } else { None };
+    let inside_metadata = metadata.as_ref().is_some_and(|metadata| destination.starts_with(metadata))
+        || destination.strip_prefix(&root).is_ok_and(|relative| relative.components().any(|part| part.as_os_str().eq_ignore_ascii_case(".git")));
+    if inside_metadata {
+        return Err("The file resolves into the repository's Git metadata and cannot be saved here.".into());
+    }
     if let Some(expected) = expected {
-        let current = match std::fs::read(dir.join(file)) {
+        let current = match std::fs::read(&destination) {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.to_string()),
@@ -384,13 +475,22 @@ pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option
             return Err("The file changed outside this editor. Your draft was kept; reopen the file and compare before saving.".into());
         }
     }
-    save_mode(dir, file, content, utf8)
+    let destination_file = destination.strip_prefix(&root).map_err(|error| error.to_string())?.to_string_lossy();
+    let destination_file = if cfg!(windows) { destination_file.replace('\\', "/") } else { destination_file.into_owned() };
+    let checked_file = if crate::manage::lfs_lockable(dir, &destination_file)? { Some(destination_file.as_str()) }
+        else if destination_file != file && crate::manage::lfs_lockable(dir, file)? { Some(file) } else { None };
+    if let Some(file) = checked_file {
+        let locks = crate::manage::lfs_locks(dir).map_err(|error| format!("Could not verify the Git LFS lock for {file}: {error}"))?;
+        if !locks.iter().any(|lock| lock.ours && lock.path == file) {
+            return Err(format!("Lock {file} with Git LFS before editing it."));
+        }
+    }
+    save_mode(dir, &destination, content, utf8)
 }
 
-fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), String> {
-    let p = dir.join(file);
+fn save_mode(dir: &Path, p: &Path, content: &str, utf8: bool) -> Result<(), String> {
     // Keep the file's existing line endings.
-    let before = match std::fs::read(&p) {
+    let before = match std::fs::read(p) {
         Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Vec::new(),Err(error)=>return Err(error.to_string()),
     };
     let enc = encoding_rs::Encoding::for_bom(&before).map(|(encoding, _)| encoding).or_else(|| crate::prefs::encoding_for(dir));
@@ -404,21 +504,27 @@ fn save_mode(dir: &Path, file: &str, content: &str, utf8: bool) -> Result<(), St
         Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF]))?,
         None => text.into_bytes(),
     } };
-    replace_file(&p, &bytes).map_err(|e| e.to_string())
+    replace_file_at(p, |file| std::io::Write::write_all(file, &bytes)).map_err(|e| e.to_string())
 }
 
 /// Follow an existing symlink while keeping the link itself intact. A same-directory
 /// rename publishes only a complete file; a failed write/replace leaves the old file.
+#[cfg(test)]
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     replace_file_with(path, |file| file.write_all(bytes))
 }
+#[cfg(test)]
 fn replace_file_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     let destination = match std::fs::symlink_metadata(path) { Ok(_) => std::fs::canonicalize(path)?, Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(), Err(error) => return Err(error) };
+    replace_file_at(&destination, write)
+}
+
+fn replace_file_at(destination: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     let parent = destination.parent().ok_or_else(|| std::io::Error::other("File has no parent directory"))?;
     let mut pending = tempfile::NamedTempFile::new_in(parent)?;
     write(pending.as_file_mut())?;
-    if let Ok(metadata) = std::fs::metadata(&destination) {
+    if let Ok(metadata) = std::fs::metadata(destination) {
         pending.as_file().set_permissions(metadata.permissions())?;
     }
     pending.as_file().sync_all()?;
@@ -429,11 +535,13 @@ fn replace_file_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std:
         let target: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
         let source: Vec<u16> = pending.as_os_str().encode_wide().chain(Some(0)).collect();
         // ReplaceFile preserves the destination ACL and attributes on Windows.
+        // SAFETY: both buffers are NUL-terminated UTF-16 paths that outlive the call; the optional
+        // backup name, exclusion and reserved pointers are null as the API permits.
         let replaced = unsafe { windows_sys::Win32::Storage::FileSystem::ReplaceFileW(target.as_ptr(), source.as_ptr(), std::ptr::null(), 0, std::ptr::null(), std::ptr::null()) };
         if replaced == 0 { return Err(std::io::Error::last_os_error()); }
         return Ok(());
     }
-    pending.persist(&destination).map_err(|e| e.error)?;
+    pending.persist(destination).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -446,10 +554,47 @@ pub struct HistoryEntry {
     pub status: char,
 }
 
-/// Commits that changed a file, newest first, following renames.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FileHistoryCursor {
+    pub tip: String,
+    pub offset: usize,
+}
+
+#[derive(Serialize)]
+pub struct FileHistoryPage {
+    pub entries: Vec<HistoryEntry>,
+    pub cursor: Option<FileHistoryCursor>,
+}
+
+pub fn file_history_page(dir: &Path, file: &str, cursor: Option<FileHistoryCursor>, page_size: usize) -> Result<FileHistoryPage, String> {
+    let mut cursor = match cursor {
+        Some(cursor) if matches!(cursor.tip.len(), 40 | 64) && cursor.tip.bytes().all(|byte| byte.is_ascii_hexdigit()) => cursor,
+        Some(_) => return Err("Reload the file history to continue.".into()),
+        None => {
+            let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
+            if !head.ok { return Err(head.message()); }
+            FileHistoryCursor { tip: head.stdout.trim().to_owned(), offset: 0 }
+        }
+    };
+    // Git can lose the path of an older rename when --skip passes the rename itself.
+    // Walk the fixed starting commit with --follow and advance the offset after parsing.
+    let max = cursor.offset.checked_add(page_size + 1).ok_or("This history position is invalid.")?;
+    let page = read_file_history(dir, file, &cursor.tip, max)?;
+    let more = page.len() > cursor.offset + page_size;
+    let entries: Vec<_> = page.into_iter().skip(cursor.offset).take(page_size).collect();
+    cursor.offset = cursor.offset.saturating_add(entries.len());
+    Ok(FileHistoryPage { entries, cursor: more.then_some(cursor) })
+}
+
+#[cfg(test)]
 pub fn history(dir: &Path, file: &str, max: usize) -> Result<Vec<HistoryEntry>, String> {
+    read_file_history(dir, file, "HEAD", max)
+}
+
+fn read_file_history(dir: &Path, file: &str, tip: &str, max: usize) -> Result<Vec<HistoryEntry>, String> {
     let count = format!("-n{max}");
-    let output = run(dir, &["--literal-pathspecs", "log", "--follow", "-M", &count, "--name-status", "-z", "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%b%x00", "--", file]);
+    let output = run(dir, &["--literal-pathspecs", "log", "--follow", "-M", &count, "--name-status", "-z",
+        "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", tip, "--", file]);
     if !output.ok { return Err(output.message()); }
     let fields: Vec<_> = output.stdout.split('\0').collect();
     let mut position = 0; let mut entries = Vec::new();
@@ -486,19 +631,29 @@ pub struct BlameLine {
 }
 
 /// Who last changed each line (`git blame --porcelain`). `rev` None = working folder.
-pub fn blame(dir: &Path, file: &str, rev: Option<&str>) -> Result<Vec<BlameLine>, String> {
+pub fn blame(dir: &Path, file: &str, rev: Option<&str>, ignore_revs: bool) -> Result<Vec<BlameLine>, String> {
+    // `git blame` does not accept --end-of-options, so a revision must never look like an option.
+    if rev.is_some_and(|rev| rev.is_empty() || rev.starts_with('-')) { return Err("Choose a commit to blame.".into()); }
     let bytes = preview_contents(dir, rev.unwrap_or(WORKDIR), file, PREVIEW_MAX)
         .map_err(|_| "This file exceeds the 2 MB blame limit. Open it in an external editor.".to_string())?
         .ok_or("Could not read this file for blame")?;
     let line_count = bytes.iter().filter(|&&b| b == b'\n').count() + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
     if line_count > 100_000 { return Err("This file exceeds the 100,000 line blame limit.".into()); }
-    let mut args = vec!["--literal-pathspecs", "blame", "--porcelain"];
-    if let Some(r) = rev {
-        args.push(r);
+    let repository_list = ignore_revs && std::fs::symlink_metadata(dir.join(".git-blame-ignore-revs")).is_ok_and(|file| file.is_file());
+    let run_blame = |ignore: Option<&str>| {
+        let mut args = vec!["--literal-pathspecs", "blame", "--porcelain"];
+        if let Some(list) = ignore { args.extend(["--ignore-revs-file", list]); }
+        if let Some(r) = rev { args.push(r); }
+        args.extend(["--", file]);
+        git::run_limited(dir, &args, 16 * 1024 * 1024)
+    };
+    let mut o = run_blame(if repository_list { Some(".git-blame-ignore-revs") } else if ignore_revs { None } else { Some("") });
+    if !o.ok && ignore_revs {
+        // A malformed or abbreviated entry in an ignore-revs list makes Git refuse the whole blame.
+        // Fall back to an ordinary blame so one bad line in the repository cannot disable the view.
+        let plain = run_blame(Some(""));
+        if plain.ok { o = plain; }
     }
-    args.push("--");
-    args.push(file);
-    let o = git::run_limited(dir, &args, 16 * 1024 * 1024);
     if !o.ok {
         return Err(o.message());
     }
@@ -564,7 +719,7 @@ pub fn stats(dir: &Path, shas: &[String]) -> Result<Vec<Stats>, String> {
         let mut s = Stats { sha, files: 0, added: 0, deleted: 0 };
         if let Some(stat) = lines.next() {
             for part in stat.split(',') {
-                let n: u32 = part.trim().split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let n: u32 = part.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
                 if part.contains("file") {
                     s.files = n;
                 } else if part.contains("insertion") {
@@ -852,15 +1007,56 @@ mod resource_regressions {
         replace_file(&link, b"new").unwrap(); assert!(link.is_symlink()); assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o751);
     }
+    #[cfg(unix)]
+    #[test]
+    fn editor_save_rejects_an_external_target_and_parent() {
+        use std::os::unix::fs::symlink;
+        let repository = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let destination = external.path().join("notes.txt");
+        std::fs::write(&destination, "untouched").unwrap();
+        symlink(&destination, repository.path().join("notes.txt")).unwrap();
+        symlink(external.path(), repository.path().join("linked-dir")).unwrap();
+        for file in ["notes.txt", "linked-dir/missing.txt"] {
+            assert!(save_checked_mode(repository.path(), file, "edited", None, false).unwrap_err().contains("outside this repository"));
+        }
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), "untouched");
+        assert!(!external.path().join("missing.txt").exists());
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(repository.path()).status().unwrap().success());
+        let config = repository.path().join(".git/config");
+        let original = std::fs::read(&config).unwrap();
+        symlink(&config, repository.path().join("settings-link")).unwrap();
+        assert!(save_checked_mode(repository.path(), "settings-link", "edited", None, false).unwrap_err().contains("Git metadata"));
+        assert_eq!(std::fs::read(&config).unwrap(), original);
+        let inside = repository.path().join("inside.txt");
+        std::fs::write(&inside, "before").unwrap();
+        symlink(&inside, repository.path().join("inside-link")).unwrap();
+        save_checked_mode(repository.path(), "inside-link", "after", None, false).unwrap();
+        assert_eq!(std::fs::read_to_string(inside).unwrap(), "after");
+        assert!(repository.path().join("inside-link").is_symlink());
+    }
     #[test]
     fn blame_rejects_oversized_input_before_git_output() {
         let temp = tempfile::tempdir().unwrap(); let file = temp.path().join("huge.txt");
         std::fs::File::create(&file).unwrap().set_len(PREVIEW_MAX as u64 + 1).unwrap();
-        assert!(blame(temp.path(), "huge.txt", None).unwrap_err().contains("2 MB"));
+        assert!(blame(temp.path(), "huge.txt", None, true).unwrap_err().contains("2 MB"));
         std::fs::write(&file, "x\n".repeat(100_000)).unwrap();
         // Exactly 100,000 newline-terminated lines pass preflight and reach Git.
-        assert!(!blame(temp.path(), "huge.txt", None).unwrap_err().contains("100,000"));
+        assert!(!blame(temp.path(), "huge.txt", None, true).unwrap_err().contains("100,000"));
         std::fs::write(file, "x\n".repeat(100_001)).unwrap();
-        assert!(blame(temp.path(), "huge.txt", None).unwrap_err().contains("100,000"));
+        assert!(blame(temp.path(), "huge.txt", None, true).unwrap_err().contains("100,000"));
+    }
+    #[test]
+    fn a_malformed_ignore_revs_list_falls_back_to_ordinary_blame() {
+        let temp = tempfile::tempdir().unwrap(); let dir = temp.path();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(dir).status().unwrap().success());
+        git(&["init", "-q"]); git(&["config", "user.email", "a@b.c"]); git(&["config", "user.name", "A"]);
+        std::fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "f.txt"]); git(&["commit", "-qm", "first"]);
+        std::fs::write(dir.join(".git-blame-ignore-revs"), "deadbeef\n").unwrap();
+        let lines = blame(dir, "f.txt", None, true).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(blame(dir, "f.txt", Some("HEAD"), true).unwrap().len(), 2, "historical blame still accepts a revision");
+        assert!(blame(dir, "f.txt", Some("--contents=f.txt"), false).unwrap_err().contains("Choose a commit"), "revisions are never read as options");
     }
 }

@@ -1,7 +1,8 @@
+import { editorKey, protectEditorDrafts } from "./editor-drafts";
 import { sameFolder } from "./agents";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import type { DiffSource, Metrics } from "./api";
+import type { DiffSource, HistoryFilter, Metrics } from "./api";
 
 export type TabKind = "repo" | "start" | "launchpad";
 
@@ -26,6 +27,7 @@ export interface TabUi {
   diff: DiffTarget | null;
   search: string;
   searchOpen: boolean;
+  historyFilter?: HistoryFilter;
   /** Commits picked with Ctrl / Shift + click (2 = compare them). */
   multi: string[];
   /** Comparing a commit with the working folder. */
@@ -44,7 +46,8 @@ export interface TabUi {
 }
 
 export interface RebaseItem {
-  action: import("./api").Step;
+  action: Exclude<import("./api").Step, "exec">;
+  command?: string;
   sha: string;
   author: string;
   email: string;
@@ -96,9 +99,10 @@ export interface Toast {
 
 export type DialogState =
   | null
-  | { kind: "prompt"; title: string; label: string; value: string; confirm: string; onSubmit: (v: string, extra?: string) => void; extraLabel?: string; allowEmpty?: boolean }
+  | { kind: "prompt"; title: string; label: string; value: string; confirm: string; onSubmit: (v: string, extra?: string) => void; extraLabel?: string; allowEmpty?: boolean; gitRef?: { path: string; kind: "branch" | "tag" } }
   | { kind: "confirm"; title: string; text: string; confirm: string; danger?: boolean; onConfirm: () => void }
-  | { kind: "clone" }
+  | { kind: "clone"; url?: string }
+  | { kind: "branchChecks"; path: string; name: string; sha: string; remoteName?: string }
   | { kind: "addRemote"; path: string }
   | { kind: "init" }
   | { kind: "open" }
@@ -107,6 +111,8 @@ export type DialogState =
   | { kind: "about" }
   | { kind: "plan" }
   | { kind: "prefs"; section?: string }
+  | { kind: "reflog"; path: string }
+  | { kind: "rangeDiff"; path: string; before: string; after: string }
   | { kind: "fileFinder" }
   | {
       kind: "form";
@@ -124,7 +130,7 @@ export type DialogState =
   | { kind: "profiles" }
   | { kind: "addProfile" }
   | { kind: "workspaces" }
-  | { kind: "choice"; title: string; text: string; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
+  | { kind: "choice"; title: string; text: string; onCancel?: () => void; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "info"; title: string; text: string }
   | { kind: "repoManagement" }
   | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; generate?: () => Promise<string>; onSubmit: (v: string) => void };
@@ -161,9 +167,11 @@ export interface Settings {
   skipHooks: boolean;
   /** Custom keyboard shortcuts: command id -> keys ("" = no shortcut). */
   keybindings: Record<string, string>;
+  distinctShortcutModifiers: boolean;
   showTerminal: boolean;
   terminalHeight: number;
   theme: string;
+  language: "en" | "es";
   workspaces: Workspace[];
   /** Tab / repository aliases (path -> name). */
   aliases: Record<string, string>;
@@ -293,6 +301,12 @@ export interface IntegrationSettings {
   bitbucketServerHost: string;
   bitbucketServerUser: string;
   azureOrg: string;
+  azureServerCollection: string;
+  giteaHost: string;
+  forgejoHost: string;
+  giteaUser: string;
+  forgejoUser: string;
+  codebergUser: string;
   jiraSite: string;
   jiraEmail: string;
   jiraServerHost: string;
@@ -300,6 +314,9 @@ export interface IntegrationSettings {
 }
 
 export interface RepoPrefs {
+  pullMode?: Settings["pullMode"];
+  pullAutostash?: boolean;
+  pullCheckoutSubmodules?: boolean;
   /** Issue Tracker: "" = the hosting service's issues; jira, jira-server, trello, azure. */
   tracker?: { kind: string; project: string };
   /** Conflict Prevention for this repository, base branch patterns and excluded branches (one per line). */
@@ -318,6 +335,12 @@ export const DEFAULT_INTEGRATIONS: IntegrationSettings = {
   bitbucketServerHost: "",
   bitbucketServerUser: "",
   azureOrg: "",
+  azureServerCollection: "",
+  giteaHost: "",
+  forgejoHost: "",
+  giteaUser: "",
+  forgejoUser: "",
+  codebergUser: "",
   jiraSite: "",
   jiraEmail: "",
   jiraServerHost: "",
@@ -344,7 +367,8 @@ export interface FormField {
   key: string;
   label: string;
   value: string | boolean;
-  type?: "text" | "checkbox";
+  type?: "text" | "checkbox" | "password";
+  options?: [string, string][];
   placeholder?: string;
   /** Show a Browse button that picks a folder. */
   browse?: boolean;
@@ -386,14 +410,16 @@ export const DEFAULT_SETTINGS: Settings = {
   hidden: {},
   solo: {},
   lazyLoad: true,
-  autoFetchMin: 1,
+  autoFetchMin: 5,
   autoPrune: true,
   defaultBranch: "main",
   skipHooks: false,
   keybindings: {},
+  distinctShortcutModifiers: true,
   showTerminal: false,
   terminalHeight: 220,
-  theme: "dark",
+  theme: "system",
+  language: "en",
   workspaces: [],
   aliases: {},
   tabWidths: {},
@@ -655,6 +681,7 @@ export const useStore = create<Store>((set, get) => {
       set({ tabs: [tab, ...s.tabs], activeId: tab.id });
     },
     closeTab: (id) => {
+      if (protectEditorDrafts(get().setDialog, () => get().closeTab(id), id)) return;
       const s = get();
       const idx = s.tabs.findIndex((t) => t.id === id);
       if (idx < 0) return;
@@ -682,8 +709,16 @@ export const useStore = create<Store>((set, get) => {
         const tabs = at < 0 ? [...rest, tab] : [...rest.slice(0, at), tab, ...rest.slice(at)];
         return tabs.every((t, i) => t === s.tabs[i]) ? {} : { tabs };
       }),
-    replaceTab: (id, tab) => set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? tab : t)), activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() } })),
-    setUi: (id, patch) => set((s) => ({ ui: { ...s.ui, [id]: { ...(s.ui[id] ?? defaultUi()), ...patch } } })),
+    replaceTab: (id, tab) => {
+      if (protectEditorDrafts(get().setDialog, () => get().replaceTab(id, tab), id)) return;
+      set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? tab : t)), activeId: tab.id, ui: { ...s.ui, [tab.id]: defaultUi() } }));
+    },
+    setUi: (id, patch) => {
+      const current = get().ui[id] ?? defaultUi();
+      const next = { ...current, ...patch };
+      if (editorKey(current) !== editorKey(next) && protectEditorDrafts(get().setDialog, () => get().setUi(id, patch), id)) return;
+      set((s) => ({ ui: { ...s.ui, [id]: next } }));
+    },
     setDraft: (path, patch) =>
       set((s) => ({ drafts: { ...s.drafts, [path]: { ...(s.drafts[path] ?? { summary: "", description: "", amend: false }), ...patch } } })),
     setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),

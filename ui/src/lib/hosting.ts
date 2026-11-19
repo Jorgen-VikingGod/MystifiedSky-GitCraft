@@ -6,7 +6,7 @@ import { act, repoData } from "./repo";
 import { useStore } from "./store";
 
 export interface RemoteRepo {
-  provider: "github" | "gitlab";
+  provider: "github" | "gitlab" | "bitbucket" | "azure" | "gitea";
   /** The integration this remote belongs to (an id of SERVICES). */
   service?: string;
   host: string;
@@ -14,7 +14,23 @@ export interface RemoteRepo {
   web: string;
 }
 
+export interface PullReviewData {
+  reviewers: string[];
+  reviews: [author: string, state: string, body: string][];
+  files: { path: string; patch: string }[];
+  comments: { id: string; path: string; line: number | null; side: string; author: string; body: string }[];
+}
+export type PullReviewAction = { kind: "approve" | "requestChanges"; body: string }
+  | { kind: "requestReviewers"; reviewers: string[] }
+  | { kind: "inline"; path: string; line: number; side: "LEFT" | "RIGHT"; body: string; old_line?: number };
+
+export interface CommitCheck { name: string; state: "passed" | "failed" | "pending" | "cancelled" | "neutral"; url: string }
+
+export type PullFilter = "open" | "closed" | "merged" | "mine" | "reviewRequested";
+
 export interface PullRequest {
+  merge_methods?: string[];
+  merge_status?: string | null;
   number: number;
   title: string;
   author: string;
@@ -79,9 +95,14 @@ export const hosting = {
     const target = await invokeRead<{ url: string; reference: string; expected: string }>("pr_checkout_target", { path, number, gitlabHost: gh() }, signal);
     return act(path, { type: "checkoutPullRequest", ...target });
   },
-  prsPage: (path: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: PullRequest[]; cursor: string | null}>("list_prs_page", { path, gitlabHost: gh(), cursor }, signal),
+  checks: (path: string, sha: string, number?: number, signal?: AbortSignal, remoteName?: string) =>
+    invokeRead<CommitCheck[]>("commit_checks", { path, gitlabHost: gh(), sha, number, remoteName }, signal),
+  prsPage: (path: string, cursor: string | null, signal?: AbortSignal, filter: PullFilter = "open") =>
+    invokeRead<{items: PullRequest[]; cursor: string | null}>("list_prs_page", { path, gitlabHost: gh(), cursor, filter }, signal),
   prs: (path: string, signal?: AbortSignal) => invokeRead<PullRequest[]>("list_prs", { path, gitlabHost: gh() }, signal),
   /** Issues from the repository's Issue Tracker preference (Jira, Trello, Azure Boards) or its hosting service. */
+  issueCommentsPage: (path: string, number: number, cursor: string | null, signal?: AbortSignal) =>
+    invokeRead<{ items: Comment[]; cursor: string | null }>("issue_comments_page", { path, gitlabHost: gh(), number, cursor }, signal),
   issuesPage: (path: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: Issue[]; cursor: string | null}>("list_issues_page", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null, cursor }, signal),
   reposPage: (id: string, cursor: string | null, signal?: AbortSignal) => invokeRead<{items: import("./integrations").HostedRepo[]; cursor: string | null}>("integration_repos_page", { id, cursor }, signal),
   issues: (path: string, signal?: AbortSignal) => invokeRead<Issue[]>("list_issues", { path, gitlabHost: gh(), tracker: useStore.getState().settings.repoPrefs[path]?.tracker ?? null }, signal),
@@ -92,11 +113,19 @@ export const hosting = {
   create: (path: string, source: string, target: string, title: string, body: string, draft: boolean) =>
     invoke<PullRequest>("create_pr", { path, gitlabHost: gh(), source, target, title, body, draft }),
   cancelMerge: (path: string, number: number) => invoke<boolean>("cancel_pr_merge", { path, gitlabHost: useStore.getState().settings.gitlabHost ?? "", number }),
-  merge: (path: string, number: number, method: string) => invoke<void>("merge_pr", { path, gitlabHost: gh(), number, method }),
+  merge: (path: string, number: number, method: string, expected?: string, squashMessage?: string) =>
+    invoke<void>("merge_pr", { path, gitlabHost: gh(), number, method, expected, squashMessage }),
+  reviewData: (path: string, number: number, expected: string, signal?: AbortSignal) =>
+    invokeRead<PullReviewData>("pull_review_data", { path, gitlabHost: gh(), number, expected }, signal),
+  submitReview: (path: string, number: number, expected: string, action: PullReviewAction) =>
+    invoke<void>("submit_pull_review", { path, gitlabHost: gh(), number, expected, action }),
+  deleteMergedSource: (path: string, number: number, expected: string, remote: boolean) =>
+    invoke<void>("delete_merged_source", { path, gitlabHost: gh(), number, expected, remote }),
   launchpad: (signal?: AbortSignal) => invokeRead<{ pull_requests: PullRequest[]; issues: Issue[]; errors: string[] }>("launchpad", { gitlabHost: gh() }, signal),
   issueBranch: (number: number, title: string) => invoke<string>("issue_branch_name", { number, title }),
   openUrl: (url: string) => invoke<void>("open_url", { url }),
-  template: (path: string) => invoke<string | null>("pr_template", { path }),
+  defaultTarget: (path: string, branch: string) => invokeRead<string | null>("pr_default_target", { path, branch }),
+  templates: (path: string) => invokeRead<{ name: string; body: string }[]>("pr_templates", { path }),
 };
 
 /** Hand the tokens of connected services to Git (called at start-up, after saving a token, and when the
@@ -108,12 +137,14 @@ export function syncGitCredentials() {
 /** "Start a pull request": push the branch if needed, then create the PR / MR. */
 export async function startPullRequest(path: string, branch: string, target?: string) {
   const s = useStore.getState();
-  const template = await hosting.template(path).catch(() => null);
+  const [templates, remoteDefault] = await Promise.all([
+    hosting.templates(path).catch(() => []),
+    target ? Promise.resolve(null) : hosting.defaultTarget(path, branch).catch(() => null),
+  ]);
   const repo = repoData(path);
   const ref = repo?.refs.find((r) => r.kind === "Local" && r.name === branch);
   const head = repo?.commits.find((c) => c.sha === ref?.sha);
-  const remoteDefault = repo?.refs.find((r) => r.kind === "Remote" && /\/(main|master|develop)$/.test(r.name))?.name.split("/").slice(1).join("/");
-  s.setDialog({
+  const showForm = (template?: string) => s.setDialog({
     kind: "form",
     title: `Start a pull request from ${branch}`,
     fields: [
@@ -149,6 +180,17 @@ export async function startPullRequest(path: string, branch: string, target?: st
         s.setBusy(null);
       }
     },
+  });
+  if (templates.length < 2) {
+    showForm(templates[0]?.body);
+    return;
+  }
+  s.setDialog({
+    kind: "form", title: "Choose a pull request template", confirm: "Continue",
+    fields: [{ key: "template", label: "Template", value: templates[0].name,
+      options: [...templates.map(({ name }): [string, string] => [name, name]), ["", "No template"]],
+    }],
+    onSubmit: values => showForm(templates.find(template => template.name === values.template)?.body),
   });
 }
 

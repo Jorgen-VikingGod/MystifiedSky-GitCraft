@@ -1,3 +1,7 @@
+import { CommitChecks } from "./CommitChecks";
+import { compareCommitRanges } from "@/lib/manage";
+import { stopAiRequests, useAiRequests } from "@/lib/ai-connection";
+import { promptSshKey } from "@/lib/ssh-keys";
 import { useShallow } from "zustand/react/shallow";
 import type { ReactNode } from "react";
 import { SERVICES, integrations } from "@/lib/integrations";
@@ -9,14 +13,14 @@ import { Cloud, Github, Gitlab, Globe, Laptop, LoaderCircle, Sparkles, X } from 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { act, openHistory, openRepoPath, refresh } from "@/lib/repo";
+import { act, copy, openHistory, openRepoPath, promptBranch, refresh, sshHostKeyProblem } from "@/lib/repo";
 import type { FormField } from "@/lib/store";
 import { fullDate } from "@/lib/utils";
 import { Dialog, Field, inputClass } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { AppMark, PROFILE_COLORS, ProfileMark } from "./Icons";
 import { cn, MOD } from "@/lib/utils";
-import { COMMANDS, comboOf, keysOf, type Group } from "@/lib/commands";
+import { COMMANDS, bindingsOf, comboOf, isShortcut, keysOf, shortcutLabel, type Group } from "@/lib/commands";
 import { hosting as hostingApi } from "@/lib/hosting";
 import { THEMES, addProfile, deleteWorkspace, openWorkspace, removeProfile, saveWorkspace, switchProfile } from "@/lib/prefs";
 
@@ -54,7 +58,11 @@ export function Dialogs() {
     case "open":
       return <OpenDialog onClose={close} />;
     case "clone":
-      return <CloneDialog onClose={close} />;
+      return <CloneDialog key={d.url} initialUrl={d.url} onClose={close} />;
+    case "branchChecks":
+      return <Dialog open onClose={close} title={"Checks for " + d.name} width={500}>
+        <CommitChecks key={d.sha} path={d.path} sha={d.sha} remoteName={d.remoteName} initiallyOpen />
+      </Dialog>;
     case "addRemote":
       return <AddRemoteDialog key={d.path} path={d.path} onClose={close} />;
     case "init":
@@ -78,15 +86,16 @@ export function Dialogs() {
       return <PlanDialog onClose={close} />;
     case "prefs":
       return <PreferencesScreen onClose={close} section={d.section} />;
-    case "choice":
+    case "choice": {
+      const cancel = () => { close(); d.onCancel?.(); };
       return (
         <Dialog
           open
-          onClose={close}
+          onClose={cancel}
           title={d.title}
           footer={
             <>
-              <Button onClick={close}>Cancel</Button>
+              <Button onClick={cancel}>Cancel</Button>
               {d.choices.map((c) => (
                 <Button
                   key={c.label}
@@ -102,9 +111,10 @@ export function Dialogs() {
             </>
           }
         >
-          <p className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap">{d.text}</p>
+          <p className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap break-words max-h-[50vh] overflow-auto">{d.text}</p>
         </Dialog>
       );
+    }
     case "repoManagement":
       return <RepoManagementDialog onClose={close} />;
     case "info":
@@ -130,9 +140,59 @@ export function Dialogs() {
       return <AddProfileDialog onClose={close} />;
     case "workspaces":
       return <WorkspacesDialog onClose={close} />;
+    case "rangeDiff":
+      return <RangeDiffDialog {...d} onClose={close} />;
+    case "reflog":
+      return <ReflogDialog path={d.path} onClose={close} />;
     case "fileFinder":
       return <FileFinder onClose={close} />;
   }
+}
+
+function RangeDiffDialog({ path, before, after, onClose }: { path: string; before: string; after: string; onClose: () => void }) {
+  const result = useQuery({
+    queryKey: ["rangeDiff", path, before, after],
+    queryFn: ({ signal }) => api.rangeDiff(path, before, after, signal),
+    retry: false,
+  });
+  return (
+    <Dialog open title="Compare commit ranges" width={820} onClose={onClose} footer={<>
+      <Button onClick={() => compareCommitRanges(path, before, after)}>Edit ranges</Button>
+      <Button onClick={() => copy(result.data ?? "")} disabled={!result.data}>Copy result</Button>
+      <Button variant="primary" onClick={onClose}>Close</Button>
+    </>}>
+      <div className="mono text-[12px] mb-3 break-words">{before} → {after}</div>
+      {result.isPending ? <p className="text-fg3">Comparing commits…</p> : result.isError
+        ? <p role="alert" className="text-warn whitespace-pre-wrap">{String(result.error)}</p>
+        : <pre className="mono text-[12px] max-h-[56vh] overflow-auto select-text">{result.data || "No commits to compare."}</pre>}
+    </Dialog>
+  );
+}
+
+function ReflogDialog({ path, onClose }: { path: string; onClose: () => void }) {
+  const [filter, setFilter] = useState("");
+  const history = useQuery({
+    queryKey: ["reflog", path], queryFn: ({ signal }) => api.reflog(path, signal), staleTime: 0,
+  });
+  const query = filter.trim().toLowerCase();
+  const rows = (history.data ?? []).filter(entry => [entry.sha, entry.selector, entry.message].some(field => field.toLowerCase().includes(query)));
+  return (
+    <Dialog open title="Recover commits from reflog" width={740} onClose={onClose}>
+      <input data-dialog-initial-focus aria-label="Filter reflog" placeholder="Search the last 200 entries" value={filter} onChange={event => setFilter(event.target.value)} className={cn(inputClass, "w-full mb-3")} />
+      {history.isPending ? <p className="text-fg3">Loading reflog…</p> : history.isError ? <p role="alert" className="text-warn">{String(history.error)}</p> : !rows.length && <p className="text-fg3">No matching reflog entries.</p>}
+      <div className="max-h-[54vh] overflow-auto text-[13px]">
+        {rows.map((entry, index) => (
+          <div key={`${entry.selector}/${entry.sha}/${index}`} className="flex gap-3 items-center border-b border-white/8 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-fg" title={entry.message}>{entry.message}</p>
+              <p className="mono truncate text-fg3">{entry.sha.slice(0, 10)} · {entry.selector}</p>
+            </div>
+            <Button size="sm" onClick={() => promptBranch(path, entry.sha, false)}>Create branch here</Button>
+          </div>
+        ))}
+      </div>
+    </Dialog>
+  );
 }
 
 function PromptDialog({
@@ -143,6 +203,7 @@ function PromptDialog({
   onSubmit,
   extraLabel,
   allowEmpty = false,
+  gitRef,
   onClose,
 }: {
   title: string;
@@ -152,11 +213,29 @@ function PromptDialog({
   onSubmit: (v: string, extra?: string) => void;
   extraLabel?: string;
   allowEmpty?: boolean;
+  gitRef?: { path: string; kind: "branch" | "tag" };
   onClose: () => void;
 }) {
   const [v, setV] = useState(value);
   const [x, setX] = useState("");
+  const [validation, setValidation] = useState<{ value: string; error: string } | null>(null);
+  const path = gitRef?.path;
+  const kind = gitRef?.kind;
+  useEffect(() => {
+    if (!path || !kind || !v.trim()) return;
+    const request = new AbortController();
+    const timer = window.setTimeout(() => {
+      void api.validateRefName(path, kind, v, request.signal).then(
+        () => { if (!request.signal.aborted) setValidation({ value: v, error: "" }); },
+        error => { if (!request.signal.aborted) setValidation({ value: v, error: String(error) }); },
+      );
+    }, 150);
+    return () => { window.clearTimeout(timer); request.abort(); };
+  }, [path, kind, v]);
+  const current = validation?.value === v ? validation : null;
+  const blocked = !!gitRef && (!v.trim() || !current || !!current.error);
   const submit = () => {
+    if (blocked) return;
     if (!v.trim() && !allowEmpty && !label.includes("optional")) return;
     onClose();
     onSubmit(v.trim(), extraLabel ? x : undefined);
@@ -169,7 +248,7 @@ function PromptDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit}>
+          <Button variant="primary" disabled={blocked} onClick={submit}>
             {confirm}
           </Button>
         </>
@@ -178,6 +257,7 @@ function PromptDialog({
       <Field label={label}>
         <input data-dialog-initial-focus className={inputClass} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
       </Field>
+      {!!current?.error && <p className="text-[12px] text-[#ef7a76] mb-2" role="status">{current.error}</p>}
       {extraLabel && (
         <Field label={extraLabel}>
           <input className={inputClass} value={x} onChange={(e) => setX(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
@@ -250,6 +330,10 @@ const SERVICE_SOURCES: { id: string; label: string; icon: ReactNode }[] = [
   { id: "bitbucket", label: "Bitbucket.org", icon: <Cloud size={14} /> },
   { id: "bitbucket-server", label: "Bitbucket Data Center", icon: <Cloud size={14} /> },
   { id: "azure", label: "Azure DevOps", icon: <Cloud size={14} /> },
+  { id: "azure-server", label: "Azure DevOps Server", icon: <Cloud size={14} /> },
+  { id: "gitea", label: "Gitea", icon: <Cloud size={14} /> },
+  { id: "forgejo", label: "Forgejo", icon: <Cloud size={14} /> },
+  { id: "codeberg", label: "Codeberg", icon: <Cloud size={14} /> },
 ];
 
 function SourceList({ items, active, onPick }: { items: { id: string; label: string; icon: ReactNode; disabled?: boolean; title?: string }[]; active: string; onPick: (id: string) => void }) {
@@ -302,11 +386,15 @@ function FolderRow({ label, value, onChange, title }: { label: string; value: st
   );
 }
 
-function CloneDialog({ onClose }: { onClose: () => void }) {
+function CloneDialog({ onClose, initialUrl }: { onClose: () => void; initialUrl?: string }) {
   const s = { ...useStore(useShallow((st) => ({ setBusy: st.setBusy, setSettings: st.setSettings, toast: st.toast }))), settings: useStore(useShallow((st) => ({ defaultCloneFolder: st.settings.defaultCloneFolder }))) };
   const [source, setSource] = useState("url");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(initialUrl ?? "");
   const [dir, setDir] = useState(s.settings.defaultCloneFolder);
+
+  const [folderName, setFolderName] = useState("");
+  const [initializeSubmodules, setInitializeSubmodules] = useState(true);
+  const proposedName = useQuery({ queryKey: ["cloneFolder", url, dir], queryFn: () => api.suggestCloneFolder(url, dir), enabled: !!url.trim() && !!dir.trim(), retry: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [shallow, setShallow] = useState(false);
@@ -333,6 +421,8 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
         sparse,
         sparse_paths: sparse ? sparsePaths.split("\n").map((p) => p.trim()).filter(Boolean) : undefined,
         blobless: sparse && blobless,
+        folder_name: folderName.trim() || undefined,
+        initialize_submodules: initializeSubmodules,
       });
       s.setSettings({ defaultCloneFolder: dir });
       onClose();
@@ -367,13 +457,12 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
       <FormRow label="URL">
         <input data-dialog-initial-focus className={inputClass + " w-full"} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/project.git" />
       </FormRow>
-      {url && dir && (
-        <FormRow label="Full path">
-          <span className="text-[12.5px] text-fg2 break-all">
-            {dir.replace(/[\\/]$/, "")}\{url.replace(/\/$/, "").split(/[/\\:]/).pop()?.replace(/\.git$/, "")}
-          </span>
-        </FormRow>
-      )}
+      <FormRow label="Folder name">
+        <input aria-label="Folder name" className={inputClass + " w-full"} value={folderName} onChange={event => setFolderName(event.target.value)} placeholder={proposedName.data ?? "Suggested from the repository URL"} />
+      </FormRow>
+      <FormRow label="Initialize submodules">
+        <input type="checkbox" aria-label="Initialize submodules" checked={initializeSubmodules} onChange={event => setInitializeSubmodules(event.target.checked)} />
+      </FormRow>
       <FormRow label="Shallow Clone">
         <input type="checkbox" className="accent-[#80B1EA]" checked={shallow} onChange={(e) => setShallow(e.target.checked)} aria-label="Shallow clone" />
       </FormRow>
@@ -421,7 +510,11 @@ function CloneDialog({ onClose }: { onClose: () => void }) {
           </FormRow>
         </div>
       )}
-      {error && <div className="text-[12px] text-[#ef7a76] whitespace-pre-wrap">{error}</div>}
+      {error && <div className="text-[12px] text-[#ef7a76] whitespace-pre-wrap" role="alert">
+        {sshHostKeyProblem(error) === "changed" && <p>SSH host key changed. Verify the new fingerprint with the server administrator before updating your SSH known_hosts file.</p>}
+        {sshHostKeyProblem(error) === "unknown" && <p>SSH could not verify the host. Retry in a terminal and accept its key only after confirming the fingerprint with the server administrator.</p>}
+        {error}
+      </div>}
     </Dialog>
   );
 }
@@ -631,7 +724,9 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     else kb[id] = keys;
     s.setSettings({ keybindings: kb });
   };
-  const usedBy = (keys: string, id: string) => COMMANDS.find((c) => c.id !== id && keys && keysOf(c).toUpperCase() === keys.toUpperCase());
+  const usedBy = (keys: string[], id: string) => COMMANDS.find(command =>
+    command.id !== id && bindingsOf(command).some(binding => keys.includes(binding.toUpperCase())),
+  );
   return (
     <Dialog open onClose={onClose} title="Keyboard Shortcuts" width={600}>
       <input data-dialog-initial-focus aria-label="Filter shortcuts" className={cn(inputClass, "w-full mb-3")} placeholder={`Filter shortcuts (${MOD} + F)`} value={filter} onChange={(e) => setFilter(e.target.value)} />
@@ -644,10 +739,15 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
             {list.map((c) => {
               const keys = keysOf(c);
               const custom = s.settings.keybindings[c.id] !== undefined;
-              const clash = keys ? usedBy(keys, c.id) : undefined;
+              const clash = usedBy(bindingsOf(c).map(binding => binding.toUpperCase()), c.id);
+              const terminalUses = c.id !== "ui:terminalPanel" && c.id !== "palette:toggle";
+              const scopeWarning = !custom || !keys ? "" : !c.inInputs && terminalUses
+                ? "The editor and terminal keep their own shortcuts."
+                : terminalUses ? "The terminal keeps its own shortcuts." : "";
               return (
                 <div key={c.id} className="flex items-center gap-2 h-[30px] border-b border-white/5 text-[13px]">
                   <span className="flex-1 text-fg truncate">{c.label}</span>
+                  {scopeWarning && <span className="text-[11px] text-fg3" title={scopeWarning}>scope</span>}
                   {clash && <span className="text-[11px] text-warn" title={`Also used by ${clash.label}`}>clash</span>}
                   <button
                     className={cn("mono text-[11.5px] px-1.5 py-0.5 rounded border min-w-[90px]", recording === c.id ? "border-accent bg-accent/20 text-white" : "border-white/10 bg-white/8 text-fg hover:border-white/30")}
@@ -660,14 +760,14 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
                       if (e.key === "Escape") return setRecording(null);
                       if (e.key === "Backspace") return (setKeys(c.id, ""), setRecording(null));
                       const combo = comboOf(e.nativeEvent);
-                      if (combo && (/Ctrl|Alt/.test(combo) || /^F\d+$/.test(combo))) {
+                      if (combo && isShortcut(combo)) {
                         setKeys(c.id, combo);
                         setRecording(null);
                       }
                     }}
                     onBlur={() => setRecording(null)}
                   >
-                    {recording === c.id ? "Press keys…" : keys || "—"}
+                    {recording === c.id ? "Press keys…" : shortcutLabel(keys) || "—"}
                   </button>
                   <button className={cn("text-[11px] w-[40px]", custom ? "text-link hover:underline" : "invisible")} onClick={() => setKeys(c.id, undefined)}>
                     Reset
@@ -678,7 +778,7 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           </div>
         );
       })}
-      <div className="text-[12px] text-fg3">Shortcuts need Ctrl or Alt (or an F key). Arrow keys, J / K, S / U and Esc work as before.</div>
+      <div className="text-[12px] text-fg3">Shortcuts need Ctrl, Alt, or the platform modifier (or an F key). Arrow keys, J / K, S / U and Esc work as before.</div>
     </Dialog>
   );
 }
@@ -824,6 +924,7 @@ function FormDialog({
 }) {
   const [v, setV] = useState<Record<string, string | boolean>>(Object.fromEntries(fields.map((f) => [f.key, f.value])));
   const [running, setRunning] = useState(false);
+  const aiRequests = useAiRequests(state => state.count);
   const submit = () => {
     onClose();
     onSubmit(v);
@@ -855,6 +956,7 @@ function FormDialog({
               {running ? "Working…" : action.label}
             </Button>
           )}
+          {running && aiRequests > 0 && <Button onClick={stopAiRequests}>Stop AI</Button>}
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={submit}>
             {confirm}
@@ -868,11 +970,19 @@ function FormDialog({
             <input type="checkbox" checked={!!v[f.key]} onChange={(e) => setV({ ...v, [f.key]: e.target.checked })} className="accent-[#80B1EA]" />
             {f.label}
           </label>
+        ) : f.options ? (
+          <Field key={f.key} label={f.label}>
+            <select aria-label={f.label} className={inputClass + " w-full"} value={String(v[f.key] ?? "")} onChange={event => setV({ ...v, [f.key]: event.target.value })}>
+              {f.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </Field>
         ) : (
           <Field key={f.key} label={f.label}>
             <div className="flex gap-2">
               <input
                 data-dialog-initial-focus={i === 0 ? "" : undefined}
+                type={f.type === "password" ? "password" : "text"}
+                autoComplete={f.type === "password" ? "new-password" : undefined}
                 className={cn(inputClass, "flex-1")}
                 value={String(v[f.key] ?? "")}
                 placeholder={f.placeholder}
@@ -904,22 +1014,23 @@ function CleanupDialog({ onClose }: { onClose: () => void }) {
   const s = useStore(useShallow((st) => ({ activeId: st.activeId, tabs: st.tabs })));
   const tab = s.tabs.find((t) => t.id === s.activeId);
   const path = tab?.kind === "repo" ? tab.path! : "";
-  const q = useQuery({ queryKey: ["cleanup", path], queryFn: ({ signal }) => api.cleanupList(path, signal), enabled: !!path });
+  const [detectPatches, setDetectPatches] = useState(false);
+  const q = useQuery({ queryKey: ["cleanup", path, detectPatches], queryFn: ({ signal }) => api.cleanupList(path, detectPatches, signal), enabled: !!path });
   const [days, setDays] = useState("0");
   const [merge, setMerge] = useState<"any" | "merged" | "unmerged">("merged");
-  const [up, setUp] = useState<"any" | "has" | "none">("any");
+  const [up, setUp] = useState<"any" | "has" | "none" | "gone">("any");
   const [picked, setPicked] = useState<string[]>([]);
   const [remotes, setRemotes] = useState<string[]>([]);
   const now = Date.now() / 1000;
   const list = (q.data ?? []).filter(
     (b) =>
       now - b.time >= Number(days || 0) * 86400 &&
-      (merge === "any" || (merge === "merged") === b.merged) &&
-      (up === "any" || (up === "has") === !!b.upstream),
+      (merge === "any" || (merge === "merged") === (b.merged || !!b.patch_equivalent)) &&
+      (up === "any" || (up === "gone" ? !!b.upstream_gone : up === "has" ? !!b.upstream && !b.upstream_gone : !b.upstream && !b.upstream_gone)),
   );
   const toggle = (arr: string[], x: string) => (arr.includes(x) ? arr.filter((y) => y !== x) : [...arr, x]);
   const sel = "h-7 px-1 rounded-[4px] bg-field border border-white/10 text-[12.5px] text-fg outline-none";
-  const remoteCount = remotes.filter((r) => picked.some((p) => (q.data ?? []).find((b) => b.name === p)?.upstream === r)).length;
+  const remoteCount = remotes.filter((r) => picked.includes(r) && !!q.data?.some(branch => branch.name === r && branch.upstream && !branch.upstream_gone)).length;
   return (
     <Dialog
       open
@@ -935,7 +1046,7 @@ function CleanupDialog({ onClose }: { onClose: () => void }) {
             disabled={!picked.length}
             onClick={() => {
               onClose();
-              const ups = picked.map((p) => (q.data ?? []).find((b) => b.name === p)?.upstream).filter((u): u is string => !!u && remotes.includes(u));
+              const ups = picked.filter(name => remotes.includes(name) && q.data?.some(branch => branch.name === name && !branch.upstream_gone));
               void act(path, { type: "deleteBranches", names: picked, remotes: ups });
             }}
           >
@@ -963,9 +1074,16 @@ function CleanupDialog({ onClose }: { onClose: () => void }) {
             <option value="any">Any</option>
             <option value="has">Has upstream</option>
             <option value="none">Doesn't have upstream</option>
+            <option value="gone">Upstream gone</option>
           </select>
         </label>
       </div>
+      <label className="mb-2 flex items-center gap-2 text-[12px] text-fg2" title="Compare patches against the default branch. Equivalent patches may have different commits.">
+        <input type="checkbox" checked={detectPatches} onChange={event => {
+          setDetectPatches(event.target.checked); setPicked([]); setRemotes([]);
+        }} /> Include squash- and rebase-merged changes
+      </label>
+      {q.isError && <p className="text-warn text-[12px]" role="alert">{String(q.error)}</p>}
       <div className="text-[12px] text-fg3 mb-1.5">{list.length === 1 ? "1 branch matching filters" : `${list.length} branches matching filters`}</div>
       <div className="max-h-[300px] overflow-auto rounded border border-white/5">
         {q.isLoading && <div className="p-2 text-fg3 text-[12px]">Loading…</div>}
@@ -974,12 +1092,12 @@ function CleanupDialog({ onClose }: { onClose: () => void }) {
           <div key={b.name} className="flex items-center gap-2 px-2 h-[30px] border-b border-white/5 text-[12.5px]">
             <input type="checkbox" checked={picked.includes(b.name)} onChange={() => setPicked(toggle(picked, b.name))} className="accent-[#80B1EA]" />
             <span className="flex-1 truncate text-white/90">{b.name}</span>
-            <span className={cn("text-[11px]", b.merged ? "text-good" : "text-fg3")}>{b.merged ? "merged" : "not merged"}</span>
+            <span className={cn("text-[11px]", b.merged ? "text-good" : "text-fg3")}>{b.merged ? "merged" : b.patch_equivalent ? "equivalent patch" : "not merged"}</span>
             <span className="w-[90px] text-[11px] text-fg3 text-right">{fullDate(b.time).split(",")[0]}</span>
-            <span className="w-[150px] truncate text-[11px] text-fg2">{b.upstream || "None"}</span>
-            {b.upstream && (
+            <span className="w-[150px] truncate text-[11px] text-fg2">{b.upstream_gone ? `${b.upstream || "Upstream"} (gone)` : b.upstream || "None"}</span>
+            {b.upstream && !b.upstream_gone && (
               <label className="flex items-center gap-1 text-[11px] text-fg3" title={`Also delete remote branch ${b.upstream}`}>
-                <input type="checkbox" checked={remotes.includes(b.upstream)} onChange={() => setRemotes(toggle(remotes, b.upstream))} className="accent-[#d9413d]" />
+                <input type="checkbox" checked={remotes.includes(b.name)} onChange={() => setRemotes(toggle(remotes, b.name))} className="accent-[#d9413d]" />
                 remote
               </label>
             )}
@@ -1302,17 +1420,8 @@ export function AccountsDialog({ onClose }: { onClose: () => void }) {
       <Button
         size="sm"
         disabled={!a.ssh_keygen}
-        title={a.ssh_keygen ? "Creates ~/.ssh/id_ed25519 without a passphrase" : "ssh-keygen was not found"}
-        onClick={async () => {
-          try {
-            const pub = await api.generateSshKey(a.email || "gitcraft", "id_ed25519");
-            await navigator.clipboard.writeText(pub);
-            s.toast(true, "SSH key created and its public key copied");
-            q.refetch();
-          } catch (e) {
-            s.toast(false, String(e));
-          }
-        }}
+        title={a.ssh_keygen ? "Create an SSH key" : "ssh-keygen was not found"}
+        onClick={() => promptSshKey(a.email || "gitcraft", "id_ed25519", () => void q.refetch())}
       >
         Generate a new SSH key
       </Button>

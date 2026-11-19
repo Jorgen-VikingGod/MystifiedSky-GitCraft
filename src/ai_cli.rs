@@ -647,6 +647,7 @@ fn cli_error(agent: Agent, out: &Output) -> String {
 }
 
 fn run(agent: Agent, cmd: &mut Command, input: &str, timeout: Duration) -> Result<Output, String> {
+    crate::process_tree::prepare(cmd);
     let mut child = cmd
         .stdin(if input.is_empty() {
             Stdio::null()
@@ -663,6 +664,10 @@ fn run(agent: Agent, cmd: &mut Command, input: &str, timeout: Duration) -> Resul
                 format!("GitCraft could not start {}.", agent.name())
             }
         })?;
+    let tree = crate::process_tree::ProcessTree::attach(&child).inspect_err(|_error| {
+        let _ = child.kill();
+        let _ = child.wait();
+    })?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -672,10 +677,17 @@ fn run(agent: Agent, cmd: &mut Command, input: &str, timeout: Duration) -> Resul
     let read_stderr = worker(move || read_output(stderr));
     let start = Instant::now();
     let status = loop {
+        if let Err(error) = crate::read_jobs::check() {
+            tree.kill();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(30)),
             result => {
+                tree.kill();
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(if result.is_ok() {
@@ -689,6 +701,7 @@ fn run(agent: Agent, cmd: &mut Command, input: &str, timeout: Duration) -> Resul
             }
         }
     };
+    drop(tree);
     let remaining = || timeout.saturating_sub(start.elapsed());
     let sent = write
         .recv_timeout(remaining())

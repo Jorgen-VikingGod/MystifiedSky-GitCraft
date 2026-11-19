@@ -30,9 +30,89 @@ fn new_change_debouncer<F: DebounceEventHandler>(timeout: Duration, handler: F) 
     new_debouncer_opt(Config::default().with_timeout(timeout), handler)
 }
 
+enum RepoDebouncer {
+    Native(Debouncer<ChangeWatcher>),
+    Polling(Debouncer<notify::PollWatcher>),
+}
+
+impl RepoDebouncer {
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+        match self {
+            Self::Native(watch) => watch.watcher().watch(path, mode),
+            Self::Polling(watch) => watch.watcher().watch(path, mode),
+        }
+    }
+
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        match self {
+            Self::Native(watch) => watch.watcher().unwatch(path),
+            Self::Polling(watch) => watch.watcher().unwatch(path),
+        }
+    }
+}
+
+fn repository_debouncer<F: DebounceEventHandler + Clone>(
+    paths: &[(PathBuf, RecursiveMode)],
+    polling: bool,
+    timeout: Duration,
+    handler: F,
+) -> notify::Result<RepoDebouncer> {
+    if !polling {
+        if let Ok(mut watcher) = new_change_debouncer(timeout, handler.clone()) {
+            if paths.iter().all(|(path, mode)| watcher.watcher().watch(path, *mode).is_ok()) {
+                return Ok(RepoDebouncer::Native(watcher));
+            }
+        }
+    }
+    let config = Config::default().with_timeout(timeout)
+        .with_notify_config(notify::Config::default().with_poll_interval(Duration::from_secs(3)));
+    let mut watcher: Debouncer<notify::PollWatcher> = new_debouncer_opt(config, handler)?;
+    for (path, mode) in paths { watcher.watcher().watch(path, *mode)?; }
+    Ok(RepoDebouncer::Polling(watcher))
+}
+
+#[cfg(windows)]
+fn needs_polling(root: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    match root.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                let path = format!("{}:\\", letter as char);
+                let path: Vec<_> = std::ffi::OsStr::new(&path).encode_wide().chain([0]).collect();
+                // Win32 DRIVE_REMOTE from GetDriveTypeW.
+                // SAFETY: `path` is a NUL-terminated UTF-16 root path that lives for the whole call.
+                unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(path.as_ptr()) == 4 }
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn needs_polling(root: &Path) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mountinfo") else { return false; };
+    let mut nearest = None;
+    for line in mounts.lines() {
+        let Some((mount, extra)) = line.split_once(" - ") else { continue; };
+        let Some(path) = mount.split_ascii_whitespace().nth(4) else { continue; };
+        let path = path.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\");
+        if root.starts_with(Path::new(&path)) && nearest.is_none_or(|(length, _)| length <= path.len()) {
+            let fs = extra.split_ascii_whitespace().next().unwrap_or_default();
+            nearest = Some((path.len(), matches!(fs, "nfs" | "nfs4" | "cifs" | "smb3" | "9p" | "fuse.sshfs" | "drvfs")));
+        }
+    }
+    nearest.is_some_and(|(_, network)| network)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn needs_polling(_: &Path) -> bool { false }
+
 pub struct RepoWatch {
     _workdir: WorkWatch,
-    _gitdirs: Vec<Debouncer<ChangeWatcher>>,
+    _gitdirs: Vec<RepoDebouncer>,
 }
 
 /// Clamp a debounce to the accepted range.
@@ -58,8 +138,8 @@ fn not_ignored(root: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     if paths.is_empty() {
         return paths;
     }
-    let mut cmd = crate::git::git_cmd(root);
-    cmd.args(["check-ignore", "--stdin", "-z"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut cmd = crate::git::git_command(root, &["check-ignore", "--stdin", "-z"]);
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     let Ok(mut child) = cmd.spawn() else { return paths };
     let input: Vec<u8> = paths.iter().flat_map(|p| {
         let mut bytes = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/").into_bytes();
@@ -134,14 +214,14 @@ impl WorkWatch {
         let mut plan = crate::watch_plan::WatchPlan::read(&root)?;
         let (events, messages) = std::sync::mpsc::channel();
         let sender = events.clone();
-        let mut watcher = new_change_debouncer(debounce(WORKDIR_WATCH_DEBOUNCE_MS), move |result: DebounceEventResult| {
+        let paths: Vec<_> = plan.registrations.iter().map(|path| (path.clone(), RecursiveMode::NonRecursive)).collect();
+        let mut watcher = repository_debouncer(&paths, needs_polling(&root), debounce(WORKDIR_WATCH_DEBOUNCE_MS), move |result: DebounceEventResult| {
             let event = match result {
                 Ok(events) => WorkEvent::Paths(events.into_iter().map(|event| event.path).collect()),
                 Err(_) => WorkEvent::Reconfigure(true),
             };
             let _ = sender.send(event);
         }).map_err(|error| error.to_string())?;
-        for directory in &plan.registrations { watcher.watcher().watch(directory, RecursiveMode::NonRecursive).map_err(|error| error.to_string())?; }
         let worker = std::thread::spawn(move || {
             let mut cache = IgnoreCache::default();
             while let Ok(event) = messages.recv() {
@@ -170,13 +250,13 @@ impl WorkWatch {
                         let mut installed = true;
                         let mut added = Vec::new();
                         for path in next.registrations.difference(&plan.registrations) {
-                            if watcher.watcher().watch(path, RecursiveMode::NonRecursive).is_err() { installed = false; }
+                            if watcher.watch(path, RecursiveMode::NonRecursive).is_err() { installed = false; }
                             else { added.push(path.clone()); }
                         }
                         if installed {
-                            for path in plan.registrations.difference(&next.registrations) { let _ = watcher.watcher().unwatch(path); }
+                            for path in plan.registrations.difference(&next.registrations) { let _ = watcher.unwatch(path); }
                             plan = next;
-                        } else { for path in added { let _ = watcher.watcher().unwatch(&path); } }
+                        } else { for path in added { let _ = watcher.unwatch(&path); } }
                     }
                     changed(full);
                 } else if !allowed.is_empty() { changed(false); }
@@ -224,7 +304,16 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
         let cb = on_change.clone();
         let gd = gitdir.clone();
         let work_events = work_events.clone();
-        let mut g = new_change_debouncer(debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
+        let polling = needs_polling(&gitdir.canonicalize().unwrap_or_else(|_| gitdir.clone()));
+        let paths = if polling {
+            let mut paths = vec![(gitdir.clone(), RecursiveMode::NonRecursive)];
+            for name in ["refs", "info"] {
+                let path = gitdir.join(name);
+                if path.is_dir() { paths.push((path, RecursiveMode::Recursive)); }
+            }
+            paths
+        } else { vec![(gitdir.clone(), RecursiveMode::Recursive)] };
+        let g = repository_debouncer(&paths, polling, debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).filter(|p| !under(p, &lt) && relevant_metadata(&gd, p)).collect();
                 if !paths.is_empty() {
@@ -234,7 +323,6 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
             }
         })
         .map_err(|e| e.to_string())?;
-        g.watcher().watch(&gitdir, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
         git.push(g);
     }
     Ok(RepoWatch { _workdir: work, _gitdirs: git })

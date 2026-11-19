@@ -3,7 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { COMMANDS, fuzzy, keysOf, runCommand, type Command } from "@/lib/commands";
+import { COMMANDS, fuzzy, keysOf, shortcutLabel, runCommand, type Command } from "@/lib/commands";
 import { act, openHistory, openRepoPath, repoData } from "@/lib/repo";
 import { useStore } from "@/lib/store";
 import { THEMES, switchProfile, openWorkspace } from "@/lib/prefs";
@@ -58,7 +58,7 @@ export function CommandPalette() {
           key: c.id,
           label: c.label,
           hint: [c.group, c.keywords].filter(Boolean).join(" "),
-          shortcut: keysOf(c),
+          shortcut: shortcutLabel(keysOf(c)),
           run: c.picker ? () => s.setPalette(c.picker!) : done(() => runCommand(c)),
         }));
       case "openRepo": {

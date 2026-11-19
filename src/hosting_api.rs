@@ -257,9 +257,34 @@ fn azure_parts(r: &RemoteRepo) -> (String, String, String) {
 }
 
 /// Azure DevOps calls go to the remote's own organisation.
-fn azure_url(r: &RemoteRepo, rest: &str) -> String {
+fn azure_project(r: &RemoteRepo) -> (String, String) {
+    if r.service == "azure-server" {
+        if let Some((collection_project, repo)) = r.web.rsplit_once("/_git/") {
+            return (collection_project.to_owned(), repo.to_owned());
+        }
+    }
     let (org, project, repo) = azure_parts(r);
-    format!("https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}{rest}")
+    (format!("https://dev.azure.com/{org}/{project}"), repo)
+}
+
+fn azure_url(r: &RemoteRepo, rest: &str) -> String {
+    let (project, repo) = azure_project(r);
+    let rest = if r.service == "azure-server" { rest.replace("api-version=7.1", "api-version=7.0") } else { rest.to_owned() };
+    format!("{project}/_apis/git/repositories/{repo}{rest}")
+}
+
+fn forge_pr(value: &Value) -> PullRequest {
+    let mut pr = github_pr(value);
+    pr.source_sha = value["head"]["sha"].as_str().or(value["head"]["commit_id"].as_str()).unwrap_or_default().to_owned();
+    pr.draft |= pr.title.starts_with("WIP:") || pr.title.starts_with("Draft:");
+    if value["merged"] == true { pr.state = "merged".into(); }
+    pr
+}
+
+fn forge_issue(value: &Value, service: &str) -> Issue {
+    let mut issue = github_issue(value);
+    issue.tracker = service.to_owned();
+    issue
 }
 
 fn bbs_path(r: &RemoteRepo) -> String {
@@ -275,32 +300,324 @@ fn rsend(r: &RemoteRepo, method: &str, url: &str, body: Value) -> Result<Value, 
     http(method, url, &auth(&r.service)?, Some(body))
 }
 
-pub fn pull_requests(r: &RemoteRepo) -> Result<Vec<PullRequest>, String> {
-    let b = api_base(&r.service);
-    Ok(match r.service.as_str() {
-        "github" | "github-enterprise" => list(&rget(r, &format!("{b}/repos/{}/pulls?state=open&per_page=50", r.path))?).iter().map(github_pr).collect(),
-        "gitlab" | "gitlab-self" => list(&rget(r, &format!("{b}/projects/{}/merge_requests?state=opened&per_page=50", enc(&r.path)))?).iter().map(gitlab_mr).collect(),
-        "bitbucket" => list(&rget(r, &format!("{b}/repositories/{}/pullrequests?state=OPEN&pagelen=50", r.path))?["values"]).iter().map(bitbucket_pr).collect(),
-        "bitbucket-server" => list(&rget(r, &format!("{b}{}/pull-requests?state=OPEN&limit=50", bbs_path(r)))?["values"]).iter().map(bitbucket_server_pr).collect(),
-        "azure" => list(&rget(r, &azure_url(r, "/pullrequests?searchCriteria.status=active&api-version=7.1"))?["value"]).iter().map(|v| azure_pr(v, &r.web)).collect(),
-        _ => vec![],
-    })
+#[derive(Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PullFilter {
+    #[default]
+    Open,
+    Closed,
+    Merged,
+    Mine,
+    ReviewRequested,
 }
 
-pub fn pull_requests_page(r: &RemoteRepo, cursor: Option<&str>) -> Result<crate::pagination::Page<Vec<PullRequest>>, String> {
-    crate::pagination::one_page(cursor.map(str::to_owned), || pull_requests(r))
+fn pull_identity(r: &RemoteRepo, base: &str) -> Result<String, String> {
+    let get = |url: &str| http("GET", url, &auth(&r.service)?, None);
+    let id = match r.service.as_str() {
+        "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg" => s(&get(&format!("{base}/user"))?["login"]),
+        "gitlab" | "gitlab-self" => s(&get(&format!("{base}/user"))?["username"]),
+        "bitbucket" => s(&get(&format!("{base}/user"))?["uuid"]),
+        "bitbucket-server" => crate::hosting::config().bitbucket_server_user.trim().into(),
+        "azure-server" => s(&get(&format!("{base}/_apis/connectionData"))?["authenticatedUser"]["id"]),
+        "azure" => {
+            let (org, _, _) = azure_parts(r);
+            s(&get(&format!("https://dev.azure.com/{org}/_apis/connectionData"))?["authenticatedUser"]["id"])
+        }
+        _ => String::new(),
+    };
+    if id.is_empty() { Err("Connect a named account to filter by author or reviewer.".into()) } else { Ok(id) }
+}
+
+fn pull_person_matches(service: &str, row: &Value, filter: PullFilter, identity: &str) -> bool {
+    let same = |value: &Value| value.as_str().is_some_and(|value| value.eq_ignore_ascii_case(identity));
+    match (service, filter) {
+        ("github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg", PullFilter::Mine) => same(&row["user"]["login"]),
+        ("github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg", PullFilter::ReviewRequested) => list(&row["requested_reviewers"]).iter().any(|user| same(&user["login"])),
+        ("gitlab" | "gitlab-self", PullFilter::Mine) => same(&row["author"]["username"]),
+        ("gitlab" | "gitlab-self", PullFilter::ReviewRequested) => list(&row["reviewers"]).iter().any(|user| same(&user["username"])),
+        ("bitbucket", PullFilter::Mine) => same(&row["author"]["uuid"]),
+        ("bitbucket", PullFilter::ReviewRequested) => list(&row["reviewers"]).iter().any(|user| same(&user["uuid"])),
+        ("bitbucket-server", PullFilter::Mine) => same(&row["author"]["user"]["name"]) || same(&row["author"]["user"]["slug"]),
+        ("bitbucket-server", PullFilter::ReviewRequested) => list(&row["reviewers"]).iter().any(|user| same(&user["user"]["name"]) || same(&user["user"]["slug"])),
+        ("azure" | "azure-server", PullFilter::Mine) => same(&row["createdBy"]["id"]),
+        ("azure" | "azure-server", PullFilter::ReviewRequested) => list(&row["reviewers"]).iter().any(|user| same(&user["id"]) && user["vote"].as_i64().unwrap_or(0) == 0),
+        _ => true,
+    }
+}
+
+fn pull_requests_filtered(r: &RemoteRepo, filter: PullFilter) -> Result<Vec<PullRequest>, String> {
+    let base = api_base(&r.service);
+    let identity = if matches!(filter, PullFilter::Mine | PullFilter::ReviewRequested) {
+        Some(pull_identity(r, &base)?)
+    } else { None };
+    let gh_closed = matches!(filter, PullFilter::Closed | PullFilter::Merged);
+    let (url, key, decode): (_, _, fn(&Value, &RemoteRepo) -> PullRequest) = match r.service.as_str() {
+        "github" | "github-enterprise" => (format!("{base}/repos/{}/pulls?state={}&per_page=50", r.path, if gh_closed { "closed" } else { "open" }), None, |v, _| github_pr(v)),
+        "gitea" | "forgejo" | "codeberg" => (format!("{base}/repos/{}/pulls?state={}&limit=50", r.path, if gh_closed { "closed" } else { "open" }), None, |v, _| forge_pr(v)),
+        "gitlab" | "gitlab-self" => {
+            let state = match filter { PullFilter::Closed => "closed", PullFilter::Merged => "merged", _ => "opened" };
+            (format!("{base}/projects/{}/merge_requests?state={state}&per_page=50", enc(&r.path)), None, |v, _| gitlab_mr(v))
+        }
+        "bitbucket" => {
+            let state = match filter { PullFilter::Closed => "DECLINED&state=SUPERSEDED", PullFilter::Merged => "MERGED", _ => "OPEN" };
+            let fields = if filter == PullFilter::ReviewRequested { "&fields=%2Bvalues.reviewers" } else { "" };
+            (format!("{base}/repositories/{}/pullrequests?state={state}&pagelen=50{fields}", r.path), Some("values"), |v, _| bitbucket_pr(v))
+        }
+        "bitbucket-server" => {
+            let state = match filter { PullFilter::Closed => "DECLINED", PullFilter::Merged => "MERGED", _ => "OPEN" };
+            (format!("{base}{}/pull-requests?state={state}&limit=50", bbs_path(r)), Some("values"), |v, _| bitbucket_server_pr(v))
+        }
+        "azure" | "azure-server" => {
+            let state = match filter { PullFilter::Closed => "abandoned", PullFilter::Merged => "completed", _ => "active" };
+            (azure_url(r, &format!("/pullrequests?searchCriteria.status={state}&api-version=7.1&$top=50")), Some("value"), |v, r| azure_pr(v, &r.web))
+        }
+        _ => return Ok(vec![]),
+    };
+    let data = rget(r, &url)?;
+    let mut items = list(if let Some(key) = key { &data[key] } else { &data }).iter()
+        .filter(|row| identity.as_ref().is_none_or(|id| pull_person_matches(&r.service, row, filter, id)))
+        .map(|row| decode(row, r)).collect::<Vec<_>>();
+    if gh_closed && matches!(r.service.as_str(), "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg") {
+        items.retain(|row| (row.state == "merged") == (filter == PullFilter::Merged));
+    }
+    Ok(items)
+}
+
+pub fn pull_requests(r: &RemoteRepo) -> Result<Vec<PullRequest>, String> {
+    pull_requests_filtered(r, PullFilter::Open)
+}
+
+pub fn pull_requests_page(r: &RemoteRepo, cursor: Option<&str>, filter: PullFilter) -> Result<crate::pagination::Page<Vec<PullRequest>>, String> {
+    crate::pagination::one_page(cursor.map(str::to_owned), || pull_requests_filtered(r, filter))
+}
+
+#[derive(Serialize)]
+pub struct CommitCheck {
+    name: String,
+    state: &'static str,
+    url: String,
+}
+
+fn check_state(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "success" | "succeeded" | "successful" | "passed" => "passed",
+        "failed" | "failure" | "error" | "timed_out" | "stale" | "action_required" | "startup_failure" => "failed",
+        "pending" | "created" | "waiting_for_resource" | "queued" | "in_progress" | "running" | "inprogress" | "requested" | "waiting" | "scheduled" => "pending",
+        "cancelled" | "canceled" | "stopped" => "cancelled",
+        _ => "neutral",
+    }
+}
+
+pub fn commit_checks(r: &RemoteRepo, sha: &str, number: Option<u64>) -> Result<Vec<CommitCheck>, String> {
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Choose a commit with a full Git hash.".into());
+    }
+    let base = api_base(&r.service);
+    let mut checks = Vec::new();
+    let mut add = |name: String, state: String, url: String| {
+        if name.is_empty() { return; }
+        checks.push(CommitCheck { name, state: check_state(&state), url });
+    };
+    match r.service.as_str() {
+        "github" | "github-enterprise" => {
+            let commit = format!("{base}/repos/{}/commits/{sha}", r.path);
+            let runs = rget(r, &format!("{commit}/check-runs?filter=latest&per_page=100"));
+            let statuses = rget(r, &format!("{commit}/statuses?per_page=100"));
+            if let (Err(error), Err(_)) = (&runs, &statuses) { return Err(error.clone()); }
+            if let Ok(runs) = runs {
+                for row in list(&runs["check_runs"]) {
+                    let state = if row["status"] == "completed" { s(&row["conclusion"]) } else { s(&row["status"]) };
+                    add(s(&row["name"]), state, s(&row["details_url"]));
+                }
+            }
+            if let Ok(statuses) = statuses {
+                for row in list(&statuses) { add(s(&row["context"]), s(&row["state"]), s(&row["target_url"])); }
+            }
+        }
+        "gitea" | "forgejo" | "codeberg" => {
+            for row in list(&rget(r, &format!("{base}/repos/{}/statuses/{sha}?limit=50", r.path))?) {
+                add(s(&row["context"]), s(&row["status"]), s(&row["target_url"]));
+            }
+        }
+        "gitlab" | "gitlab-self" => {
+            let project = format!("{base}/projects/{}", enc(&r.path));
+            let url = match number {
+                Some(number) => format!("{project}/merge_requests/{number}/pipelines?per_page=100"),
+                None => format!("{project}/repository/commits/{sha}/statuses?per_page=100"),
+            };
+            for row in list(&rget(r, &url)?) {
+                if number.is_some() && row["sha"] != sha { continue; }
+                if number.is_some() { add(format!("Pipeline #{}", s(&row["id"])), s(&row["status"]), s(&row["web_url"])); }
+                else { add(s(&row["name"]), s(&row["status"]), s(&row["target_url"])); }
+            }
+        }
+        "bitbucket" => {
+            let resource = match number {
+                Some(number) => format!("pullrequests/{number}/statuses"),
+                None => format!("commit/{sha}/statuses"),
+            };
+            for row in list(&rget(r, &format!("{base}/repositories/{}/{resource}?pagelen=50", r.path))?["values"]) {
+                add(s(&row["name"]), s(&row["state"]), s(&row["url"]));
+            }
+        }
+        "bitbucket-server" => {
+            let host = host_of(&r.service);
+            for row in list(&rget(r, &format!("https://{host}/rest/build-status/1.0/commits/{sha}?limit=50"))?["values"]) {
+                add(s(&row["name"]), s(&row["state"]), s(&row["url"]));
+            }
+        }
+        "azure" | "azure-server" => {
+            let resource = match number {
+                Some(number) => format!("/pullRequests/{number}/statuses?api-version=7.1"),
+                None => format!("/commits/{sha}/statuses?latestOnly=true&api-version=7.1"),
+            };
+            for row in list(&rget(r, &azure_url(r, &resource))?["value"]) {
+                add(s(&row["context"]["name"]), s(&row["state"]), s(&row["targetUrl"]));
+            }
+        }
+        _ => return Err("This hosting service does not publish commit checks through GitCraft.".into()),
+    }
+    let mut seen = std::collections::HashSet::new();
+    checks.retain(|check| seen.insert((check.name.clone(), check.url.clone())));
+    Ok(checks)
 }
 
 pub fn pull_request(r: &RemoteRepo, number: u64) -> Result<PullRequest, String> {
     let base = api_base(&r.service);
     Ok(match r.service.as_str() {
         "github" | "github-enterprise" => github_pr(&rget(r, &format!("{base}/repos/{}/pulls/{number}", r.path))?),
+        "gitea" | "forgejo" | "codeberg" => forge_pr(&rget(r, &format!("{base}/repos/{}/pulls/{number}", r.path))?),
         "gitlab" | "gitlab-self" => gitlab_mr(&rget(r, &format!("{base}/projects/{}/merge_requests/{number}", enc(&r.path)))?),
         "bitbucket" => bitbucket_pr(&rget(r, &format!("{base}/repositories/{}/pullrequests/{number}", r.path))?),
         "bitbucket-server" => bitbucket_server_pr(&rget(r, &format!("{base}{}/pull-requests/{number}", bbs_path(r)))?),
-        "azure" => azure_pr(&rget(r, &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")))?, &r.web),
+        "azure" | "azure-server" => azure_pr(&rget(r, &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")))?, &r.web),
         _ => return Err("This hosting service does not support pull-request checkout.".into()),
     })
+}
+
+#[derive(Serialize)]
+pub struct PullRequestDetails {
+    #[serde(flatten)]
+    request: PullRequest,
+    merge_methods: Vec<&'static str>,
+    merge_status: Option<&'static str>,
+}
+
+pub fn pull_request_details(r: &RemoteRepo, number: u64) -> Result<PullRequestDetails, String> {
+    let base = api_base(&r.service);
+    let (request, methods, status) = match r.service.as_str() {
+        "github" | "github-enterprise" => {
+            let repo = format!("{base}/repos/{}", r.path);
+            let detail = rget(r, &format!("{repo}/pulls/{number}"))?;
+            let policy = rget(r, &repo).unwrap_or_default();
+            let methods = [("merge", "allow_merge_commit"), ("squash", "allow_squash_merge"), ("rebase", "allow_rebase_merge")]
+                .into_iter().filter_map(|(method, field)| (policy[field].as_bool() == Some(true)).then_some(method)).collect();
+            let status = match (detail["mergeable"].as_bool(), detail["mergeable_state"].as_str()) {
+                (Some(false), _) | (_, Some("dirty")) => Some("Resolve merge conflicts on the hosting service."),
+                (None, _) => Some("The hosting service is checking mergeability. Refresh to check again."),
+                (_, Some("blocked")) => Some("The hosting service is waiting for required reviews or checks."),
+                _ => None,
+            };
+            (github_pr(&detail), methods, status)
+        }
+        "gitea" | "forgejo" | "codeberg" => {
+            let repo = format!("{base}/repos/{}", r.path);
+            let detail = rget(r, &format!("{repo}/pulls/{number}"))?;
+            let policy = rget(r, &repo).unwrap_or_default();
+            let methods = [("merge", "allow_merge_commits"), ("squash", "allow_squash_merge"), ("rebase", "allow_rebase"),
+                ("rebase_merge", "allow_rebase_explicit"), ("fast_forward", "allow_fast_forward_only_merge")]
+                .into_iter().filter_map(|(method, flag)| (policy[flag] == true).then_some(method)).collect();
+            let status = (detail["mergeable"] == false).then_some("The hosting service reports that this pull request cannot be merged yet.");
+            (forge_pr(&detail), methods, status)
+        }
+        "gitlab" | "gitlab-self" => {
+            let project = format!("{base}/projects/{}", enc(&r.path));
+            let detail = rget(r, &format!("{project}/merge_requests/{number}"))?;
+            let policy = rget(r, &project).unwrap_or_default();
+            let methods = match policy["squash_option"].as_str() {
+                Some("always") => vec!["squash"],
+                Some("never") => vec!["default"],
+                Some("default_on") => vec!["squash", "unsquashed"],
+                Some("default_off") => vec!["unsquashed", "squash"],
+                _ => vec!["default"],
+            };
+            let status = match detail["detailed_merge_status"].as_str() {
+                _ if detail["has_conflicts"] == true => Some("Resolve merge conflicts on the hosting service."),
+                Some("not_approved" | "requested_changes") => Some("The merge request needs approval."),
+                Some("need_rebase") => Some("Rebase the source branch before merging."),
+                Some("checking" | "unchecked" | "preparing" | "approvals_syncing") => Some("The hosting service is checking mergeability. Refresh to check again."),
+                Some("mergeable" | "draft_status") | None => None,
+                Some(_) => Some("The hosting service reports an unmet merge requirement. Review it in the browser."),
+            };
+            (gitlab_mr(&detail), methods, status)
+        }
+        "bitbucket" => {
+            let url = format!("{base}/repositories/{}/pullrequests/{number}", r.path);
+            let detail = rget(r, &url)?;
+            let branch = &detail["destination"]["branch"];
+            let strategies = branch["merge_strategies"].as_array();
+            let mut methods: Vec<_> = [("merge", "merge_commit"), ("squash", "squash"), ("fast_forward", "fast_forward")]
+                .into_iter().filter_map(|(method, value)| strategies.is_some_and(|items| items.iter().any(|item| item == value)).then_some(method)).collect();
+            if let Some(position) = methods.iter().position(|method| {
+                let strategy = if *method == "merge" { "merge_commit" } else { *method };
+                branch["default_merge_strategy"] == strategy
+            }) { methods.swap(0, position); }
+            if methods.is_empty() { methods.push("default"); }
+            let checks = rget(r, &format!("{url}/mergeability/checks")).unwrap_or_default();
+            let status = list(&checks["values"]).iter().any(|check| check["blocking"] == true && check["status"] != "PASSED")
+                .then_some("The hosting service reports a blocking merge check. Review it in the browser.");
+            (bitbucket_pr(&detail), methods, status)
+        }
+        "bitbucket-server" => {
+            let url = format!("{base}{}/pull-requests/{number}", bbs_path(r));
+            let detail = rget(r, &url)?;
+            let check = rget(r, &format!("{url}/merge")).unwrap_or_default();
+            let status = if check["conflicted"] == true { Some("Resolve merge conflicts on the hosting service.") }
+                else if check["canMerge"] == false { Some("The hosting service reports an unmet merge requirement. Review it in the browser.") }
+                else { None };
+            (bitbucket_server_pr(&detail), vec!["default"], status)
+        }
+        "azure" | "azure-server" => {
+            let detail = rget(r, &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")))?;
+            let (project, _) = azure_project(r);
+            let endpoint = format!("{project}/_apis");
+            let version = if r.service == "azure-server" { "7.0" } else { "7.1" };
+            let mut methods = Vec::new();
+            if let (Some(repo), Some(reference)) = (
+                detail["repository"]["id"].as_str(), detail["targetRefName"].as_str()
+            ) {
+                let url = format!("{endpoint}/git/policy/configurations?repositoryId={}&refName={}&api-version={version}", q(repo), q(reference));
+                if let Ok(policies) = crate::pagination::collect(&url, |url| crate::hosting::http_page("GET", url, &auth(&r.service)?, None)) {
+                    let policies = list(&policies["value"]);
+                    methods = [("merge", "allowNoFastForward"), ("squash", "allowSquash"), ("rebase", "allowRebase"), ("rebase_merge", "allowRebaseMerge")].into_iter()
+                        .filter_map(|(method, field)| policies.iter().filter(|p| p["isEnabled"] == true && p["isBlocking"] == true && p["type"]["id"] == "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab")
+                            .all(|p| p["settings"][field].as_bool() == Some(true)).then_some(method)).collect();
+                }
+            }
+            let status = match detail["mergeStatus"].as_str() {
+                Some("conflicts") => Some("Resolve merge conflicts on the hosting service."),
+                Some("queued") => Some("The hosting service is checking mergeability. Refresh to check again."),
+                Some("rejectedByPolicy") => Some("The hosting service is waiting for required reviews or checks."),
+                _ => None,
+            };
+            let status = status.or_else(|| {
+                let project_id = detail["repository"]["project"]["id"].as_str()?;
+                let artifact = q(&format!("vstfs:///CodeReview/CodeReviewId/{project_id}/{number}"));
+                let checks = rget(r, &format!("{endpoint}/policy/evaluations?artifactId={artifact}&api-version={version}-preview.1")).ok()?;
+                list(&checks["value"]).iter().any(|check| {
+                    check["configuration"]["isEnabled"] == true && check["configuration"]["isBlocking"] == true
+                        && matches!(check["status"].as_str(), Some("queued" | "running" | "rejected" | "broken"))
+                }).then_some("The hosting service is waiting for required reviews or checks.")
+            });
+            (azure_pr(&detail, &r.web), methods, status)
+        }
+        _ => return Err("This hosting service does not support pull requests.".into()),
+    };
+    crate::read_jobs::check()?;
+    let merge_status = if request.draft { Some("Draft pull requests cannot be merged.") }
+        else if !matches!(request.state.to_ascii_lowercase().as_str(), "open" | "opened" | "active") { Some("This pull request is closed.") }
+        else { status };
+    Ok(PullRequestDetails { request, merge_methods: methods, merge_status })
 }
 
 #[derive(Serialize)]
@@ -332,6 +649,8 @@ pub struct Tracker {
 pub fn issues(r: &RemoteRepo) -> Result<Vec<Issue>, String> {
     let b = api_base(&r.service);
     Ok(match r.service.as_str() {
+        "gitea" | "forgejo" | "codeberg" => list(&rget(r, &format!("{b}/repos/{}/issues?state=open&type=issues&limit=50", r.path))?).iter()
+            .filter(|issue| issue["pull_request"].is_null()).map(|issue| forge_issue(issue, &r.service)).collect(),
         "github" | "github-enterprise" => list(&rget(r, &format!("{b}/repos/{}/issues?state=open&per_page=50", r.path))?).iter().filter(|i| i.get("pull_request").is_none()).map(github_issue).collect(),
         "gitlab" | "gitlab-self" => list(&rget(r, &format!("{b}/projects/{}/issues?state=opened&per_page=50", enc(&r.path)))?).iter().map(gitlab_issue).collect(),
         "bitbucket" => match rget(r, &format!("{b}/repositories/{}/issues?pagelen=50&q={}", r.path, q("state=\"new\" OR state=\"open\""))) {
@@ -352,16 +671,26 @@ pub fn issues(r: &RemoteRepo) -> Result<Vec<Issue>, String> {
             Err(e) if e.starts_with("404") => vec![], // the repository has no issue tracker
             Err(e) => return Err(e),
         },
-        "azure" => {
-            let (_, project, _) = azure_parts(r);
-            tracker_issues(&Tracker { kind: "azure".into(), project }, false)?
+        "azure" | "azure-server" => {
+            let (project_url, _) = azure_project(r);
+            let project = tauri::Url::parse(&project_url).ok()
+                .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+                .ok_or("The Azure repository has no project.")?;
+            let project = percent_decode_path(&project);
+            tracker_issues(&Tracker { kind: r.service.clone(), project }, false)?
         }
         _ => vec![],
     })
 }
 
 /// Issues from a separate tracker (Jira, Trello, Azure Boards): for a project / board, or the ones assigned to you.
-fn azure_workitem_page(url: &str, endpoint: &str, org: &str, scope: &str, mut fetch: impl FnMut(&str, &str, Option<Value>) -> Result<Value, String>) -> Result<crate::hosting::HttpPage, String> {
+fn percent_decode_path(value: &str) -> String {
+    let mut encoded = tauri::Url::parse("https://fixture.invalid").expect("static URL");
+    encoded.set_query(Some(&format!("path={}", value.replace('+', "%2B").replace('&', "%26"))));
+    encoded.query_pairs().next().map(|(_, value)| value.into_owned()).unwrap_or_default()
+}
+
+fn azure_workitem_page(url: &str, endpoint: &str, base: &str, version: &str, scope: &str, mut fetch: impl FnMut(&str, &str, Option<Value>) -> Result<Value, String>) -> Result<crate::hosting::HttpPage, String> {
     let fields = "System.Title,System.State,System.ChangedDate,System.Tags,System.CreatedBy,System.TeamProject";
                 let after = crate::pagination::parameter(url, "gitcraftAfter").and_then(|v| v.parse::<u64>().ok()).ok_or("Invalid work-item continuation")?;
                 let wiql = format!("Select [System.Id] From WorkItems Where {scope} And [System.State] Not In ('Closed','Done','Removed') And [System.Id] > {after} Order By [System.Id] Asc");
@@ -371,7 +700,7 @@ fn azure_workitem_page(url: &str, endpoint: &str, org: &str, scope: &str, mut fe
                 let next = if ids.len() == 50 { ids.iter().max().map(|id| crate::pagination::with_parameter(url, "gitcraftAfter", &id.to_string())) } else { None };
                 let mut value = if ids.is_empty() { json!({"value":[]}) } else {
                     let ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-                    fetch("GET", &format!("https://dev.azure.com/{org}/_apis/wit/workitems?ids={ids}&fields={fields}&api-version=7.1"), None)?
+                    fetch("GET", &format!("{base}/_apis/wit/workitems?ids={ids}&fields={fields}&api-version={version}"), None)?
                 };
                 if let Some(next) = next { value["next"] = Value::String(next); }
                 Ok(crate::hosting::HttpPage { value, link: None, next_page: None, continuation: None })
@@ -382,7 +711,7 @@ pub fn tracker_issues(t: &Tracker, mine: bool) -> Result<Vec<Issue>, String> {
     match id {
         "jira" | "jira-server" => {
             let jql = if !mine && !t.project.trim().is_empty() {
-                format!("project = \"{}\" AND resolution = Unresolved ORDER BY updated DESC", t.project.trim())
+                format!("project = \"{}\" AND resolution = Unresolved ORDER BY updated DESC", t.project.trim().replace('\\', "\\\\").replace('"', "\\\""))
             } else {
                 "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC".to_string()
             };
@@ -394,16 +723,17 @@ pub fn tracker_issues(t: &Tracker, mine: bool) -> Result<Vec<Issue>, String> {
             let path = if !mine && !t.project.trim().is_empty() { format!("/boards/{}/cards/open", t.project.trim()) } else { "/members/me/cards?filter=open".into() };
             Ok(list(&get(id, &path)?).iter().map(trello_issue).collect())
         }
-        "azure" => {
-            let org = config().azure_org.trim().to_string();
-            if org.is_empty() {
-                return Err("Set your Azure DevOps organization in Preferences > Integrations.".into());
+        "azure" | "azure-server" => {
+            if id == "azure" && config().azure_org.trim().is_empty() || id == "azure-server" && crate::hosting::azure_server_base().is_none() {
+                return Err("Set your Azure DevOps organization or collection in Preferences > Integrations.".into());
             }
+            let base = api_base(id);
+            let version = if id == "azure-server" { "7.0" } else { "7.1" };
             let scope = if mine || t.project.trim().is_empty() { "[System.AssignedTo] = @Me".to_string() } else { format!("[System.TeamProject] = '{}'", t.project.replace('\'', "''")) };
-            let a = auth("azure")?;
-            let endpoint = format!("https://dev.azure.com/{org}/_apis/wit/wiql?api-version=7.1&$top=50");
+            let a = auth(id)?;
+            let endpoint = format!("{base}/_apis/wit/wiql?api-version={version}&$top=50");
             let start = format!("{endpoint}&gitcraftScope={}&gitcraftAfter=0", q(&scope));
-            let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, &endpoint, &org, &scope, |method, url, body| http(method, url, &a, body)))?;
+            let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, &endpoint, &base, version, &scope, |method, url, body| http(method, url, &a, body)))?;
             Ok(list(&items["value"])
                 .iter()
                 .map(|w| {
@@ -414,11 +744,11 @@ pub fn tracker_issues(t: &Tracker, mine: bool) -> Result<Vec<Issue>, String> {
                         title: s(&f["System.Title"]),
                         author: s(&f["System.CreatedBy"]["displayName"]),
                         state: s(&f["System.State"]),
-                        url: format!("https://dev.azure.com/{org}/_workitems/edit/{n}"),
+                        url: format!("{base}/_workitems/edit/{n}"),
                         labels: s(&f["System.Tags"]).split(';').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
                         updated: s(&f["System.ChangedDate"]),
                         repo: s(&f["System.TeamProject"]),
-                        tracker: "azure".into(),
+                        tracker: id.into(),
                         ..Default::default()
                     }
                 })
@@ -446,6 +776,7 @@ pub fn create_issue(r: Option<&RemoteRepo>, t: &Tracker, title: &str, body: &str
             let r = r.ok_or("This repository's remote isn't on a connected service.")?;
             let b = api_base(&r.service);
             match r.service.as_str() {
+                "gitea" | "forgejo" | "codeberg" => Ok(forge_issue(&rsend(r, "POST", &format!("{b}/repos/{}/issues", r.path), json!({ "title": title, "body": body }))?, &r.service)),
                 "github" | "github-enterprise" => Ok(github_issue(&rsend(r, "POST", &format!("{b}/repos/{}/issues", r.path), json!({ "title": title, "body": body }))?)),
                 "gitlab" | "gitlab-self" => Ok(gitlab_issue(&rsend(r, "POST", &format!("{b}/projects/{}/issues", enc(&r.path)), json!({ "title": title, "description": body }))?)),
                 "bitbucket" => {
@@ -462,7 +793,7 @@ pub fn comments(r: &RemoteRepo, number: u64) -> Result<Vec<Comment>, String> {
     let b = api_base(&r.service);
     let c = |id: String, author: String, body: String, created: String| Comment { id, author, body, created };
     Ok(match r.service.as_str() {
-        "github" | "github-enterprise" => list(&rget(r, &format!("{b}/repos/{}/issues/{number}/comments?per_page=100", r.path))?)
+        "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg" => list(&rget(r, &format!("{b}/repos/{}/issues/{number}/comments?per_page=100&limit=100", r.path))?)
             .iter()
             .map(|x| c(s(&x["id"]), s(&x["user"]["login"]), s(&x["body"]), s(&x["created_at"])))
             .collect(),
@@ -482,7 +813,7 @@ pub fn comments(r: &RemoteRepo, number: u64) -> Result<Vec<Comment>, String> {
             .map(|x| c(s(&x["comment"]["id"]), s(&x["comment"]["author"]["displayName"]), s(&x["comment"]["text"]), ms_to_iso(&x["comment"]["createdDate"])))
             .rev()
             .collect(),
-        "azure" => list(&rget(r, &azure_url(r, &format!("/pullRequests/{number}/threads?api-version=7.1")))?["value"])
+        "azure" | "azure-server" => list(&rget(r, &azure_url(r, &format!("/pullRequests/{number}/threads?api-version=7.1")))?["value"])
             .iter()
             .flat_map(|t| list(&t["comments"]).into_iter().map(move |x| (t, x)))
             .filter(|(_, x)| x["commentType"] == "text")
@@ -492,14 +823,37 @@ pub fn comments(r: &RemoteRepo, number: u64) -> Result<Vec<Comment>, String> {
     })
 }
 
+pub fn issue_comments(r: &RemoteRepo, number: u64) -> Result<Vec<Comment>, String> {
+    let base = api_base(&r.service);
+    let url = match r.service.as_str() {
+        "github" | "github-enterprise" => format!("{base}/repos/{}/issues/{number}/comments?per_page=50", r.path),
+        "gitea" | "forgejo" | "codeberg" => format!("{base}/repos/{}/issues/{number}/comments?limit=50", r.path),
+        "gitlab" | "gitlab-self" => format!("{base}/projects/{}/issues/{number}/notes?sort=asc&per_page=50", enc(&r.path)),
+        "bitbucket" => format!("{base}/repositories/{}/issues/{number}/comments?pagelen=50", r.path),
+        _ => return Ok(Vec::new()),
+    };
+    let result = rget(r, &url)?;
+    let mut comments = Vec::new();
+    for row in list(result.as_array().map(|_| &result).unwrap_or(&result["values"])) {
+        if row["system"] == true || row["deleted"] == true { continue; }
+        let (author, body, created) = match r.service.as_str() {
+            "gitlab" | "gitlab-self" => (s(&row["author"]["username"]), s(&row["body"]), s(&row["created_at"])),
+            "bitbucket" => (s(&row["user"]["display_name"]), s(&row["content"]["raw"]), s(&row["created_on"])),
+            _ => (s(&row["user"]["login"]), s(&row["body"]), s(&row["created_at"])),
+        };
+        comments.push(Comment { id: s(&row["id"]), author, body, created });
+    }
+    Ok(comments)
+}
+
 pub fn add_comment(r: &RemoteRepo, number: u64, body: &str) -> Result<(), String> {
     let b = api_base(&r.service);
     match r.service.as_str() {
-        "github" | "github-enterprise" => rsend(r, "POST", &format!("{b}/repos/{}/issues/{number}/comments", r.path), json!({ "body": body })),
+        "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg" => rsend(r, "POST", &format!("{b}/repos/{}/issues/{number}/comments", r.path), json!({ "body": body })),
         "gitlab" | "gitlab-self" => rsend(r, "POST", &format!("{b}/projects/{}/merge_requests/{number}/notes", enc(&r.path)), json!({ "body": body })),
         "bitbucket" => rsend(r, "POST", &format!("{b}/repositories/{}/pullrequests/{number}/comments", r.path), json!({ "content": { "raw": body } })),
         "bitbucket-server" => rsend(r, "POST", &format!("{b}{}/pull-requests/{number}/comments", bbs_path(r)), json!({ "text": body })),
-        "azure" => rsend(r, "POST", &azure_url(r, &format!("/pullRequests/{number}/threads?api-version=7.1")), json!({ "comments": [{ "parentCommentId": 0, "content": body, "commentType": 1 }], "status": 1 })),
+        "azure" | "azure-server" => rsend(r, "POST", &azure_url(r, &format!("/pullRequests/{number}/threads?api-version=7.1")), json!({ "comments": [{ "parentCommentId": 0, "content": body, "commentType": 1 }], "status": 1 })),
         _ => Err("Not supported for this service".into()),
     }
     .map(|_| ())
@@ -508,6 +862,10 @@ pub fn add_comment(r: &RemoteRepo, number: u64, body: &str) -> Result<(), String
 pub fn create_pr(r: &RemoteRepo, source: &str, target: &str, title: &str, body: &str, draft: bool) -> Result<PullRequest, String> {
     let b = api_base(&r.service);
     match r.service.as_str() {
+        "gitea" | "forgejo" | "codeberg" => {
+            let title = if draft && !title.starts_with("WIP:") { format!("WIP: {title}") } else { title.into() };
+            Ok(forge_pr(&rsend(r, "POST", &format!("{b}/repos/{}/pulls", r.path), json!({ "title": title, "head": source, "base": target, "body": body }))?))
+        }
         "github" | "github-enterprise" => Ok(github_pr(&rsend(r, "POST", &format!("{b}/repos/{}/pulls", r.path), json!({ "title": title, "head": source, "base": target, "body": body, "draft": draft }))?)),
         "gitlab" | "gitlab-self" => {
             let title = if draft { format!("Draft: {title}") } else { title.to_string() };
@@ -525,7 +883,7 @@ pub fn create_pr(r: &RemoteRepo, source: &str, target: &str, title: &str, body: 
             &format!("{b}{}/pull-requests", bbs_path(r)),
             json!({ "title": title, "description": body, "draft": draft, "fromRef": { "id": format!("refs/heads/{source}") }, "toRef": { "id": format!("refs/heads/{target}") } }),
         )?)),
-        "azure" => Ok(azure_pr(
+        "azure" | "azure-server" => Ok(azure_pr(
             &rsend(
                 r,
                 "POST",
@@ -576,53 +934,300 @@ fn await_gitlab_rebase(mut read: impl FnMut() -> Result<Value,String>, mut pause
     }
 }
 
-pub fn merge_pr(r: &RemoteRepo, number: u64, method: &str) -> Result<(), String> {
+pub fn merge_pr(r: &RemoteRepo, number: u64, method: &str, expected: Option<&str>, squash_message: Option<&str>) -> Result<(), String> {
+    let squash_message = squash_message.map(str::trim).filter(|message| !message.is_empty());
+    if squash_message.is_some_and(|message| method != "squash" || message.len() > 65536 || message.contains('\0')) {
+        return Err("A custom squash message requires the Squash strategy and must fit within 64 KiB.".into());
+    }
+    if expected.is_some_and(|sha| !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        return Err("The pull request source is invalid. Refresh it before merging.".into());
+    }
     if r.service == "bitbucket-server" && method != "default" {
         return Err("This service uses its configured server default merge strategy. Refresh the pull request and select Server default.".into());
     }
     let waiting = MergeWait::new(r, number)?;
     let b = api_base(&r.service);
     match r.service.as_str() {
-        "github" | "github-enterprise" => rsend(r, "PUT", &format!("{b}/repos/{}/pulls/{number}/merge", r.path), json!({ "merge_method": method })).map(|_| ()),
+        "github" | "github-enterprise" => {
+            let mut body = json!({ "merge_method": method });
+            if let Some(sha) = expected { body["sha"] = json!(sha); }
+            if let Some(message) = squash_message {
+                let (title, description) = message.split_once('\n').unwrap_or((message, ""));
+                body["commit_title"] = json!(title.trim());
+                body["commit_message"] = json!(description.trim());
+            }
+            let result = rsend(r, "PUT", &format!("{b}/repos/{}/pulls/{number}/merge", r.path), body)?;
+            if result["merged"] == true { Ok(()) }
+            else { Err(result["message"].as_str().unwrap_or("The server did not confirm the merge.").into()) }
+        }
+        "gitea" | "forgejo" | "codeberg" => {
+            let url = format!("{b}/repos/{}/pulls/{number}", r.path);
+            let mut body = json!({ "do": match method { "rebase_merge" => "rebase-merge", "fast_forward" => "fast-forward-only", "merge" | "rebase" | "squash" => method, _ => return Err("Choose a supported merge method.".into()) } });
+            if let Some(sha) = expected { body["head_commit_id"] = json!(sha); }
+            if let Some(message) = squash_message {
+                let (title, content) = message.split_once('\n').unwrap_or((message, ""));
+                body["merge_title_field"] = json!(title.trim());
+                body["merge_message_field"] = json!(content.trim());
+            }
+            rsend(r, "POST", &format!("{url}/merge"), body).map(|_| ())
+        }
         "gitlab" | "gitlab-self" => {
             let url = format!("{b}/projects/{}/merge_requests/{number}", enc(&r.path));
-            let mut body = json!({ "squash": method == "squash" });
+            let mut body = if method == "default" { json!({}) } else { json!({ "squash": method == "squash" }) };
+            if let Some(sha) = expected { body["sha"] = json!(sha); }
+            if let Some(message) = squash_message { body["squash_commit_message"] = json!(message); }
             if method == "rebase" {
-                let expected = rget(r, &url)?;
+                let current = rget(r, &url)?;
+                ensure_merge_source(expected, &current["sha"])?;
                 http("PUT", &format!("{url}/rebase"), &auth(&r.service)?, None)?;
                 let completed = await_gitlab_rebase(|| rget(r, &format!("{url}?include_rebase_in_progress=true")), || {
                     for _ in 0..10 { if waiting.is_cancelled() { break; } std::thread::sleep(std::time::Duration::from_millis(100)); }
-                }, || waiting.is_cancelled(), &expected, std::time::Duration::from_secs(60))?;
+                }, || waiting.is_cancelled(), &current, std::time::Duration::from_secs(60))?;
                 body["sha"] = completed["sha"].clone();
             }
             if waiting.is_cancelled() { return Err("Merge cancelled before it was sent.".into()); }
             rsend(r, "PUT", &format!("{url}/merge"), body).map(|_| ())
         }
         "bitbucket" => {
-            let strategy = match method {
-                "squash" => "squash",
-                "rebase" => "fast_forward",
-                _ => "merge_commit",
+            let url = format!("{b}/repositories/{}/pullrequests/{number}", r.path);
+            if expected.is_some() { ensure_merge_source(expected, &rget(r, &url)?["source"]["commit"]["hash"])?; }
+            let mut body = match method {
+                "default" => json!({}),
+                "squash" => json!({ "merge_strategy": "squash" }),
+                "fast_forward" | "rebase" => json!({ "merge_strategy": "fast_forward" }),
+                _ => json!({ "merge_strategy": "merge_commit" }),
             };
-            rsend(r, "POST", &format!("{b}/repositories/{}/pullrequests/{number}/merge", r.path), json!({ "merge_strategy": strategy })).map(|_| ())
+            if let Some(message) = squash_message { body["message"] = json!(message); }
+            let response = rsend(r, "POST", &format!("{url}/merge"), body)?;
+            if response["state"] == "MERGED" { Ok(()) } else { Err("The server has not confirmed the merge. Refresh the pull request to see its status.".into()) }
         }
         "bitbucket-server" => {
             let pr = rget(r, &format!("{b}{}/pull-requests/{number}", bbs_path(r)))?;
+            ensure_merge_source(expected, &pr["fromRef"]["latestCommit"])?;
             let version = pr["version"].as_i64().unwrap_or(0);
             rsend(r, "POST", &format!("{b}{}/pull-requests/{number}/merge?version={version}", bbs_path(r)), json!({})).map(|_| ())
         }
-        "azure" => {
+        "azure" | "azure-server" => {
             let pr = rget(r, &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")))?;
+            ensure_merge_source(expected, &pr["lastMergeSourceCommit"]["commitId"])?;
             let strategy = match method {
                 "squash" => "squash",
                 "rebase" => "rebase",
+                "rebase_merge" => "rebaseMerge",
                 _ => "noFastForward",
             };
-            let body = json!({ "status": "completed", "lastMergeSourceCommit": pr["lastMergeSourceCommit"], "completionOptions": { "mergeStrategy": strategy } });
+            let mut body = json!({ "status": "completed", "lastMergeSourceCommit": pr["lastMergeSourceCommit"], "completionOptions": { "mergeStrategy": strategy } });
+            if let Some(message) = squash_message { body["completionOptions"]["mergeCommitMessage"] = json!(message); }
             rsend(r, "PATCH", &azure_url(r, &format!("/pullrequests/{number}?api-version=7.1")), body).map(|_| ())
         }
         _ => Err("Not supported for this service".into()),
     }
+}
+
+#[derive(Serialize)]
+struct ReviewDiff {
+    path: String,
+    patch: String,
+}
+
+#[derive(Serialize)]
+struct ReviewComment {
+    id: String,
+    path: String,
+    line: Option<u64>,
+    side: String,
+    author: String,
+    body: String,
+}
+
+#[derive(Serialize)]
+pub struct ReviewData {
+    reviewers: Vec<String>,
+    reviews: Vec<(String, String, String)>,
+    files: Vec<ReviewDiff>,
+    comments: Vec<ReviewComment>,
+}
+
+fn github_review_url(r: &RemoteRepo, number: u64) -> Result<String, String> {
+    if !matches!(r.service.as_str(), "github" | "github-enterprise") {
+        return Err("This hosting service does not support pull request reviews through GitCraft.".into());
+    }
+    Ok(format!("{}/repos/{}/pulls/{number}", api_base(&r.service), r.path))
+}
+
+pub fn review_data(r: &RemoteRepo, number: u64, expected: &str) -> Result<ReviewData, String> {
+    if matches!(r.service.as_str(), "gitlab" | "gitlab-self") {
+        return gitlab_review_data(r, number, expected);
+    }
+    let url = github_review_url(r, number)?;
+    let detail = rget(r, &url)?;
+    ensure_merge_source(Some(expected), &detail["head"]["sha"])?;
+    let requested = rget(r, &format!("{url}/requested_reviewers"))?;
+    let reviewers = list(&requested["users"]).iter().map(|row| s(&row["login"]))
+        .chain(list(&requested["teams"]).iter().map(|row| format!("Team {}", s(&row["slug"])))).collect();
+    let reviews = list(&rget(r, &format!("{url}/reviews?per_page=100"))?).iter()
+        .filter(|&row| row["state"] != "PENDING").map(|row| (s(&row["user"]["login"]), s(&row["state"]), s(&row["body"])))
+        .collect();
+    let files = list(&rget(r, &format!("{url}/files?per_page=100"))?).into_iter().take(3000)
+        .filter_map(|row| Some(ReviewDiff { path: row["filename"].as_str()?.into(), patch: row["patch"].as_str()?.into() }))
+        .filter(|row| row.patch.len() <= 256 * 1024)
+        .collect();
+    let comments = list(&rget(r, &format!("{url}/comments?per_page=100"))?).into_iter()
+        .map(|row| ReviewComment { id: s(&row["id"]), path: s(&row["path"]), line: row["line"].as_u64(),
+            side: s(&row["side"]), author: s(&row["user"]["login"]), body: s(&row["body"]) }).collect();
+    ensure_merge_source(Some(expected), &rget(r, &url)?["head"]["sha"])?;
+    Ok(ReviewData { reviewers, reviews, files, comments })
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReviewAction {
+    Approve { body: String },
+    RequestChanges { body: String },
+    RequestReviewers { reviewers: Vec<String> },
+    Inline { path: String, line: u64, side: String, body: String, old_line: Option<u64> },
+}
+
+pub fn submit_review(r: &RemoteRepo, number: u64, expected: &str, action: ReviewAction) -> Result<(), String> {
+    if matches!(r.service.as_str(), "gitlab" | "gitlab-self") {
+        return submit_gitlab_review(r, number, expected, action);
+    }
+    let url = github_review_url(r, number)?;
+    let detail = rget(r, &url)?;
+    ensure_merge_source(Some(expected), &detail["head"]["sha"])?;
+    if detail["state"] != "open" { return Err("The pull request must be open to submit a review.".into()); }
+    let body_ok = |body: &str| body.len() <= 64 * 1024 && !body.contains('\0');
+    let (endpoint, body) = match action {
+        ReviewAction::Approve { body } if body_ok(&body) => ("reviews", json!({ "event": "APPROVE", "commit_id": expected, "body": body.trim() })),
+        ReviewAction::RequestChanges { body } if body_ok(&body) && !body.trim().is_empty() => ("reviews", json!({ "event": "REQUEST_CHANGES", "commit_id": expected, "body": body.trim() })),
+        ReviewAction::RequestReviewers { reviewers } if !reviewers.is_empty() && reviewers.len() <= 15 && reviewers.iter().all(|name| !name.is_empty() && name.len() <= 100 && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'[' | b']'))) =>
+            ("requested_reviewers", json!({ "reviewers": reviewers })),
+        ReviewAction::Inline { path, line, side, body, .. } if line > 0 && !path.is_empty() && !path.contains('\0') && path.len() <= 4096 && matches!(side.as_str(), "LEFT" | "RIGHT") && body_ok(&body) && !body.trim().is_empty() =>
+            ("comments", json!({ "path": path, "line": line, "side": side, "commit_id": expected, "body": body.trim() })),
+        _ => return Err("Review the selected line, message or reviewer names and try again.".into()),
+    };
+    rsend(r, "POST", &format!("{url}/{endpoint}"), body).map(|_| ())
+}
+
+fn gitlab_review_url(r: &RemoteRepo, number: u64) -> String {
+    format!("{}/projects/{}/merge_requests/{number}", api_base(&r.service), enc(&r.path))
+}
+
+fn gitlab_review_data(r: &RemoteRepo, number: u64, expected: &str) -> Result<ReviewData, String> {
+    let url = gitlab_review_url(r, number);
+    ensure_merge_source(Some(expected), &rget(r, &url)?["sha"])?;
+    let assigned = list(&rget(r, &format!("{url}/reviewers"))?);
+    let reviewers = assigned.iter().filter(|row| matches!(row["state"].as_str(), Some("unreviewed" | "review_started" | "unapproved") | None))
+        .map(|row| s(&row["user"]["username"])).collect();
+    let reviews = assigned.iter().filter(|row| matches!(row["state"].as_str(), Some("approved" | "reviewed" | "requested_changes")))
+        .map(|row| (s(&row["user"]["username"]), s(&row["state"]), String::new())).collect();
+    let files = list(&rget(r, &format!("{url}/diffs?per_page=100"))?).into_iter().take(3000)
+        .filter_map(|row| Some(ReviewDiff { path: row["new_path"].as_str()?.into(), patch: row["diff"].as_str()?.into() }))
+        .filter(|row| !row.patch.is_empty() && row.patch.len() <= 256 * 1024)
+        .collect();
+    let comments = list(&rget(r, &format!("{url}/discussions?per_page=100"))?).into_iter()
+        .flat_map(|thread| list(&thread["notes"])).filter(|note| note["position"].is_object())
+        .map(|note| {
+            let position = &note["position"];
+            let right = position["new_line"].as_u64();
+            ReviewComment {
+                id: s(&note["id"]), path: s(&position["new_path"]), line: right.or(position["old_line"].as_u64()),
+                side: if right.is_some() { "RIGHT".into() } else { "LEFT".into() }, author: s(&note["author"]["username"]), body: s(&note["body"]),
+            }
+        }).collect();
+    ensure_merge_source(Some(expected), &rget(r, &url)?["sha"])?;
+    Ok(ReviewData { reviewers, reviews, files, comments })
+}
+
+fn gitlab_review_mutation(r: &RemoteRepo, operation: &str, query: &str, variables: Value) -> Result<(), String> {
+    let api = api_base(&r.service);
+    let origin = api.strip_suffix("/api/v4").ok_or("Invalid GitLab endpoint.")?;
+    let result = rsend(r, "POST", &format!("{origin}/api/graphql"), json!({ "query": query, "variables": variables }))?;
+    let value = &result["data"][operation];
+    let messages: Vec<_> = list(&result["errors"]).iter().map(|row| s(&row["message"]))
+        .chain(list(&value["errors"]).iter().map(s)).filter(|message| !message.is_empty()).collect();
+    if !messages.is_empty() { return Err(messages.join("\n")); }
+    if value["mergeRequest"]["id"].is_string() { Ok(()) } else { Err("GitLab did not confirm the review update.".into()) }
+}
+
+fn submit_gitlab_review(r: &RemoteRepo, number: u64, expected: &str, action: ReviewAction) -> Result<(), String> {
+    let url = gitlab_review_url(r, number);
+    let detail = rget(r, &url)?;
+    ensure_merge_source(Some(expected), &detail["sha"])?;
+    if detail["state"] != "opened" { return Err("The merge request must be open to submit a review.".into()); }
+    let body_ok = |body: &str| body.len() <= 64 * 1024 && !body.contains('\0');
+    let approve = matches!(&action, ReviewAction::Approve { .. });
+    match action {
+        ReviewAction::RequestReviewers { reviewers } if !reviewers.is_empty() && reviewers.len() <= 15 && reviewers.iter().all(|name| !name.is_empty() && name.len() <= 100 && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))) => {
+            gitlab_review_mutation(r, "mergeRequestSetReviewers",
+                "mutation($input: MergeRequestSetReviewersInput!) { mergeRequestSetReviewers(input: $input) { errors mergeRequest { id } } }",
+                json!({ "input": { "projectPath": r.path, "iid": number.to_string(), "reviewerUsernames": reviewers, "operationMode": "APPEND" } }))
+        }
+        ReviewAction::Approve { body } | ReviewAction::RequestChanges { body } if body_ok(&body) => {
+            if approve {
+                rsend(r, "POST", &format!("{url}/approve"), json!({ "sha": expected }))?;
+            } else {
+                gitlab_review_mutation(r, "mergeRequestRequestChanges",
+                    "mutation($input: MergeRequestRequestChangesInput!) { mergeRequestRequestChanges(input: $input) { errors mergeRequest { id } } }",
+                    json!({ "input": { "projectPath": r.path, "iid": number.to_string() } }))?;
+            }
+            if !body.trim().is_empty() {
+                add_comment(r, number, body.trim()).map_err(|error| format!("The review decision was saved. The summary comment could not be posted: {error}"))?;
+            }
+            Ok(())
+        }
+        ReviewAction::Inline { path, line, side, body, old_line } if line > 0 && !path.is_empty() && !path.contains('\0') &&
+            path.len() <= 4096 && matches!(side.as_str(), "LEFT" | "RIGHT") && body_ok(&body) && !body.trim().is_empty() => {
+            let revisions = rget(r, &format!("{url}/versions?per_page=1"))?;
+            let revision = revisions.get(0).ok_or("GitLab did not return an available diff version.")?;
+            ensure_merge_source(Some(expected), &revision["head_commit_sha"])?;
+            let diff = list(&rget(r, &format!("{url}/diffs?per_page=100"))?).into_iter().find(|row| row["new_path"] == path)
+                .ok_or("The file is no longer in the diff.")?;
+            let mut position = json!({
+                "head_sha": expected, "base_sha": revision["base_commit_sha"], "start_sha": revision["start_commit_sha"],
+                "position_type": "text", "new_path": diff["new_path"], "old_path": diff["old_path"]
+            });
+            if side == "LEFT" { position["old_line"] = json!(line); }
+            else {
+                position["new_line"] = json!(line);
+                if let Some(old) = old_line { position["old_line"] = json!(old); }
+            }
+            rsend(r, "POST", &format!("{url}/discussions"), json!({ "body": body.trim(), "position": position })).map(|_| ())
+        }
+        _ => Err("Review the selected line, message or reviewer names and try again.".into()),
+    }
+}
+
+fn ensure_merge_source(expected: Option<&str>, actual: &Value) -> Result<(), String> {
+    if expected.is_some() && expected != actual.as_str() {
+        Err("The pull request source changed after review. Refresh it before merging.".into())
+    } else { Ok(()) }
+}
+
+pub fn merged_source(r: &RemoteRepo, number: u64, expected: &str) -> Result<PullRequest, String> {
+    let mut pr = if matches!(r.service.as_str(), "gitlab" | "gitlab-self") {
+        let base = api_base(&r.service);
+        let id = enc(&r.path);
+        let detail = rget(r, &format!("{base}/projects/{id}/merge_requests/{number}"))?;
+        let mut pr = gitlab_mr(&detail);
+        if detail["source_project_id"].is_number() && detail["source_project_id"] == detail["target_project_id"] {
+            pr.source_url = r.web.clone();
+        } else if let Some(project) = detail["source_project_id"].as_u64() {
+            pr.source_url = s(&rget(r, &format!("{base}/projects/{project}"))?["http_url_to_repo"]);
+        }
+        pr
+    } else { pull_request(r, number)? };
+    if !matches!(pr.state.to_ascii_lowercase().as_str(), "merged" | "completed") {
+        return Err("The hosting service has not confirmed that this pull request merged.".into());
+    }
+    if !matches!(expected.len(), 40 | 64) || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) || pr.source_sha != expected {
+        return Err("The merged source is different from the reviewed commit. Review the branch before deleting it.".into());
+    }
+    if pr.source.is_empty() || pr.source == pr.target { return Err("The source branch cannot be safely identified.".into()); }
+    if !pr.source_url.is_empty() && !tauri::Url::parse(&pr.source_url).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none()) {
+        pr.source_url.clear();
+    }
+    Ok(pr)
 }
 
 #[derive(Serialize, Default)]
@@ -768,6 +1373,8 @@ pub fn repositories(id: &str) -> Result<Vec<HostedRepo>, String> {
             .iter()
             .map(|r| repo(s(&r["name"]), s(&r["full_name"]), s(&r["description"]), r["private"].as_bool().unwrap_or(false), s(&r["clone_url"]), s(&r["ssh_url"]), s(&r["pushed_at"])))
             .collect(),
+        "gitea" | "forgejo" | "codeberg" => list(&get(id, "/user/repos?limit=50")?)
+            .iter().map(|r| repo(s(&r["name"]), s(&r["full_name"]), s(&r["description"]), r["private"] == true, s(&r["clone_url"]), s(&r["ssh_url"]), s(&r["updated_at"]))).collect(),
         "gitlab" | "gitlab-self" => list(&get(id, "/projects?membership=true&per_page=100&order_by=last_activity_at")?)
             .iter()
             .map(|r| repo(s(&r["path"]), s(&r["path_with_namespace"]), s(&r["description"]), r["visibility"] != "public", s(&r["http_url_to_repo"]), s(&r["ssh_url_to_repo"]), s(&r["last_activity_at"])))
@@ -787,7 +1394,7 @@ pub fn repositories(id: &str) -> Result<Vec<HostedRepo>, String> {
                 repo(s(&r["slug"]), full, s(&r["description"]), !r["public"].as_bool().unwrap_or(false), clone_link(l, "http"), clone_link(l, "ssh"), String::new())
             })
             .collect(),
-        "azure" => list(&get(id, "/_apis/git/repositories?api-version=7.1")?["value"])
+        "azure" | "azure-server" => list(&get(id, if id == "azure" { "/_apis/git/repositories?api-version=7.1" } else { "/_apis/git/repositories?api-version=7.0" })?["value"])
             .iter()
             .map(|r| {
                 let full = format!("{}/{}", s(&r["project"]["name"]), s(&r["name"]));
@@ -837,7 +1444,7 @@ mod tests {
         let endpoint = "https://dev.azure.com/fixture/_apis/wit/wiql?api-version=7.1&$top=50";
         let start = format!("{endpoint}&gitcraftScope=fixture&gitcraftAfter=0");
         let mut queries = Vec::new();
-        let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, endpoint, "fixture", "[System.AssignedTo] = @Me", |method, url, body| {
+        let items = crate::pagination::collect(&start, |url| azure_workitem_page(url, endpoint, "https://dev.azure.com/fixture", "7.1", "[System.AssignedTo] = @Me", |method, url, body| {
             assert!(!url.contains("gitcraft"));
             if method == "POST" {
                 let query = body.unwrap()["query"].as_str().unwrap().to_owned();
@@ -852,6 +1459,27 @@ mod tests {
         assert_eq!(items["value"].as_array().unwrap().len(), 73);
         assert_eq!(queries.len(), 2);
         assert!(queries[1].contains("[System.Id] > 50 Order By [System.Id] Asc"));
+    }
+
+    #[test]
+    fn feature_hosting_normalizes_check_results_and_forge_pull_requests() {
+        assert_eq!(check_state("in_progress"), "pending");
+        assert_eq!(check_state("SUCCESSFUL"), "passed");
+        assert_eq!(check_state("canceled"), "cancelled");
+        assert_eq!(check_state("timed_out"), "failed");
+        assert_eq!(check_state("SKIPPED"), "neutral");
+        let pr = forge_pr(&json!({"number":17,"title":"WIP: Fixture","merged":true,"state":"closed","head":{"ref":"topic","sha":"abc"}}));
+        assert!(pr.draft);
+        assert_eq!(pr.source_sha, "abc");
+        assert_eq!(pr.state, "merged");
+        assert!(pull_person_matches("github", &json!({"requested_reviewers":[{"login":"fixture"}]}), PullFilter::ReviewRequested, "fixture"));
+        assert!(!pull_person_matches("azure", &json!({"reviewers":[{"id":"account","vote":10}]}), PullFilter::ReviewRequested, "account"));
+
+        let server = RemoteRepo {
+            provider: crate::hosting::Provider::Azure, service: "azure-server".into(), host: "dev.example.invalid".into(),
+            path: "tfs/DefaultCollection/project/repo".into(), web: "https://dev.example.invalid/tfs/DefaultCollection/project/_git/repo".into(),
+        };
+        assert_eq!(azure_url(&server, "/pullrequests?api-version=7.1"), "https://dev.example.invalid/tfs/DefaultCollection/project/_apis/git/repositories/repo/pullrequests?api-version=7.0");
     }
 
     #[test]
@@ -915,7 +1543,7 @@ mod server_merge_tests {
     fn refuses_specific_strategies_before_contacting_a_server_that_uses_defaults() {
         let remote = crate::hosting::RemoteRepo {provider: crate::hosting::Provider::Bitbucket, service:"bitbucket-server".into(),host:"example.invalid".into(),path:"P/repo".into(),web:"https://example.invalid".into()};
         for method in ["merge", "squash", "rebase"] {
-            assert!(super::merge_pr(&remote, 1, method).unwrap_err().contains("server default"));
+            assert!(super::merge_pr(&remote, 1, method, None, None).unwrap_err().contains("server default"));
         }
     }
 }

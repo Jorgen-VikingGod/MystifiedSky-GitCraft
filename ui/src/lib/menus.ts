@@ -2,7 +2,7 @@ import { literalIgnorePath } from "./ignore-pattern";
 import type { MenuEntry } from "@/components/ui/menu";
 import type { Commit, GitRef, RepoView, Stash } from "./api";
 import { api } from "./api";
-import { act, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, togglePinned, toggleSolo } from "./repo";
+import { act, runBisect, promptUpstream, clearSolo, confirmThen, copy, openHistory, promptBranch, promptTag, toggleHidden, togglePinned, toggleSolo } from "./repo";
 import { useStore } from "./store";
 import { addWorktree } from "./manage";
 import { startPullRequest } from "./hosting";
@@ -53,20 +53,6 @@ export function isLoadedAncestor(repo: RepoView, ancestor: string, tip: string):
   return false;
 }
 
-/** Ask which remote branch a local branch should track ("Set Upstream"). */
-export function promptUpstream(repo: RepoView, ref: GitRef) {
-  const remotes = repo.refs.filter((r) => r.kind === "Remote").map((r) => r.name);
-  const guess = ref.upstream || remotes.find((r) => r.endsWith("/" + ref.name)) || `${repo.remotes[0] ?? "origin"}/${ref.name}`;
-  useStore.getState().setDialog({
-    kind: "prompt", allowEmpty: true,
-    title: "Set Upstream",
-    label: `What remote/branch should "${ref.name}" push to and pull from? (empty = stop tracking)`,
-    value: guess,
-    confirm: "Set Upstream",
-    onSubmit: (v) => act(repo.path, { type: "setUpstream", branch: ref.name, upstream: v }),
-  });
-}
-
 export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   const path = repo.path;
   const head = repo.head_branch;
@@ -114,6 +100,7 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
           kind: "prompt",
           title: `Rename ${ref.name}`,
           label: "New branch name",
+          gitRef: { path, kind: "branch" },
           value: ref.name,
           confirm: "Rename",
           onSubmit: (v) => act(path, { type: "renameBranch", old: ref.name, new: v }),
@@ -148,6 +135,9 @@ export function branchMenu(repo: RepoView, ref: GitRef): MenuEntry[] {
   items.push({ label: "Copy commit sha", onSelect: () => copy(ref.sha) });
   // "Copy link to branch": for a remote branch or a local branch's upstream.
   const onRemote = splitRemote(repo, ref.kind === "Remote" ? ref.name : ref.upstream);
+  if (repo.remotes.length) items.push({ label: "View checks for this branch", onSelect: () =>
+    useStore.getState().setDialog({ kind: "branchChecks", path, name: ref.name, sha: ref.sha, remoteName: onRemote?.remote }),
+  });
   if (onRemote) items.push(...linkItems(repo, "Copy link to branch", { kind: "branch", name: onRemote.branch }, [onRemote.remote]));
   return items;
 }
@@ -200,6 +190,19 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
   const isHead = c.sha === repo.head_sha;
   const canRename = !!repo.head_branch && headLine(repo).includes(c.sha);
   return [
+    ...(repo.bisect && !repo.bisect.first_bad ? [{
+      label: "Bisect", children: [
+        { label: "Mark this commit good", onSelect: () => runBisect(repo.path, "good", c.sha) },
+        { label: "Mark this commit bad", onSelect: () => runBisect(repo.path, "bad", c.sha) },
+        { label: "Skip this commit", onSelect: () => runBisect(repo.path, "skip", c.sha) },
+      ],
+    }] : !repo.bisect ? [{
+      label: "Start bisect here (bad)", onSelect: () => useStore.getState().setDialog({
+        kind: "prompt", title: "Start bisect", label: "Known-good commit, branch, or tag",
+        value: "", confirm: "Start bisect",
+        onSubmit: good => runBisect(repo.path, "start", c.sha, good),
+      }),
+    }] : []),
     ...(repo.head_branch && !isHead ? [{ label: `Rebase ${head} onto this commit`, onSelect: () => act(path, { type: "rebase", onto: c.sha }) }] : []),
     { label: "Checkout", children: [
       ...repo.refs.filter((r) => r.sha === c.sha && r.kind !== "Tag").map((r) => ({
@@ -219,6 +222,8 @@ export function commitMenu(repo: RepoView, c: Commit): MenuEntry[] {
     commitActionMenu(repo, c, "cherryPick", isHead),
     resetMenu(repo, c.sha),
     { label: "Rename commit", disabled: !canRename, onSelect: () => rewordCommit(repo, c.sha) },
+    { label: "Create fixup commit for this commit", disabled: !repo.head_branch || !headLine(repo).includes(c.sha) || !repo.status.staged.length,
+      onSelect: () => confirmThen("Create fixup commit", "Commit the currently staged changes as a fixup for “" + c.summary + "”?", "Create Fixup", () => act(path, { type: "createFixup", target: c.sha })) },
     commitActionMenu(repo, c, "revert"),
     { label: "Create patch from commit", onSelect: () => savePatch(path, [c.sha], patchName(c.summary)) },
     ...(repo.head_branch && repo.remotes.length ? [{ label: `Push ${head} and start a pull request`, onSelect: () => startPullRequest(path, head) }] : []),
@@ -332,6 +337,14 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
     ],
   });
   if (ext) items.push({ label: `Track ${ext} files with Git LFS`, onSelect: () => act(path, { type: "lfsTrack", pattern: "*" + ext }) });
+  if (!inCommit) items.push({
+    label: "Git LFS",
+    children: [
+      { label: "Lock file", onSelect: () => act(path, { type: "lfsLock", path: file }) },
+      { label: "Unlock file", onSelect: () => act(path, { type: "lfsUnlock", path: file, force: false }) },
+      ...(ext ? [{ label: "Track this extension and require a lock", onSelect: () => act(path, { type: "lfsTrack", pattern: "*" + ext, lockable: true }) }] : []),
+    ],
+  });
   if (!inCommit)
     items.push({
       label: "Open in External Diff Tool",
@@ -354,6 +367,14 @@ export function fileMenu(repo: RepoView, file: string, staged: boolean, inCommit
   items.push({ label: "Open in File Manager", onSelect: () => api.revealFile(path, file).catch(fail) });
   items.push({ separator: true });
   items.push({ label: "File History", onSelect: () => openHistory(file, "history") });
+  const separator = file.lastIndexOf("/");
+  if (separator > 0) {
+    const folder = file.slice(0, separator);
+    items.push({ label: "Containing folder history", onSelect: () => {
+      const state = useStore.getState();
+      state.setUi(state.activeId, { historyFilter: { path: folder }, history: null, diff: null, selection: { type: "wip" }, multi: [] });
+    } });
+  }
   items.push({ label: "Blame", onSelect: () => openHistory(file, "blame") });
   return items;
 }

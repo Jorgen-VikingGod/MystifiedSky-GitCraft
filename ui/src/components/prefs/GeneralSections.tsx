@@ -1,3 +1,5 @@
+import { useText } from "@/lib/locale";
+import { promptSshKey } from "@/lib/ssh-keys";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery } from "@tanstack/react-query";
 import { enableDesktopNotifications } from "@/lib/desktop-notify";
@@ -6,6 +8,7 @@ import { api } from "@/lib/api";
 import { useStore, type Settings } from "@/lib/store";
 import { tools, formatDate } from "@/lib/integrations";
 import { THEMES } from "@/lib/prefs";
+import { isMac } from "@/lib/utils";
 import { Area, Btn, H, Note, Num, PathField, Row, Select, Text, Toggle } from "./controls";
 
 const useSet = () => {
@@ -117,7 +120,6 @@ export function GeneralSection() {
 export function SshSection() {
   const { set, put, toast } = useSet();
   const acc = useQuery({ queryKey: ["accounts", null], queryFn: ({ signal }) => api.accountInfo(null, signal) });
-  const [busy, setBusy] = useState(false);
   return (
     <>
       <H>SSH</H>
@@ -133,23 +135,11 @@ export function SshSection() {
       </Row>
       <Row label="Generate new Private/Public key" help="This will create new keys and configure GitCraft to use them. Add the public key to your services under Integrations.">
         <Btn
-          disabled={busy || !acc.data?.ssh_keygen}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              const name = `gitcraft_${Date.now().toString(36)}`;
-              const pub = await api.generateSshKey(acc.data?.email || "gitcraft", name);
-              const priv = `${acc.data?.ssh_dir}${acc.data?.ssh_dir?.endsWith("\\") || acc.data?.ssh_dir?.endsWith("/") ? "" : "/"}${name}`;
-              put({ sshUseAgent: false, sshPrivateKey: priv, sshPublicKey: `${priv}.pub` });
-              await navigator.clipboard.writeText(pub).catch(() => undefined);
-              toast(true, "New SSH key created, selected, and its public key copied");
-              acc.refetch();
-            } catch (e) {
-              toast(false, String(e));
-            } finally {
-              setBusy(false);
-            }
-          }}
+          disabled={!acc.data?.ssh_keygen}
+          onClick={() => promptSshKey(acc.data?.email || "gitcraft", `gitcraft_${Date.now().toString(36)}`, (path, agentAdded) => {
+            put({ sshUseAgent: agentAdded, sshPrivateKey: path, sshPublicKey: `${path}.pub` });
+            void acc.refetch();
+          })}
         >
           Generate
         </Btn>
@@ -179,6 +169,7 @@ const NOW = new Date(2026, 10, 9, 14, 23, 5);
 
 export function UiSection() {
   const { set, put } = useSet();
+  const t = useText();
   const cols = set.columns;
   const col = (k: keyof typeof cols, label: string) => (
     <Row label={label} key={k}>
@@ -187,9 +178,9 @@ export function UiSection() {
   );
   return (
     <>
-      <H>UI Customization</H>
-      <Row label="Theme">
-        <Select value={set.theme} onChange={(v) => put({ theme: v })} options={THEMES.map((t) => [t.id, t.label] as [string, string])} />
+      <H>{t("UI Customization")}</H>
+      <Row label={t("Theme")}>
+        <Select value={set.theme} onChange={(v) => put({ theme: v })} options={THEMES.map((theme) => [theme.id, t(theme.label)] as [string, string])} />
       </Row>
       <Row label="Notification Location">
         <Select
@@ -203,10 +194,10 @@ export function UiSection() {
           ]}
         />
       </Row>
-      <Row label="Language" help="GitCraft is available in English.">
-        <Select value="en" onChange={() => undefined} options={[["en", "English"]]} />
+      <Row label={t("Language")} help={set.language === "es" ? "Las pantallas traducidas se muestran en español." : "Spanish is available for the main navigation and start screen."}>
+        <Select value={set.language ?? "en"} onChange={(value) => put({ language: value === "es" ? "es" : "en" })} options={[["en", "English"], ["es", "Español"]]} />
       </Row>
-      <H sub>Date/Time</H>
+      <H sub>{t("Date/Time")}</H>
       {(
         [
           ["dateFormat", "Date Format"],
@@ -447,6 +438,13 @@ export function ToolsSection() {
                   ["pwsh", "PowerShell 7"],
                   ["cmd", "Command Prompt"],
                   ["gitbash", "Git Bash"],
+                  ["custom", "Other (custom)"],
+                ]
+              : isMac ? [
+                  ["default", "Terminal"],
+                  ["iterm", "iTerm"],
+                  ["warp", "Warp"],
+                  ["ghostty", "Ghostty"],
                   ["custom", "Other (custom)"],
                 ]
               : [

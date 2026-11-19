@@ -1,3 +1,4 @@
+import { stopAiRequests } from "@/lib/ai-connection";
 import { useShallow } from "zustand/react/shallow";
 import { signingOptions } from "@/lib/signing-keys";
 import { invoke } from "@tauri-apps/api/core";
@@ -104,8 +105,10 @@ function ServicePane({
         <div className="flex-1" />
         {loading ? (
           <span className="text-[12px] text-fg3">Checking…</span>
+        ) : status?.error ? (
+          <span className="text-[12px] text-warn">{status.error}</span>
         ) : status?.connected ? (
-          status.error ? <span className="text-[12px] text-warn">{status.error}</span> : <span className="text-[12px] text-good">Connected{status.account ? ` as ${status.account}` : ""}</span>
+          <span className="text-[12px] text-good">Connected{status.account ? ` as ${status.account}` : ""}</span>
         ) : (
           <span className="text-[12px] text-fg3">{svc.label} is not connected</span>
         )}
@@ -522,6 +525,7 @@ export function AiSection() {
         >
           {testing ? "Testing…" : "Test Connection"}
         </Btn>
+        {testing && <Btn onClick={stopAiRequests}>Stop AI</Btn>}
       </Row>
       <H sub>Global Instructions</H>
       <Row label="Custom Instructions" help="Applied to every AI feature, together with any feature instructions below." wide>

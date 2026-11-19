@@ -19,22 +19,48 @@ pub fn targets(service: &str) -> Result<Vec<Target>, String> {
             None,
         )
     };
+    let collect = |path: &str| {
+        let url = format!("{}{path}", hosting::api_base(service));
+        crate::pagination::collect(&url, |url| hosting::http_page("GET", url, &hosting::auth(service)?, None))
+    };
     let pairs: Vec<(String, String)> = match service {
-        "github" => {
+        "gitea" | "forgejo" | "codeberg" => {
+            let profile = get("/user")?;
+            let name = profile["login"].as_str().ok_or("Missing hosting account")?.to_owned();
+            let mut destinations = vec![(name.clone(), format!("{name} (personal)"))];
+            let groups = collect("/user/orgs?limit=50")?;
+            destinations.extend(groups.as_array().into_iter().flatten().filter_map(|group| {
+                let name = group["username"].as_str().or(group["name"].as_str())?;
+                Some((format!("org:{name}"), name.to_owned()))
+            }));
+            destinations
+        }
+        "github" | "github-enterprise" => {
             let v = get("/user")?;
             let name = v["login"]
                 .as_str()
                 .ok_or("Missing GitHub account")?
                 .to_string();
-            vec![(name.clone(), name)]
+            let mut destinations = vec![(name.clone(), format!("{name} (personal)"))];
+            let organizations = collect("/user/orgs?per_page=100")?;
+            destinations.extend(organizations.as_array().into_iter().flatten().filter_map(|org| {
+                let login = org["login"].as_str()?;
+                Some((format!("org:{login}"), login.to_owned()))
+            }));
+            destinations
         }
-        "gitlab" => {
+        "gitlab" | "gitlab-self" => {
             let v = get("/user")?;
             let name = v["username"]
                 .as_str()
                 .ok_or("Missing GitLab account")?
                 .to_string();
-            vec![(name.clone(), name)]
+            let mut destinations = vec![(name.clone(), format!("{name} (personal)"))];
+            let groups = collect("/groups?min_access_level=30&per_page=100")?;
+            destinations.extend(groups.as_array().into_iter().flatten().filter_map(|group| {
+                Some((format!("group:{}", group["id"].as_u64()?), group["full_path"].as_str()?.to_owned()))
+            }));
+            destinations
         }
         "bitbucket" => {
             let url = format!("{}/workspaces?pagelen=100", hosting::api_base(service));
@@ -48,11 +74,9 @@ pub fn targets(service: &str) -> Result<Vec<Target>, String> {
                 .filter_map(|v| Some((v["slug"].as_str()?.into(), v["name"].as_str()?.into())))
                 .collect()
         }
-        "azure" => {
-            let url = format!(
-                "{}/_apis/projects?api-version=7.1",
-                hosting::api_base(service)
-            );
+        "azure" | "azure-server" => {
+            let version = if service == "azure" { "7.1" } else { "7.0" };
+            let url = format!("{}/_apis/projects?api-version={version}", hosting::api_base(service));
             let v = crate::pagination::collect(&url, |url| {
                 hosting::http_page("GET", url, &hosting::auth(service)?, None)
             })?;
@@ -104,38 +128,68 @@ fn create_request(r: &PublishRequest) -> Result<(String, Value), String> {
                 .into(),
         );
     }
-    if !["private", "public"].contains(&r.visibility.as_str()) {
-        return Err("Choose Public or Private access.".into());
+    let internal = r.service == "gitlab-self" ||
+        (matches!(r.service.as_str(), "github" | "github-enterprise") && r.target.starts_with("org:"));
+    if !(["private", "public"].contains(&r.visibility.as_str()) || internal && r.visibility == "internal") {
+        return Err("This destination does not support the selected repository visibility.".into());
     }
     let private = r.visibility == "private";
     Ok(match r.service.as_str() {
-        "github" => ("/user/repos".into(),json!({"name":r.name,"description":r.description,"private":private,"auto_init":false})),
-        "gitlab" => ("/projects".into(),json!({"name":r.name,"path":r.name,"description":r.description,"visibility":r.visibility,"initialize_with_readme":false})),
+        "github" | "github-enterprise" => {
+            let endpoint = if let Some(org) = r.target.strip_prefix("org:") {
+                if org.is_empty() || !org.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+                    return Err("Choose a valid organization.".into());
+                }
+                format!("/orgs/{}/repos", q(org))
+            } else { "/user/repos".into() };
+            let mut body = json!({"name":r.name,"description":r.description,"auto_init":false});
+            body["private"] = json!(private || r.visibility == "internal");
+            if r.visibility == "internal" { body["visibility"] = json!("internal"); }
+            (endpoint, body)
+        }
+        "gitea" | "forgejo" | "codeberg" => {
+            let endpoint = r.target.strip_prefix("org:").map(|org| format!("/orgs/{}/repos", q(org))).unwrap_or_else(|| "/user/repos".into());
+            let object_format = if r.head.len() == 64 { "sha256" } else { "sha1" };
+            (endpoint, json!({"name":r.name,"description":r.description,"private":private,"auto_init":false,"object_format_name":object_format}))
+        }
+        "gitlab" | "gitlab-self" => {
+            let mut body = json!({"name":r.name,"path":r.name,"description":r.description,"visibility":r.visibility,"initialize_with_readme":false});
+            if let Some(group) = r.target.strip_prefix("group:") {
+                body["namespace_id"] = json!(group.parse::<u64>().ok().filter(|id| *id > 0).ok_or("Choose a valid GitLab group.")?);
+            }
+            ("/projects".into(), body)
+        }
         "bitbucket" => (format!("/repositories/{}/{}",q(&r.target),q(&r.name)),json!({"scm":"git","name":r.name,"description":r.description,"is_private":private})),
-        "azure" if r.visibility=="private" && r.description.is_empty() => (format!("/{}/_apis/git/repositories?api-version=7.1",q(&r.target)),json!({"name":r.name,"project":{"id":r.target}})),
-        "azure" => return Err("Azure repository access is inherited from its project; a repository description is not supported.".into()),
+        "azure" | "azure-server" if r.visibility=="private" && r.description.is_empty() => {
+            let version = if r.service == "azure" { "7.1" } else { "7.0" };
+            (format!("/{}/_apis/git/repositories?api-version={version}", q(&r.target)),json!({"name":r.name,"project":{"id":r.target}}))
+        }
+        "azure" | "azure-server" => return Err("Azure repository access is inherited from its project; a repository description is not supported.".into()),
         _ => return Err("Choose a supported hosting service.".into()),
     })
 }
 
 fn created_url(service: &str, v: &Value) -> Result<String, String> {
     let url=match service {
-        "github" => v["clone_url"].as_str(),
-        "gitlab" => v["http_url_to_repo"].as_str(),
+        "github" | "github-enterprise" | "gitea" | "forgejo" | "codeberg" => v["clone_url"].as_str(),
+        "gitlab" | "gitlab-self" => v["http_url_to_repo"].as_str(),
         "bitbucket" => v["links"]["clone"].as_array().and_then(|links|links.iter().find(|v|v["name"]=="https")).and_then(|v|v["href"].as_str()),
-        "azure" => v["remoteUrl"].as_str(),
+        "azure" | "azure-server" => v["remoteUrl"].as_str(),
         _ => None,
     }.ok_or("The service created the repository but returned no clone URL. Check your account before trying again.")?;
-    let parsed = tauri::Url::parse(url).map_err(|_| {
+    let mut parsed = tauri::Url::parse(url).map_err(|_| {
         "The created repository returned an invalid URL. Check your account before trying again."
     })?;
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some(hosting::host_of(service).as_str())
-        || parsed.password().is_some()
-    {
+    let authority = tauri::Url::parse(&format!("https://{}", hosting::host_of(service))).ok();
+    if parsed.scheme() != "https" || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() ||
+        authority.is_none_or(|expected| expected.origin() != parsed.origin()) {
         return Err("The created repository returned an unexpected URL. Check your account before trying again.".into());
     }
-    Ok(url.into())
+    let _ = parsed.set_username("");
+    if service == "azure-server" && hosting::azure_server_base().is_none_or(|base| !parsed.as_str().strip_prefix(&base).is_some_and(|path| path.starts_with('/'))) {
+        return Err("The created repository belongs to a different Azure collection.".into());
+    }
+    Ok(parsed.into())
 }
 
 fn preflight(dir: &Path, r: &PublishRequest) -> Result<(), String> {
@@ -173,7 +227,11 @@ pub fn publish(
         }
         let response=hosting::http("POST",&format!("{}{path}",hosting::api_base(&r.service)),&hosting::auth(&r.service)?,Some(body))
             .map_err(|error|format!("{error}\nCheck your account for the repository before retrying; a lost response can occur after creation."))?;
-        created_url(&r.service, &response)
+        let url = created_url(&r.service, &response)?;
+        if r.visibility == "internal" && response["visibility"] != "internal" {
+            return Err(format!("The service created {url} but did not confirm Internal visibility. Verify the repository's access before connecting or pushing."));
+        }
+        Ok(url)
     })
 }
 
@@ -326,6 +384,39 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn feature_publishing_encodes_organization_and_group_destinations() {
+        let (_, mut request) = fixture();
+        request.target = "org:fixture-team".into();
+        let (path, body) = create_request(&request).unwrap();
+        assert_eq!(path, "/orgs/fixture-team/repos");
+        assert_eq!(body["private"], true);
+        request.visibility = "internal".into();
+        assert_eq!(create_request(&request).unwrap().1["visibility"], "internal");
+        request.target = "fixture".into();
+        assert!(create_request(&request).is_err());
+
+        request.target = "org:fixture-team".into();
+        request.service = "github-enterprise".into();
+        let (_, body) = create_request(&request).unwrap();
+        assert_eq!(body["visibility"], "internal");
+        assert_eq!(body["private"], true);
+
+        request.service = "gitlab-self".into();
+        request.target = "group:42".into();
+        let (path, body) = create_request(&request).unwrap();
+        assert_eq!(path, "/projects");
+        assert_eq!(body["namespace_id"], 42);
+        assert_eq!(body["visibility"], "internal");
+
+        request.service = "codeberg".into();
+        request.visibility = "private".into();
+        request.target = "org:fixture-team".into();
+        let (path, body) = create_request(&request).unwrap();
+        assert_eq!(path, "/orgs/fixture-team/repos");
+        assert_eq!(body["private"], true);
+    }
+
     #[test]
     fn creates_empty_repositories_with_explicit_access_for_each_provider() {
         let (_, mut r) = fixture();

@@ -180,27 +180,85 @@ pub struct CleanupBranch {
     pub name: String,
     pub time: i64,
     pub upstream: String,
-    /// Fully merged into the checked-out branch.
+    /// Fully merged into the repository's default branch.
     pub merged: bool,
+    pub patch_equivalent: bool,
+    pub upstream_gone: bool,
+    #[serde(skip)]
+    pub remote: String,
+    #[serde(skip)]
+    pub remote_ref: String,
 }
 
-/// Local branches for "Clean Up Local Branches" (the checked-out branch is left out).
+pub(crate) fn default_branch(dir: &Path) -> Option<(String, String)> {
+    let checked = |reference: &str| git::run(dir, &["show-ref", "--verify", "--quiet", reference]).ok;
+    let names = git::run(dir, &["remote"]).stdout;
+    for name in std::iter::once("origin").chain(names.lines().filter(|name| *name != "origin")) {
+        let prefix = format!("refs/remotes/{name}/");
+        let result = git::run(dir, &["symbolic-ref", "-q", &format!("{prefix}HEAD")]);
+        if let Some(branch) = result.stdout.trim().strip_prefix(&prefix).filter(|_| result.ok && checked(result.stdout.trim())) {
+            return Some((result.stdout.trim().to_owned(), branch.to_owned()));
+        }
+    }
+    let preferred = git::run(dir, &["config", "--get", "init.defaultBranch"]).stdout;
+    for branch in [preferred.trim(), "main", "master"] {
+        for prefix in ["refs/heads/", "refs/remotes/origin/"] {
+            let reference = format!("{prefix}{branch}");
+            if !branch.is_empty() && checked(&reference) { return Some((reference, branch.to_owned())); }
+        }
+    }
+    None
+}
+
+/// Omit the default branch and all branches attached to a worktree.
 pub fn cleanup_list(dir: &Path) -> Vec<CleanupBranch> {
-    let merged: Vec<String> = git::run(dir, &["branch", "--merged", "HEAD", "--format=%(refname:short)"]).stdout.lines().map(|s| s.to_string()).collect();
-    let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
-    git::run(dir, &["for-each-ref", "--format=%(refname:short)%1f%(committerdate:unix)%1f%(upstream:short)", "refs/heads"])
-        .stdout
-        .lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\x1f').collect();
-            (f.len() == 3 && f[0] != head).then(|| CleanupBranch {
-                name: f[0].to_string(),
-                time: f[1].parse().unwrap_or(0),
-                upstream: f[2].to_string(),
-                merged: merged.iter().any(|m| m == f[0]),
-            })
-        })
-        .collect()
+    review_cleanup(dir, false)
+}
+
+pub fn review_cleanup(dir: &Path, detect_patches: bool) -> Vec<CleanupBranch> {
+    let Some((target, default)) = default_branch(dir) else { return vec![]; };
+    let merged = git::run(dir, &["for-each-ref", "--merged", &target, "--format=%(refname)", "refs/heads/"]);
+    let merged: std::collections::HashSet<_> = merged.stdout.lines().collect();
+    let refs = git::run(dir, &["for-each-ref", "--format=%(refname)%00%(committerdate:unix)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(worktreepath)%00%(upstream:track)", "refs/heads/"]);
+    let target_patches = if detect_patches {
+        read_patch_ids(dir, &["log", "--first-parent", "--no-merges", "-n512", "--format=commit %H", "-p", "--no-ext-diff", "--no-textconv", &target])
+    } else { Default::default() };
+    refs.stdout.lines().filter_map(|line| {
+        let [reference, time, remote, remote_ref, worktree, track] = line.split('\0').collect::<Vec<_>>().try_into().ok()?;
+        let name = reference.strip_prefix("refs/heads/")?;
+        if name == default || !worktree.is_empty() { return None; }
+        let upstream = match remote_ref.strip_prefix("refs/heads/") {
+            Some(branch) if branch != default && !remote.is_empty() && remote != "." => format!("{remote}/{branch}"),
+            _ => String::new(),
+        };
+        let merged = merged.contains(reference);
+        let patch_equivalent = detect_patches && !merged && crate::read_jobs::check().is_ok()
+            && patch_equivalent(dir, &target, reference, &target_patches);
+        Some(CleanupBranch { name: name.into(), time: time.parse().unwrap_or_default(), upstream, merged,
+            patch_equivalent, upstream_gone: track == "[gone]", remote: remote.into(), remote_ref: remote_ref.into() })
+    }).collect()
+}
+
+fn read_patch_ids(dir: &Path, args: &[&str]) -> std::collections::HashSet<String> {
+    let source = crate::read_jobs::run_bytes(git::git_command(dir, args), 8 * 1024 * 1024, None);
+    if !source.ok || source.stdout.is_empty() { return Default::default(); }
+    let ids = crate::read_jobs::run(git::git_command(dir, &["patch-id", "--stable"]), 256 * 1024, Some(source.stdout));
+    if !ids.ok { return Default::default(); }
+    ids.stdout.lines().filter_map(|line| line.split_whitespace().next().map(str::to_owned)).collect()
+}
+
+fn patch_equivalent(dir: &Path, target: &str, branch: &str, target_patches: &std::collections::HashSet<String>) -> bool {
+    let range = format!("{target}..{branch}");
+    let merges = git::run(dir, &["rev-list", "--merges", "-n1", &range]);
+    if !merges.ok || !merges.stdout.trim().is_empty() { return false; }
+    let cherry = git::run_limited(dir, &["cherry", target, branch], 128 * 1024);
+    if cherry.ok && !cherry.stdout.trim().is_empty() && cherry.stdout.lines().all(|line| line.starts_with("- ")) {
+        return true;
+    }
+    if target_patches.is_empty() { return false; }
+    let range = format!("{target}...{branch}");
+    read_patch_ids(dir, &["diff", "--no-ext-diff", "--no-textconv", &range, "--"])
+        .iter().any(|patch| target_patches.contains(patch))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -261,6 +319,43 @@ pub struct LfsLock {
     pub id: String,
     pub path: String,
     pub owner: String,
+    pub ours: bool,
+}
+
+pub const LFS_REQUIRED: &str = "This revision uses Git LFS. Install Git LFS, run git lfs install, then retry checkout.";
+
+pub fn git_lfs_available(dir: &Path) -> bool {
+    crate::read_jobs::run_bounded(git::git_command(dir, &["lfs", "version"]), None,
+        std::time::Duration::from_secs(5), "Git LFS version check timed out.").ok
+}
+
+pub fn tree_uses_lfs(dir: &Path, revision: &str) -> Result<bool, String> {
+    let expression = format!("{revision}^{{tree}}");
+    let resolved = git::run(dir, &["rev-parse", "--verify", "-q", "--end-of-options", &expression]);
+    if !resolved.ok { return Ok(false); } // An unborn branch or a target Git will diagnose itself.
+    let tree = resolved.stdout.trim();
+    let paths = crate::read_jobs::run_bytes(git::git_command(dir, &["ls-tree", "-r", "-z", "--name-only", tree]), 16 * 1024 * 1024, None);
+    if !paths.ok { return Err("Could not check the target tree for Git LFS attributes.".into()); }
+    if paths.stdout.is_empty() { return Ok(false); }
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let index = temp.path().join("index");
+    let mut command = git::git_command(dir, &["read-tree", tree]);
+    command.env("GIT_INDEX_FILE", &index);
+    let load = crate::read_jobs::run(command, 128 * 1024, None);
+    if !load.ok { return Err(load.message()); }
+    let mut command = git::git_command(dir, &["check-attr", "--cached", "--stdin", "-z", "filter"]);
+    command.env("GIT_INDEX_FILE", &index);
+    let attributes = crate::read_jobs::run_bytes(command, 32 * 1024 * 1024, Some(paths.stdout));
+    if !attributes.ok { return Err("Could not read the target tree's Git LFS attributes.".into()); }
+    let fields: Vec<_> = attributes.stdout.split(|byte| *byte == 0).collect();
+    Ok(fields.chunks_exact(3).any(|row| row[2] == b"lfs"))
+}
+
+pub fn require_lfs_for_checkout(dir: &Path, revision: &str) -> Result<(), String> {
+    if !git_lfs_available(dir) && tree_uses_lfs(dir, revision)? {
+        return Err(LFS_REQUIRED.into());
+    }
+    Ok(())
 }
 
 pub fn lfs_info(dir: &Path) -> LfsInfo {
@@ -270,27 +365,51 @@ pub fn lfs_info(dir: &Path) -> LfsInfo {
     }
     let hook = git::run(dir, &["rev-parse", "--git-path", "hooks/pre-push"]).stdout.trim().to_string();
     let enabled = std::fs::read_to_string(dir.join(hook)).map(|s| s.contains("git lfs")).unwrap_or(false);
-    let patterns = std::fs::read_to_string(dir.join(".gitattributes"))
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| l.contains("filter=lfs"))
-        .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
-        .collect();
+    let tracked = git::run(dir, &["lfs", "track"]);
+    let patterns = if tracked.ok {
+        tracked.stdout.lines()
+            .skip_while(|line| *line != "Listing tracked patterns").skip(1)
+            .take_while(|line| *line != "Listing excluded patterns")
+            .filter_map(|line| {
+                let (pattern, _) = line.strip_prefix("    ")?.strip_suffix(')')?.rsplit_once(" (")?;
+                Some(pattern.to_owned())
+            })
+            .collect()
+    } else { Vec::new() };
     LfsInfo { available: true, version: v.stdout.trim().to_string(), enabled, patterns, locks: vec![] }
 }
 
+pub fn lfs_lockable(dir: &Path, path: &str) -> Result<bool, String> {
+    let result = git::run_limited(dir, &["check-attr", "-z", "filter", "lockable", "--", path], 64 * 1024);
+    if !result.ok { return Err(result.message()); }
+    let fields: Vec<_> = result.stdout.split_terminator('\0').collect();
+    if fields.len() != 6 { return Err("Git returned incomplete lockable attributes.".into()); }
+    Ok(fields[2] == "lfs" && fields[5] == "set")
+}
+
 pub fn lfs_locks(dir: &Path) -> Result<Vec<LfsLock>, String> {
-    let locks = git::run(dir, &["lfs", "locks", "--json"]);
-    if !locks.ok { return Err(locks.message()); }
-    let value: serde_json::Value = serde_json::from_str(locks.stdout.trim()).map_err(|e| e.to_string())?;
-    let rows = value.as_array().or_else(|| value["locks"].as_array()).cloned().unwrap_or_default();
-    let locks = rows.iter()
-        .map(|l| LfsLock {
-            id: l["id"].as_str().unwrap_or_default().to_string(),
-            path: l["path"].as_str().unwrap_or_default().to_string(),
-            owner: l["owner"]["name"].as_str().unwrap_or_default().to_string(),
-        })
-        .collect();
+    let mut command = git::git_command(dir, &["lfs", "locks", "--verify", "--json"]);
+    command.env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never");
+    let locks = crate::read_jobs::run_bounded(command, None, std::time::Duration::from_secs(20), "The Git LFS lock server did not respond.");
+    if !locks.ok || !locks.stderr.trim().is_empty() { return Err(locks.message()); }
+    parse_lfs_locks(&locks.stdout)
+}
+
+pub(crate) fn parse_lfs_locks(json: &str) -> Result<Vec<LfsLock>, String> {
+    let value: serde_json::Value = serde_json::from_str(json.trim()).map_err(|e| e.to_string())?;
+    let mut locks = Vec::new();
+    for (key, ours) in [("ours", true), ("theirs", false)] {
+        let rows = value.get(key).filter(|v| v.is_array() || v.is_null())
+            .ok_or("The Git LFS server did not return verified lock ownership.")?;
+        for row in rows.as_array().into_iter().flatten() {
+            locks.push(LfsLock {
+                id: row["id"].as_str().ok_or("Missing Git LFS lock ID.")?.to_owned(),
+                path: row["path"].as_str().ok_or("Missing Git LFS lock path.")?.to_owned(),
+                owner: row["owner"]["name"].as_str().unwrap_or_default().to_owned(),
+                ours,
+            });
+        }
+    }
     Ok(locks)
 }
 

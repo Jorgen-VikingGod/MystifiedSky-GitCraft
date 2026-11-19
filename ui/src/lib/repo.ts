@@ -1,3 +1,4 @@
+import { protectEditorDrafts } from "./editor-drafts";
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { postDesktopNotifications } from "./desktop-notify";
@@ -19,10 +20,12 @@ export function refView(path: string): RefView {
   return { hidden: st.hidden[path] ?? [], solo: st.solo[path] ?? [] };
 }
 
-function repoRequest(path: string) {
-  const s = useStore.getState().settings;
+function repoRequest(path: string, tabId?: string) {
+  const { settings: s, tabs, ui, activeId } = useStore.getState();
+  const tab = tabs.find(tab => tab.id === (tabId ?? activeId) && tab.path === path);
+  const filter = tab ? ui[tab.id]?.historyFilter : undefined;
   const initial = Math.min(5000, Math.max(500, s.initialCommits || 2000));
-  const view: RefView = { hidden: s.hidden[path] ?? [], solo: s.solo[path] ?? [], pinned: s.pinned?.[path] ?? null, smart: !!s.smartBranches };
+  const view: RefView = { hidden: s.hidden[path] ?? [], solo: s.solo[path] ?? [], pinned: s.pinned?.[path] ?? null, smart: !!s.smartBranches, ...(filter && { filter }) };
   return { initial, view, key: ["repo", path, view, initial] as const };
 }
 
@@ -69,17 +72,18 @@ export async function readRepoSnapshot(path: string, initial: number, view: RefV
     history_restore_selection: selected && !next.commits.some((c) => c.sha === selected) ? selected : null };
 }
 
-export function useRepo(path: string | undefined, active = true) {
+export function useRepo(path: string | undefined, active = true, tabId?: string) {
   // Subscribe to request inputs without coupling repository reads to unrelated preferences.
   const settings = useStore((s) => s.settings);
-  const request = repoRequest(path ?? "");
+  const filter = useStore(state => state.ui[tabId ?? state.activeId]?.historyFilter);
+  const request = repoRequest(path ?? "", tabId);
   const q = useQuery({
     queryKey: request.key,
     queryFn: async ({ signal }) => {
       const generation = generationFor(path!);
       const previous = queryClient.getQueryData<RepoView>(request.key);
       const r = await readRepoSnapshot(path!, request.initial, request.view, previous, signal);
-      if (generations.get(path!) === generation && JSON.stringify(repoRequest(path!).key) === JSON.stringify(request.key)) latest.set(path!, r);
+      if (generations.get(path!) === generation && JSON.stringify(repoRequest(path!, tabId).key) === JSON.stringify(request.key)) latest.set(path!, r);
       return r;
     },
     enabled: !!path && active,
@@ -102,7 +106,7 @@ export function useRepo(path: string | undefined, active = true) {
     // Yield between bounded pages; hiding or closing the tab stops further requests.
     const timer = window.setTimeout(() => void loadMoreRepo(path).catch((e) => useStore.getState().toast(false, String(e))), 25);
     return () => clearTimeout(timer);
-  }, [path, active, settings.showAllCommits, settings.initialCommits, q.data?.history_cursor, q.data?.history_restore, q.data?.history_restore_selection, q.isFetching, q.isPlaceholderData]);
+  }, [path, active, filter, settings.showAllCommits, settings.initialCommits, q.data?.history_cursor, q.data?.history_restore, q.data?.history_restore_selection, q.isFetching, q.isPlaceholderData]);
   return q;
 }
 
@@ -269,6 +273,7 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
   unstageAll: "Unstaging all changes…",
   patch: "Updating…",
   fetch: "Fetching…",
+  fetchHistory: "Fetching history…",
   pull: "Pulling…",
   push: "Pushing…",
   pushBranch: "Pushing…",
@@ -281,10 +286,20 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
   stash: "Stashing…",
 };
 
+export function pullModeFor(path: string | undefined, fetchAllowed = true) {
+  const settings = useStore.getState().settings;
+  const mode = (path && settings.repoPrefs[path]?.pullMode) || settings.pullMode;
+  return !fetchAllowed && mode === "fetch" ? "ff" : mode;
+}
+
 /** Run a Git action in the background, show the result and refresh the repository. */
 export async function act(path: string, action: Action, quiet = false): Promise<boolean> {
   const st = useStore.getState();
   const set = st.settings;
+  if (action.type === "pull" && action.mode === "rebase" && action.autostash === undefined) {
+    const autostash = set.repoPrefs[path]?.pullAutostash;
+    if (autostash !== undefined) action = { ...action, autostash };
+  }
   // Commit > Merge Behavior: Squash - local merges stage the changes for one commit instead of a merge commit.
   if (action.type === "merge" && set.squashMerge) {
     const head = latest.get(path)?.head_branch ?? "HEAD";
@@ -336,10 +351,28 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
       );
       return false;
     }
-    if (!r.ok && action.type === "push" && !action.force && /rejected|non-fast-forward|fetch first/i.test(r.message)) {
+    if (!r.ok && action.type === "push" && !action.force && /^[ \t]*![ \t]+\[rejected\][^\r\n]*\((?:non-fast-forward|fetch first)\)[ \t]*$/im.test(r.message)) {
       await offerForcePush(path);
       return false;
     }
+    if (!r.ok && (action.type === "stashPop" || action.type === "stashApply") && !action.withoutIndex && /try without --index/i.test(r.message)) {
+      const expected = action.expected ?? latest.get(path)?.stashes.find(stash => stash.index === action.index)?.sha;
+      if (expected) {
+        confirmThen("Restore stash without staging?", "Git couldn't restore the saved staging. You can keep the stash as it is, or try restoring its files as unstaged changes.",
+          "Restore without staging", () => void act(path, { ...action, expected, withoutIndex: true }), false);
+        return false;
+      }
+    }
+    if (!r.ok && !quiet && action.type === "pull" && r.message === "Set an upstream branch before pulling.") {
+      const view = latest.get(path);
+      const branch = view?.refs.find(ref => ref.kind === "Local" && ref.name === view.head_branch);
+      if (view && branch && view.refs.some(ref => ref.kind === "Remote")) {
+        confirmThen("Set an upstream branch?", "Choose the remote branch this local branch should pull from.", "Choose upstream",
+          () => promptUpstream(view, branch), false);
+        return false;
+      }
+    }
+    if (!r.ok && !quiet && NETWORK.has(action.type) && showSshHostKeyHelp(path, r.message)) return false;
     if (!r.ok && NETWORK.has(action.type) && signInProblem(r.message)) {
       void offerSignInHelp(path, action, r.message);
       return false;
@@ -362,7 +395,7 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   }
 }
 
-const NETWORK = new Set<Action["type"]>(["fetch", "pull", "push", "pushBranch", "pushTag", "deleteRemoteTag", "fetchRemote"]);
+const NETWORK = new Set<Action["type"]>(["fetch", "pull", "push", "pushBranch", "pushTag", "deleteRemoteTag", "fetchRemote", "fetchHistory"]);
 const MOVES_HEAD = new Set<Action["type"]>(["pull", "checkout", "checkoutRemote", "merge", "mergeSquash", "rebase", "interactiveRebase", "fastForward", "reset", "stashPop", "stashApply", "cherryPick"]);
 
 /** Preferences that act after a Git action finishes. */
@@ -372,7 +405,12 @@ async function afterAction(path: string, action: Action, ok: boolean, message: s
   if (ok && ["lfsLock", "lfsUnlock", "addRemote", "editRemote", "removeRemote"].includes(action.type)) await queryClient.invalidateQueries({ queryKey: ["lfsLocks", path] });
   // General > Keep submodules up to date: "Automatically update all submodules after performing a Git action".
   let submoduleError: string | undefined;
-  if (ok && set.autoUpdateSubmodules && MOVES_HEAD.has(action.type) && (latest.get(path)?.submodules.length ?? 0) > 0) {
+  const pullOrCheckout = (action.type === "pull" && action.mode !== "fetch") ||
+    action.type === "checkout" || action.type === "checkoutRemote" || action.type === "checkoutPullRequest";
+  const submoduleOverride = pullOrCheckout ? set.repoPrefs[path]?.pullCheckoutSubmodules : undefined;
+  const updateSubmodules = submoduleOverride ?? (set.autoUpdateSubmodules && (latest.get(path)?.submodules.length ?? 0) > 0);
+  if (ok && updateSubmodules && (MOVES_HEAD.has(action.type) || action.type === "checkoutPullRequest") &&
+      !(action.type === "pull" && action.mode === "fetch")) {
     try {
       const result = await api.run(path, { type: "submoduleUpdate", paths: [] });
       if (!result.ok) submoduleError = result.message;
@@ -394,11 +432,36 @@ async function afterAction(path: string, action: Action, ok: boolean, message: s
   }
 }
 
-const SSH_REFUSED = /Permission denied \(publickey|Could not read from remote repository|Host key verification failed/i;
+const SSH_REFUSED = /Permission denied \(publickey|Could not read from remote repository/i;
+
+export function sshHostKeyProblem(message: string): "changed" | "unknown" | null {
+  if (/REMOTE HOST IDENTIFICATION HAS CHANGED|POSSIBLE DNS SPOOFING|Offending .* key in /i.test(message)) return "changed";
+  if (/Host key verification failed|No .* host key is known for|The authenticity of host .* can't be established/i.test(message)) return "unknown";
+  return null;
+}
+
+export function showSshHostKeyHelp(path: string, message: string): boolean {
+  const problem = sshHostKeyProblem(message);
+  if (!problem) return false;
+  const fingerprint = message.match(/SHA256:[A-Za-z0-9+/]+={0,2}/)?.[0];
+  const instructions = problem === "changed"
+    ? "SSH found a different key than the one saved for this host. Ask the server administrator to confirm the new fingerprint. Once verified, update the host's entry in your SSH known_hosts file and retry the Git command."
+    : "SSH could not verify the server's identity. Check the expected fingerprint with your host or server administrator. Retry the Git command in a terminal and accept the key only if its displayed fingerprint matches.";
+  useStore.getState().setDialog({
+    kind: "choice",
+    title: problem === "changed" ? "SSH host key changed" : "SSH host key needs verification",
+    text: fingerprint ? instructions + "\n\nFingerprint reported by SSH: " + fingerprint : instructions,
+    choices: [{ label: "Open Terminal", variant: "primary", onSelect: () => {
+      void api.openTerminal(path).catch(error => useStore.getState().toast(false, String(error)));
+    } }],
+  });
+  return true;
+}
 const HTTPS_REFUSED = /Authentication failed|could not read Username|terminal prompts disabled|returned error: 403|Permission to .* denied|Invalid username or (password|token)/i;
 
 /** Git couldn't sign in to the remote (SSH key refused, or no / wrong HTTPS sign-in). */
 export function signInProblem(message: string): "ssh" | "https" | null {
+  if (sshHostKeyProblem(message)) return null;
   if (SSH_REFUSED.test(message)) return "ssh";
   if (HTTPS_REFUSED.test(message)) return "https";
   return null;
@@ -494,7 +557,7 @@ async function offerForcePush(path: string) {
     title: "Push was rejected",
     text: `'${b?.name ?? "This branch"}' is behind '${review.remote}/${review.remoteRef.replace(/^refs\/heads\//, "")}'. Update your branch by doing a Pull.\n\nForce push is a destructive action and cannot be undone: it replaces the remote branch with yours.`,
     choices: [
-      { label: "Pull", variant: "primary", onSelect: () => act(path, { type: "pull", mode: st.settings.pullMode === "fetch" ? "ff" : st.settings.pullMode }) },
+      { label: "Pull", variant: "primary", onSelect: () => act(path, { type: "pull", mode: pullModeFor(path, false) }) },
       { label: "Force Push", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: true, review }) },
       { label: "Force Push Anyway", variant: "danger", onSelect: () => act(path, { type: "push", force: true, lease: false, review }) },
     ],
@@ -522,14 +585,66 @@ export async function openRepoPath(path: string) {
   }
 }
 
-export function promptBranch(path: string, at: string | null) {
+/** Ask which remote branch a local branch should track ("Set Upstream"). */
+export function promptUpstream(repo: RepoView, ref: GitRef) {
+  const remotes = repo.refs.filter((r) => r.kind === "Remote").map((r) => r.name);
+  const guess = ref.upstream || remotes.find((r) => r.endsWith("/" + ref.name)) || `${repo.remotes[0] ?? "origin"}/${ref.name}`;
+  useStore.getState().setDialog({
+    kind: "prompt", allowEmpty: true,
+    title: "Set Upstream",
+    label: `What remote/branch should "${ref.name}" push to and pull from? (empty = stop tracking)`,
+    value: guess,
+    confirm: "Set Upstream",
+    onSubmit: (v) => act(repo.path, { type: "setUpstream", branch: ref.name, upstream: v }),
+  });
+}
+
+export function runBisect(path: string, mode: "start" | "good" | "bad" | "skip" | "reset", commit?: string, good?: string) {
+  const state = useStore.getState();
+  const proceed = async () => {
+    if (await act(path, { type: "bisect", mode, commit, good })) {
+      const current = useStore.getState();
+      const tab = current.tabs.find(tab => tab.path === path);
+      if (tab) current.setUi(tab.id, { diff: null, history: null, selection: { type: "wip" }, multi: [] });
+    }
+  };
+  const tab = state.tabs.find(tab => tab.path === path);
+  if (!tab || !protectEditorDrafts(state.setDialog, () => void proceed(), tab.id)) void proceed();
+}
+
+export function editHistoryFilter(tabId: string) {
+  const { setDialog, setUi, ui } = useStore.getState();
+  const current = ui[tabId]?.historyFilter;
+  setDialog({
+    kind: "form", title: "Filter commit history", confirm: "Apply filters",
+    fields: [
+      { key: "author", label: "Author name or email", value: current?.author ?? "" },
+      { key: "path", label: "File or folder path", value: current?.path ?? "", placeholder: "src/components" },
+      { key: "text", label: "Changes containing", value: current?.text ?? "" },
+      { key: "mode", label: "Content search", value: current?.mode ?? "text", options: [
+        ["text", "Added or removed text"], ["regex", "Added or removed lines matching a regular expression"],
+      ] },
+    ],
+    help: "Filters apply to the selected branches across their full history.",
+    onSubmit: values => {
+      const author = String(values.author).trim();
+      const path = String(values.path).trim();
+      const text = String(values.text);
+      const mode = values.mode === "regex" ? "regex" : "text";
+      setUi(tabId, { historyFilter: author || path || text ? { author, path, text, mode } : undefined, selection: { type: "wip" }, multi: [] });
+    },
+  });
+}
+
+export function promptBranch(path: string, at: string | null, checkout = true) {
   useStore.getState().setDialog({
     kind: "prompt",
     title: at ? "Create branch here" : "Create branch",
     label: "Branch name",
+    gitRef: { path, kind: "branch" },
     value: "",
     confirm: "Create Branch",
-    onSubmit: (name) => act(path, { type: "createBranch", name, at, checkout: true }),
+    onSubmit: (name) => act(path, { type: "createBranch", name, at, checkout }),
   });
 }
 
@@ -538,6 +653,7 @@ export function promptTag(path: string, at: string | null, annotated = false, in
     kind: "prompt",
     title: annotated ? "Create annotated tag here" : "Create tag here",
     label: "Tag name",
+    gitRef: { path, kind: "tag" },
     value: initialName,
     confirm: "Create Tag",
     extraLabel: annotated ? "Annotation message" : "Annotation message (optional, makes an annotated tag)",
@@ -552,14 +668,14 @@ export function promptTag(path: string, at: string | null, annotated = false, in
   });
 }
 
-export function promptStash(path: string) {
+export function promptStash(path: string, mode: "stash" | "stashKeepIndex" | "stashUntracked" = "stash") {
   useStore.getState().setDialog({
     kind: "prompt",
-    title: "Stash changes",
+    title: mode === "stashKeepIndex" ? "Stash changes and keep staged" : mode === "stashUntracked" ? "Stash untracked files only" : "Stash changes",
     label: "Stash title (optional)",
     value: "",
     confirm: "Stash",
-    onSubmit: (message) => act(path, { type: "stash", message }),
+    onSubmit: (message) => act(path, { type: mode, message }),
   });
 }
 

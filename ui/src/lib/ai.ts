@@ -28,11 +28,11 @@ export interface AgentSession {
 }
 
 export const ai = {
-  commitMessage: (path: string, sha?: string) => invokeAi<[string, string]>("ai_commit_message", { path, sha: sha ?? null }),
-  stashMessage: (path: string) => invokeAi<string>("ai_stash_message", { path }),
+  commitMessage: (path: string, sha?: string, preview?: number | null) => invokeAi<[string, string]>("ai_commit_message", { path, sha: sha ?? null, ...(preview == null ? {} : { preview }) }),
+  stashMessage: (path: string, preview?: number | null) => invokeAi<string>("ai_stash_message", { path, ...(preview == null ? {} : { preview }) }),
   explainCommit: (path: string, sha: string) => invokeAi<string>("ai_explain_commit", { path, sha }),
   explainBranch: (path: string, branch: string, base?: string) => invokeAi<string>("ai_explain_branch", { path, branch, base: base ?? null }),
-  compose: (path: string) => invokeAi<ComposedCommit[]>("ai_compose", { path }),
+  compose: (path: string, preview?: number | null) => invokeAi<ComposedCommit[]>("ai_compose", { path, ...(preview == null ? {} : { preview }) }),
   savePatch: (path: string, shas: string[], name: string) => invoke<string | null>("save_patch", { path, shas, name }),
   pickPatch: () => invoke<string | null>("pick_patch_file"),
   conflictCheck: (path: string, target?: string, signal?: AbortSignal) => invokeRead<ConflictCheck>("conflict_check", { path, target: target ?? null }, signal),
@@ -55,9 +55,24 @@ async function withAi<T>(label: string, f: () => Promise<T>): Promise<T | null> 
   }
 }
 
+async function withReviewedFiles<T>(path: string, kind: "commit" | "stash" | "compose", label: string, run: (preview: number | null) => Promise<T>) {
+  const review = await withAi("Checking which files to share…", () => invoke<{ id: number | null; files: string[] }>("ai_file_preview", { path, kind }));
+  if (!review) return null;
+  if (review.id !== null && !await new Promise<boolean>(resolve => {
+    useStore.getState().setDialog({
+      kind: "choice",
+      title: "Send these untracked files to AI?",
+      text: review.files.map(file => JSON.stringify(file)).join("\n"),
+      onCancel: () => resolve(false),
+      choices: [{ label: "Send and continue", variant: "primary", onSelect: () => resolve(true) }],
+    });
+  })) return null;
+  return withAi(label, () => run(review.id));
+}
+
 export async function generateCommitMessage(path: string) {
   const before = useStore.getState().drafts[path];
-  const r = await withAi("Writing a commit message…", () => ai.commitMessage(path));
+  const r = await withReviewedFiles(path, "commit", "Writing a commit message…", preview => ai.commitMessage(path, undefined, preview));
   if (!r) return;
   const state = useStore.getState();
   if (state.drafts[path] !== before) {
@@ -69,7 +84,7 @@ export async function generateCommitMessage(path: string) {
 }
 
 export async function generateStashTitle(path: string): Promise<string | null> {
-  return withAi("Naming the stash…", () => ai.stashMessage(path));
+  return withReviewedFiles(path, "stash", "Naming the stash…", preview => ai.stashMessage(path, preview));
 }
 
 export async function explainCommit(path: string, sha: string, summary: string) {
@@ -84,7 +99,7 @@ export async function explainBranch(path: string, branch: string) {
 
 /** "Compose with AI": suggest focused commits for the uncommitted work, then create them after a confirm. */
 export async function composeCommits(path: string) {
-  const commits = await withAi("Grouping your changes into commits…", () => ai.compose(path));
+  const commits = await withReviewedFiles(path, "compose", "Grouping your changes into commits…", preview => ai.compose(path, preview));
   if (!commits) return;
   const text = commits.map((c, i) => `${i + 1}. ${c.summary}\n${c.files.map((f) => `     ${f}`).join("\n")}`).join("\n\n");
   useStore.getState().setDialog({

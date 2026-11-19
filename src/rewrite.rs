@@ -2,7 +2,6 @@
 //!
 //! An interactive rebase writes its own todo list and points
 //! GIT_SEQUENCE_EDITOR at a small shell loop that copies that list over git's `git-rebase-todo`.
-//! The actions are four: pick, reword, squash, drop.
 
 use crate::git::{self, Commit};
 use serde::{Deserialize, Serialize};
@@ -17,6 +16,9 @@ pub enum Step {
     Pick,
     Reword,
     Squash,
+    Fixup,
+    Edit,
+    Exec,
     Drop,
 }
 
@@ -24,7 +26,7 @@ pub enum Step {
 pub struct TodoItem {
     pub action: Step,
     pub sha: String,
-    /// New message for reword (and the combined message for a squash target, optional).
+    /// Replacement commit message for reword, or shell command for exec.
     pub message: Option<String>,
 }
 
@@ -48,48 +50,118 @@ pub fn rebase_commits(dir: &Path, base: &str) -> Result<Vec<Commit>, String> {
     Ok(commits)
 }
 
-/// Runs `git rebase -i` with our own todo list. Uncommitted changes are stashed and restored
-/// around it ("Auto stash before rebase").
-pub fn interactive_rebase(dir: &Path, base: &str, items: &[TodoItem]) -> git::GitOut {
-    let todo = match write_todo(dir, items) {
-        Ok(t) => t,
-        Err(e) => return git::GitOut { ok: false, stdout: String::new(), stderr: e },
-    };
-    let todo_s = todo.to_string_lossy().replace('\\', "/");
-    let mut args = vec!["-c", "core.editor=true", "rebase", "-i", "--autostash"];
-    if base == "--root" {
-        args.push("--root");
-    } else {
-        args.push(base);
-    }
-    git::run_env(dir, &args, &[("GIT_SEQUENCE_EDITOR", SEQUENCE_EDITOR), ("GITCRAFT_REBASE_TODO_PATH", &todo_s)])
+fn replay_active(git_dir: &Path) -> bool {
+    ["rebase-merge", "rebase-apply"].iter().any(|name| git_dir.join(name).exists())
 }
 
-/// Writes our todo list (plus a message file per reword) and returns its path.
-/// Squash = "meld into the previous commit and keep both messages": git's own `squash` asks an
-/// editor for the combined message; with core.editor=true it keeps git's combined text, whose
-/// comment lines are cleaned up. A squash with nothing before it is a pick. A reword replays the
-/// commit, then an `exec` line amends only its message from the file.
-fn write_todo(dir: &Path, items: &[TodoItem]) -> Result<PathBuf, String> {
+pub fn edit_stop(dir: &Path) -> bool {
     let gd = git_dir(dir);
-    let todo = gd.join("gitcraft-rebase-todo");
+    gd.is_absolute() && gd.join("rebase-merge/amend").is_file()
+}
+
+pub fn replay_original(dir: &Path) -> Option<(String, String)> {
+    let gd = git_dir(dir);
+    if !gd.is_absolute() { return None; }
+    for item in ["rebase-merge", "rebase-apply"] {
+        let folder = gd.join(item);
+        let Ok(before) = std::fs::read_to_string(folder.join("orig-head")) else { continue; };
+        let branch = std::fs::read_to_string(folder.join("head-name")).ok()?;
+        let before = before.trim();
+        if matches!(before.len(), 40 | 64) && before.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Some((before.to_owned(), branch.trim().strip_prefix("refs/heads/").map(|_| branch.trim().to_owned()).unwrap_or_default()));
+        }
+    }
+    None
+}
+
+pub fn cleanup_replay_files(dir: &Path) {
+    let gd = git_dir(dir);
+    if !gd.is_absolute() || replay_active(&gd) { return; }
+    let Ok(entries) = std::fs::read_dir(&gd) else { return; };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Ok(kind) = entry.file_type() else { continue; };
+        if name.starts_with("gitcraft-replay-") && kind.is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else if name == "gitcraft-rebase-todo" || name.strip_prefix("gitcraft-msg-").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn run_replay(dir: &Path, args: &[&str], items: &[TodoItem], skip_hooks: bool) -> git::GitOut {
+    let gd = git_dir(dir);
+    if !gd.is_absolute() || !gd.is_dir() { return git::GitOut::failed("Could not locate the repository's Git directory."); }
+    if replay_active(&gd) || gd.join("CHERRY_PICK_HEAD").exists() {
+        return git::GitOut::failed("Finish or abort the current replay before starting another plan.");
+    }
+    cleanup_replay_files(dir);
+    let files = match tempfile::Builder::new().prefix("gitcraft-replay-").tempdir_in(&gd) {
+        Ok(files) => files,
+        Err(error) => return git::GitOut::failed(&error.to_string()),
+    };
+    let todo = match write_todo(files.path(), items, skip_hooks) {
+        Ok(todo) => todo,
+        Err(error) => return git::GitOut::failed(&error),
+    };
+    let path = shell_path(&todo);
+    let result = git::run_env(dir, args, &[("GIT_SEQUENCE_EDITOR", SEQUENCE_EDITOR), ("GITCRAFT_REBASE_TODO_PATH", &path)]);
+    // Git can resume later and still needs the message files referenced by its todo list.
+    if replay_active(&gd) { let _ = files.keep(); }
+    result
+}
+
+/// Runs `git rebase -i` with our own todo list. Uncommitted changes are stashed and restored
+/// around it ("Auto stash before rebase").
+pub fn interactive_rebase(dir: &Path, base: &str, items: &[TodoItem], skip_hooks: bool) -> git::GitOut {
+    run_replay(dir, &["-c", "core.editor=true", "rebase", "-i", "--autostash", base], items, skip_hooks)
+}
+
+fn shell_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) { text.replace('\\', "/") } else { text.into_owned() }
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn write_todo(folder: &Path, items: &[TodoItem], skip_hooks: bool) -> Result<PathBuf, String> {
+    let todo = folder.join("todo");
+    let git = shell_quote(&shell_path(Path::new(&crate::prefs::git_program())));
     let mut text = String::new();
     let mut picked_any = false;
     for (i, it) in items.iter().enumerate() {
+        if !matches!(it.sha.len(), 40 | 64) || !it.sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("Each replay step must identify a commit by its full hash.".into());
+        }
         match it.action {
             Step::Drop => text.push_str(&format!("drop {}\n", it.sha)),
             Step::Squash if picked_any => text.push_str(&format!("squash {}\n", it.sha)),
+            Step::Fixup if picked_any => text.push_str(&format!("fixup {}\n", it.sha)),
+            Step::Edit => {
+                text.push_str(&format!("edit {}\n", it.sha));
+                picked_any = true;
+            }
+            Step::Exec => {
+                let command = it.message.as_deref().unwrap_or_default().trim();
+                if command.is_empty() || command.len() > 8192 || command.contains(['\r', '\n', '\0']) {
+                    return Err("A replay command must be one nonempty line of at most 8192 bytes.".into());
+                }
+                text.push_str(&format!("exec {command}\n"));
+            }
             _ => {
                 text.push_str(&format!("pick {}\n", it.sha));
                 picked_any = true;
             }
         }
         if it.action == Step::Reword {
-            let msg = gd.join(format!("gitcraft-msg-{i}"));
-            std::fs::write(&msg, it.message.clone().unwrap_or_default()).map_err(|e| e.to_string())?;
-            let p = msg.to_string_lossy().replace('\\', "/");
-            let quoted = format!("'{}'", p.replace('\'', "'\\''"));
-            text.push_str(&format!("exec git commit --amend --only --allow-empty --no-verify -F {quoted}\n"));
+            let msg = folder.join(format!("message-{i}"));
+            std::fs::write(&msg, it.message.as_deref().unwrap_or_default()).map_err(|error| error.to_string())?;
+            let message = shell_quote(&shell_path(&msg));
+            let flag = if skip_hooks { " --no-verify" } else { "" };
+            text.push_str(&format!("exec {git} commit --amend --only --allow-empty{flag} -F {message}\n"));
         }
     }
     std::fs::write(&todo, text).map_err(|e| e.to_string())?;
@@ -97,20 +169,13 @@ fn write_todo(dir: &Path, items: &[TodoItem]) -> Result<PathBuf, String> {
 }
 
 /// Interactive cherry pick: replay the listed commits onto HEAD in order.
-pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], _log: &dyn Fn(&[&str]) -> git::GitOut) -> git::GitOut {
+pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], skip_hooks: bool) -> git::GitOut {
     if items.iter().all(|item| item.action == Step::Drop) { return git::GitOut { ok: true, stdout: String::new(), stderr: String::new() }; }
-    let gd = git_dir(dir);
-    if gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists() || gd.join("CHERRY_PICK_HEAD").exists() {
-        return git::GitOut::failed("Finish or abort the current replay before starting another plan.");
-    }
     let head = git::run(dir, &["rev-parse", "--verify", "HEAD"]);
     if !head.ok { return head; }
-    let todo = match write_todo(dir, items) { Ok(todo) => todo, Err(error) => return git::GitOut::failed(&error) };
-    let todo = todo.to_string_lossy().replace('\\', "/");
-    // Git owns the complete plan, including the remaining steps after a conflict.
-    // Replaying the selected commits onto the current tip appends them to this branch.
-    git::run_env(dir, &["-c", "core.editor=true", "rebase", "-i", "--autostash", "--reapply-cherry-picks", "--onto", head.stdout.trim(), "--root"],
-        &[("GIT_SEQUENCE_EDITOR", SEQUENCE_EDITOR), ("GITCRAFT_REBASE_TODO_PATH", &todo)])
+    let head = head.stdout.trim();
+    // Git generates an empty plan at HEAD. The sequence editor substitutes only the selected commits.
+    run_replay(dir, &["-c", "core.editor=true", "rebase", "-i", "--autostash", "--onto", head, head], items, skip_hooks)
 }
 
 

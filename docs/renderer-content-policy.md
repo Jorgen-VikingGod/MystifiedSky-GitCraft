@@ -1,8 +1,8 @@
-# Renderer content policy prototype
+# Renderer content policy
 
-`tauri.csp.conf.json` is an opt-in packaged-build configuration. Build it with
+Windows release builds use `tauri.csp.conf.json`. To test the policy locally, run
 `npm --prefix ui run build`, then `./ui/node_modules/.bin/tauri build --config tauri.csp.conf.json` from the app root.
-The default policy remains unchanged until packaged validation passes.
+macOS and Linux release builds await native webview validation.
 
 Source inventory (2026-11-17):
 
@@ -14,8 +14,7 @@ Source inventory (2026-11-17):
 - Links launch through native commands. Embedded frames, plugins, forms and injected base URLs are unnecessary.
 - No eval permission is included. Development-server HMR is outside this packaged policy.
 
-Before enabling this configuration by default, test an installed build on Windows,
-Linux and macOS: cold launch; file/diff editors and language worker startup;
+Before enabling this configuration for additional platforms, test an installed build: cold launch; file/diff editors and language worker startup;
 image previews and avatars; preferences; notifications; all dialogs; native
 account requests; update discovery and restart. Record CSP violations and actual
 worker/IPC origins for each platform. A browser harness cannot establish these
@@ -24,6 +23,6 @@ packaged webview results.
 Windows release-executable validation now passes IPC, editor/JSON workers, data
 images, the HTTPS avatar source, preferences and native updater configuration,
 with zero recorded CSP violations or renderer exceptions. See
-[continuation validation](continuation-validation-2026-11-17.md) and the repeatable
+[continuation validation](validation-security-2026-11-17.md) and the repeatable
 [Windows harness](../TESTING.md#windows-release-webview-regression-checks).
 This does not establish signed update installation or installed macOS/Linux behavior.

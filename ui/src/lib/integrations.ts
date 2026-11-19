@@ -122,6 +122,27 @@ export const SERVICES: ServiceInfo[] = [
     tokenHelp: "A personal access token with Code (read, write & manage), Work Items (read & write), Project and Team (read), Identity (read).",
   },
   {
+    id: "azure-server",
+    label: "Azure DevOps Server 2022",
+    kind: "hosting",
+    fields: [{ key: "azureServerCollection", label: "Collection URL", placeholder: "https://dev.example.com/tfs/DefaultCollection" }],
+    needs: ["azureServerCollection"],
+    tokenUrl: i => "https://" + host(i.azureServerCollection) + "/_usersSettings/tokens",
+    tokenHelp: "A collection personal access token with Code and Project permissions.",
+  },
+  ...(["gitea", "forgejo", "codeberg"] as const).map((id): ServiceInfo => {
+    const user = id === "gitea" ? "giteaUser" : id === "forgejo" ? "forgejoUser" : "codebergUser";
+    const domain = id === "gitea" ? "giteaHost" : "forgejoHost";
+    const fields: ServiceField[] = [{ key: user, label: "Username", help: "Used for Git over HTTPS." }];
+    if (id !== "codeberg") fields.unshift({ key: domain, label: "HTTPS host", placeholder: "git.example.com" });
+    return {
+      id, label: id === "gitea" ? "Gitea" : id === "forgejo" ? "Forgejo" : "Codeberg", kind: "hosting", fields,
+      needs: id === "codeberg" ? [] : [domain],
+      tokenUrl: i => "https://" + (id === "codeberg" ? "codeberg.org" : host(i[domain])) + "/user/settings/applications",
+      tokenHelp: "A personal access token with repository, issue, user and organization permissions for the operations you need.",
+    };
+  }),
+  {
     id: "jira",
     label: "Jira Cloud",
     kind: "issues",

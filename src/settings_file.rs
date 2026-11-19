@@ -1,0 +1,79 @@
+use serde_json::Value;
+use std::{fs, io::{self, Write}, path::Path, sync::Mutex};
+
+static ACCESS: Mutex<()> = Mutex::new(());
+
+fn parse(bytes: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(bytes).ok().filter(Value::is_object)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| io::Error::other("Settings path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    pending.write_all(bytes)?;
+    pending.as_file().sync_all()?;
+    pending.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+pub fn load(path: &Path) -> Result<Value, String> {
+    let _guard = ACCESS.lock().unwrap_or_else(|error| error.into_inner());
+    let warning = match fs::read(path) {
+        Ok(bytes) => {
+            if let Some(value) = parse(&bytes) { return Ok(value); }
+            let parent = path.parent().ok_or("Settings path has no parent")?;
+            let mut quarantined = tempfile::Builder::new().prefix("settings.corrupt-").suffix(".json").tempfile_in(parent).map_err(|error| error.to_string())?;
+            quarantined.write_all(&bytes).and_then(|_| quarantined.as_file().sync_all()).map_err(|error| error.to_string())?;
+            let (_, saved) = quarantined.keep().map_err(|error| error.to_string())?;
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+            Some(format!("Invalid preferences were preserved in {}.", saved.display()))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Could not read {}: {error}. The existing preferences were kept.", path.display())),
+    };
+    let backup = path.with_extension("json.bak");
+    if let Some(mut recovered) = fs::read(backup).ok().and_then(|data| parse(&data)) {
+        recovered["recoveryWarning"] = format!("{}Restored preferences from the last readable backup.", warning.map(|value| format!("{value} ")).unwrap_or_default()).into();
+        // Restore the primary immediately so the next launch sees clean preferences.
+        let mut clean = recovered.clone(); clean.as_object_mut().expect("validated JSON object").remove("recoveryWarning");
+        write_atomic(path, &serde_json::to_vec_pretty(&clean).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        return Ok(recovered);
+    }
+    Ok(warning.map(|warning| serde_json::json!({"recoveryWarning": format!("{warning} No readable backup was available.")})).unwrap_or(Value::Null))
+}
+
+pub fn save(path: &Path, settings: &Value) -> Result<(), String> {
+    let _guard = ACCESS.lock().unwrap_or_else(|error| error.into_inner());
+    if !settings.is_object() { return Err("Preferences must be a JSON object.".into()); }
+    match fs::read(path) {
+        Ok(bytes) if parse(&bytes).is_some() => write_atomic(&path.with_extension("json.bak"), &bytes).map_err(|error| error.to_string())?,
+        Ok(_) => return Err("Preferences on disk are invalid. Restart to recover them before saving.".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.to_string()),
+    }
+    write_atomic(path, &serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_primary_is_preserved_and_the_last_backup_is_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let first = serde_json::json!({"settings": {"zoom": 1.25}});
+        save(&path, &first).unwrap();
+        save(&path, &serde_json::json!({"settings": {"zoom": 2}})).unwrap();
+        fs::write(&path, b"damaged preferences").unwrap();
+        assert!(save(&path, &first).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"damaged preferences");
+        let recovered = load(&path).unwrap();
+        assert_eq!(recovered["settings"], first["settings"]);
+        assert!(recovered["recoveryWarning"].as_str().unwrap().contains("Restored"));
+        let quarantined = fs::read_dir(temp.path()).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("settings.corrupt-")).unwrap();
+        assert_eq!(fs::read(quarantined.path()).unwrap(), b"damaged preferences");
+        assert_eq!(load(&path).unwrap(), first);
+    }
+}

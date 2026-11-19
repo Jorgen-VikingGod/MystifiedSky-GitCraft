@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, ChevronRight, CloudDownload, Download, FolderOpen, Search, Star, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { act, openRepoPath, refresh, setBulkProgress, queryClient } from "@/lib/repo";
+import { act, pullModeFor, openRepoPath, refresh, setBulkProgress, queryClient } from "@/lib/repo";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { Dialog } from "./ui/dialog";
@@ -38,7 +38,7 @@ export function openFavorite(n: number) {
 /** Repository Management: open, favorite and recent repositories with their branch and WIP summary,
  *  and fetch / pull / open / remove for one or all of them. */
 export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
-  const s = { ...useStore(useShallow((st) => ({ closeTab: st.closeTab, setSettings: st.setSettings, tabs: st.tabs, toast: st.toast }))), settings: useStore(useShallow((st) => ({ favorites: st.settings.favorites, pullMode: st.settings.pullMode, recents: st.settings.recents }))) };
+  const s = { ...useStore(useShallow((st) => ({ closeTab: st.closeTab, setSettings: st.setSettings, tabs: st.tabs, toast: st.toast }))), settings: useStore(useShallow((st) => ({ favorites: st.settings.favorites, recents: st.settings.recents }))) };
   const [q, setQ] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const open = [...new Set(s.tabs.filter((t) => t.kind === "repo" && t.path).map((t) => t.path!))];
@@ -72,7 +72,7 @@ export function RepoManagementDialog({ onClose }: { onClose: () => void }) {
         const p = ok[next++];
         setBulkProgress(`${what === "fetch" ? "Fetching" : "Pulling"} repositories (${completed} of ${ok.length} complete)…`);
         try {
-          if (!(await act(p, what === "fetch" ? { type: "fetch" } : { type: "pull", mode: s.settings.pullMode === "fetch" ? "ff" : s.settings.pullMode }, true))) failed++;
+          if (!(await act(p, what === "fetch" ? { type: "fetch" } : { type: "pull", mode: pullModeFor(p, false) }, true))) failed++;
         } catch (error) { failed++; s.toast(false, `${name(p)}: ${error}`); }
         completed++;
         setBulkProgress(`${what === "fetch" ? "Fetching" : "Pulling"} repositories (${completed} of ${ok.length} complete)…`);

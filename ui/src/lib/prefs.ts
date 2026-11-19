@@ -7,6 +7,7 @@ import { DEFAULT_SETTINGS, newId, useStore, type Profile, type Workspace } from 
 
 /** Themes: Dark / Light and their high-contrast versions. */
 export const THEMES = [
+  { id: "system", label: "Follow system" },
   { id: "dark", label: "Dark" },
   { id: "light", label: "Light" },
   { id: "dark-hc", label: "Dark (High Contrast)" },
@@ -14,8 +15,22 @@ export const THEMES = [
 ] as const;
 
 export function applyTheme(id: string) {
-  document.documentElement.dataset.theme = id;
-  updateEditorTheme();
+  const dark = window.matchMedia?.("(prefers-color-scheme: dark)");
+  const contrast = window.matchMedia?.("(prefers-contrast: more)");
+  const forced = window.matchMedia?.("(forced-colors: active)");
+  const update = () => {
+    const highContrast = !!contrast?.matches || !!forced?.matches;
+    const resolved = id === "system" || forced?.matches
+      ? `${dark?.matches ? "dark" : "light"}${highContrast ? "-hc" : ""}`
+      : id;
+    document.documentElement.dataset.theme = resolved;
+    updateEditorTheme();
+  };
+  update();
+  for (const media of [dark, contrast, forced]) media?.addEventListener("change", update);
+  return () => {
+    for (const media of [dark, contrast, forced]) media?.removeEventListener("change", update);
+  };
 }
 
 const st = () => useStore.getState();

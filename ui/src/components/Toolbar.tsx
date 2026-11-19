@@ -1,3 +1,4 @@
+import { useText } from "@/lib/locale";
 import { useShallow } from "zustand/react/shallow";
 import {
   ArrowDownToLine,
@@ -18,9 +19,9 @@ import type { ReactNode } from "react";
 import type { RepoView } from "@/lib/api";
 import { api } from "@/lib/api";
 import { useStore } from "@/lib/store";
-import { act, openRepoPath, promptBranch } from "@/lib/repo";
+import { act, openRepoPath, promptBranch, promptStash } from "@/lib/repo";
 import { DropMenu, type MenuEntry } from "./ui/menu";
-import { addSubmodule, addWorktree, initGitflow, openCleanup } from "@/lib/manage";
+import { addSubmodule, addWorktree, compareCommitRanges, repositoryMaintenance, fetchMoreHistory, initGitflow, openCleanup, recoverDiscardedChanges } from "@/lib/manage";
 import { cn, MOD } from "@/lib/utils";
 import { SPIN_TURN_MS, useSpinning } from "@/lib/spin";
 
@@ -33,9 +34,12 @@ const PULL_LABELS: Record<string, string> = {
 
 /** The toolbar under the tabs: repository and branch pickers plus the main Git buttons. */
 export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: string }) {
+  const t = useText();
   const s = useStore(useShallow((s) => ({ settings: s.settings, metrics: s.metrics, tabs: s.tabs, setActive: s.setActive, setDialog: s.setDialog, setSettings: s.setSettings, setUi: s.setUi })));
   const path = repo?.path;
   const labels = s.settings.toolbarLabels;
+  const repoPrefs = path ? s.settings.repoPrefs[path] : undefined;
+  const pullMode = repoPrefs?.pullMode ?? s.settings.pullMode;
   const locals = repo?.refs.filter((r) => r.kind === "Local") ?? [];
   const detached = !!repo && !repo.head_branch;
   // Commits to pull / push for the checked-out branch (shown as small counts).
@@ -67,15 +71,23 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
     { label: "Create branch...", shortcut: `${MOD}+B`, onSelect: () => path && promptBranch(path, null) },
   ];
   const pullMenu: MenuEntry[] = (["fetch", "ff", "ffonly", "rebase"] as const).map((m) => ({
-    label: (s.settings.pullMode === m ? "● " : "○ ") + PULL_LABELS[m],
-    onSelect: () => s.setSettings({ pullMode: m }),
+    label: (pullMode === m ? "● " : "○ ") + PULL_LABELS[m],
+    onSelect: () => {
+      if (path && repoPrefs?.pullMode) s.setSettings({ repoPrefs: { ...s.settings.repoPrefs, [path]: { ...repoPrefs, pullMode: m } } });
+      else s.setSettings({ pullMode: m });
+    },
   }));
   const actionsMenu: MenuEntry[] = [
     { label: "Fetch all remotes", shortcut: `${MOD}+L`, onSelect: () => path && act(path, { type: "fetch" }) },
+    { label: "Fetch more history…", disabled: !path, onSelect: () => path && fetchMoreHistory(path) },
     { label: "Open in File Manager", onSelect: () => path && api.openFileManager(path) },
     { label: "Open External Terminal", onSelect: () => path && api.openTerminal(path) },
     { separator: true },
     { label: "Add remote...", onSelect: () => path && promptRemote(path) },
+    { label: "Repository maintenance…", disabled: !path, onSelect: () => path && repositoryMaintenance(path) },
+    { label: "Compare commit ranges…", disabled: !path, onSelect: () => path && compareCommitRanges(path) },
+    { label: "Recover commits from reflog…", disabled: !path, onSelect: () => path && s.setDialog({ kind: "reflog", path }) },
+    { label: "Recover discarded changes…", disabled: !path, onSelect: () => path && recoverDiscardedChanges(path) },
     { label: "Activity log", onSelect: () => s.setDialog({ kind: "log" }) },
     { separator: true },
     { label: "Initialize / edit Gitflow...", onSelect: () => path && initGitflow(path) },
@@ -122,19 +134,19 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
       />
       </div>
       <div className="flex items-center justify-center h-full pl-[20px]">
-      <TB label="Undo" labels={labels} title={repo?.undo.undo ? `Undo ${repo.undo.undo}` : "Nothing to undo"} disabled={!repo?.undo.undo} onClick={() => path && act(path, { type: "undo" })}>
+      <TB label={t("Undo")} labels={labels} title={repo?.undo.undo ? `Undo ${repo.undo.undo}` : "Nothing to undo"} disabled={!repo?.undo.undo} onClick={() => path && act(path, { type: "undo" })}>
         <Undo2 size={19} />
       </TB>
-      <TB label="Redo" labels={labels} title={repo?.undo.redo ? `Redo ${repo.undo.redo}` : "Nothing to redo"} disabled={!repo?.undo.redo} onClick={() => path && act(path, { type: "redo" })}>
+      <TB label={t("Redo")} labels={labels} title={repo?.undo.redo ? `Redo ${repo.undo.redo}` : "Nothing to redo"} disabled={!repo?.undo.redo} onClick={() => path && act(path, { type: "redo" })}>
         <Redo2 size={19} />
       </TB>
       <div className="flex items-stretch h-full">
         <TB
           label="Pull"
           labels={labels}
-          title={detached ? "Pull is not available when in a detached HEAD state" : PULL_LABELS[s.settings.pullMode]}
-          disabled={!repo || (detached && s.settings.pullMode !== "fetch")}
-          onClick={() => path && act(path, { type: "pull", mode: s.settings.pullMode })}
+          title={detached ? "Pull is not available when in a detached HEAD state" : PULL_LABELS[pullMode]}
+          disabled={!repo || (detached && pullMode !== "fetch")}
+          onClick={() => path && act(path, { type: "pull", mode: pullMode })}
           badge={head?.behind}
           spinning={pulling}
         >
@@ -153,17 +165,22 @@ export function Toolbar({ repo, tabId }: { repo: RepoView | undefined; tabId: st
       <TB label="Push" labels={labels} title={detached ? "Push is not available when in a detached HEAD state" : "Push"} disabled={!repo || detached} onClick={() => path && act(path, { type: "push", force: false })} badge={head?.ahead} spinning={pushing}>
         <ArrowUpFromLine size={19} />
       </TB>
-      <TB label="Branch" labels={labels} title={`Create branch (${MOD}+B)`} disabled={!repo} onClick={() => path && promptBranch(path, null)}>
+      <TB label={t("Branch")} labels={labels} title={`Create branch (${MOD}+B)`} disabled={!repo} onClick={() => path && promptBranch(path, null)}>
         <GitBranch size={19} />
       </TB>
-      <TB label="Stash" labels={labels} title="Stash changes" disabled={!hasChanges && !stashing} spinning={stashing} onClick={() => path && act(path, { type: "stash", message: "" })}>
+      <TB label={t("Stash")} labels={labels} title="Stash changes" disabled={!hasChanges && !stashing} spinning={stashing} onClick={() => path && act(path, { type: "stash", message: "" })}>
         <Download size={19} />
       </TB>
-      <TB label="Pop" labels={labels} title="Pop the latest stash" disabled={!repo?.stashes.length && !popping} spinning={popping} onClick={() => path && act(path, { type: "stashPop", index: 0 })}>
+      {path && <DropMenu trigger={<button type="button" aria-label={t("Stash options")} className="self-stretch px-0.5 text-fg3 hover:text-fg"><ChevronDown size={12} /></button>} items={[
+        { label: "Stash with a title", disabled: !hasChanges, onSelect: () => promptStash(path) },
+        { label: "Stash and keep staged changes", disabled: !hasChanges, onSelect: () => promptStash(path, "stashKeepIndex") },
+        { label: "Stash untracked files only", disabled: !repo.status.unstaged.some(file => file.status === "?"), onSelect: () => promptStash(path, "stashUntracked") },
+      ]} />}
+      <TB label={t("Pop")} labels={labels} title="Pop the latest stash" disabled={!repo?.stashes.length && !popping} spinning={popping} onClick={() => path && act(path, { type: "stashPop", index: 0 })}>
         <Upload size={19} />
       </TB>
       <div className="w-px h-[34px] bg-white/20 mx-1" />
-      <TB label="Terminal" labels={labels} title="Toggle the terminal panel (Ctrl+`)" disabled={!repo} onClick={() => s.setSettings({ showTerminal: !s.settings.showTerminal })}>
+      <TB label={t("Terminal")} labels={labels} title="Toggle the terminal panel (Ctrl+`)" disabled={!repo} onClick={() => s.setSettings({ showTerminal: !s.settings.showTerminal })}>
         <SquareTerminal size={19} />
       </TB>
       </div>

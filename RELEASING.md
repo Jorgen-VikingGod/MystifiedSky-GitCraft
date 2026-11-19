@@ -2,7 +2,7 @@
 
 Each push to `main` starts the **Release** workflow unless the push only changes `CHANGELOG.md`. It builds the tip of that push and adds the workflow run number to the patch component of the base version in `tauri.conf.json`. For example, base `0.1.0` plus run 1 yields `0.1.1`. The workflow updates the version in its checkout only. It creates a version tag at the source commit when it publishes, so no version bump commits or manually pushed tags are needed.
 
-The workflow builds Windows x64 (NSIS and MSI), macOS (universal DMG), and Linux x64 (AppImage, DEB, and RPM). It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
+The workflow builds Windows x64 (NSIS and MSI) and ARM64 (NSIS), macOS (universal DMG), and Linux x64 and ARM64 (AppImage, DEB, and RPM). It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
 
 Use **Re-run failed jobs** in Actions to retry a failed release with the same version. If a higher version has already published, the retry skips publication. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `npm --prefix ui run version:set -- <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
 

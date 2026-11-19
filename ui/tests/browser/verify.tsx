@@ -13,13 +13,12 @@ let callbackId = 0;
   invoke: async (command: string, args: any) => {calls.push({command,args}); return handlers[command]?.(args);},
 };
 const {useStore,DEFAULT_SETTINGS,DEFAULT_COLUMNS}=await import("../../src/lib/store");
-const {queryClient,refresh,act,openRepoPath,WIP_COMMIT_EVENT}=await import("../../src/lib/repo");
+const {queryClient,refresh,act,openRepoPath,promptUpstream,WIP_COMMIT_EVENT}=await import("../../src/lib/repo");
 const {monaco}=await import("../../src/lib/monaco");
 const {MonacoDiff,MonacoFile}=await import("../../src/components/MonacoViews");
 const {VirtualFileRows}=await import("../../src/components/VirtualFileRows");
 const {Dialogs}=await import("../../src/components/Dialogs");
 const {addRemote}=await import("../../src/lib/manage");
-const {promptUpstream}=await import("../../src/lib/menus");
 const {RightPanel}=await import("../../src/components/RightPanel");
 const {GraphView}=await import("../../src/components/GraphView");
 const {LeftPanel}=await import("../../src/components/LeftPanel");
@@ -187,6 +186,25 @@ await test("B074 server-default merge is explicit in selector, confirmation and 
   button("Merge Pull Request")!.click();await until(()=>!!button("Merge"),"confirmation");assert(document.body.textContent?.includes("server default strategy"),"Confirmation promised a specific strategy");
   button("Merge")!.click();await until(()=>calls.some(c=>c.command==="merge_pr"),"merge IPC");assert(calls.find(c=>c.command==="merge_pr")!.args.method==="default","Default choice lost");
 });
+await test("Pull-request merge honors repository methods and blocking checks", async () => {
+  let blocked = true;
+  handlers.repo_remote = () => ({ provider: "github", service: "github", host: "github.com", path: "fixture/repo", web: "https://github.com/fixture/repo" });
+  handlers.pr_details = () => ({ number: 1, title: "Squash-only PR", author: "Fixture", source: "feature", target: "main",
+    draft: false, state: "open", body: "", updated: "", url: "https://github.com/fixture/repo/pull/1",
+    merge_methods: ["squash"], merge_status: blocked ? "Required reviews are pending." : null });
+  mount(<><PullRequestView repo={repo} tabId={tabId} number={1}/><Dialogs/></>);
+  await until(() => !!document.querySelector('[aria-label="Merge method"]'), "merge choices loaded");
+  const select = document.querySelector<HTMLSelectElement>('[aria-label="Merge method"]')!;
+  assert(select.options.length === 1 && select.value === "squash", "Disallowed method was offered");
+  assert(button("Merge Pull Request")!.disabled && document.body.textContent?.includes("Required reviews are pending."), "Blocking merge check was not shown");
+  blocked = false;
+  button("Refresh merge status")!.click();
+  await until(() => !button("Merge Pull Request")!.disabled, "merge ready after refresh");
+  button("Merge Pull Request")!.click();
+  await until(() => !!button("Merge"), "merge confirmation");
+  button("Merge")!.click();
+  await until(() => calls.some(call => call.command === "merge_pr" && call.args.method === "squash"), "allowed merge request");
+});
 await test("B079 signing Off writes explicit false for both defaults",async()=>{
   handlers.git_config_get=()=>({"commit.gpgsign":"true","tag.gpgSign":"true"});
   mount(<SigningSection/>);await until(()=>document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length===2,"signing defaults loaded");
@@ -229,7 +247,7 @@ for(const outcome of ["cancel","add failure","success"])await test(`B099 missing
 await test("B083 force choice retains its reviewed branch and destination",async()=>{
   const review={branch:"refs/heads/main",head:sha("a"),remote:"origin",remoteRef:"refs/heads/main",url:"/fixture/remote.git",remoteOid:sha("c"),trackingOid:sha("c"),config:"fixture-config"};
   let finishReview!: (value: typeof review) => void;
-  handlers.push_review=()=>new Promise(resolve=>{finishReview=resolve;});handlers.run_action=({action})=>action.force?{ok:true,message:"Pushed"}:{ok:false,message:"rejected non-fast-forward"};
+  handlers.push_review=()=>new Promise(resolve=>{finishReview=resolve;});handlers.run_action=({action})=>action.force?{ok:true,message:"Pushed"}:{ok:false,message:" ! [rejected] main -> main (non-fast-forward)"};
   await openRepoPath(repo.path);mount(<Dialogs/>);
   let completed=false;
   const pending=act(repo.path,{type:"push",force:false},true).then(result=>{completed=true;return result;});
@@ -241,6 +259,63 @@ await test("B083 force choice retains its reviewed branch and destination",async
   await until(()=>calls.some(c=>c.command==="run_action"&&c.args.action.force),"reviewed force IPC");
   const pushed=calls.find(c=>c.command==="run_action"&&c.args.action.force)!.args.action;
   assert(pushed.review.branch==="refs/heads/main"&&pushed.review.head===sha("a")&&pushed.review.remoteRef==="refs/heads/main","Force push was rebound to the later checkout");
+});
+await test("Protected-branch rejection does not offer a force push",async()=>{
+  handlers.run_action=()=>({ok:false,message:" ! [remote rejected] main -> main (protected branch hook declined)"});
+  await openRepoPath(repo.path);
+  mount(<Dialogs/>);
+  assert(!await act(repo.path,{type:"push",force:false}),"The rejected push reported success");
+  assert(!calls.some(call=>call.command==="push_review"),"A policy rejection entered force push review");
+  assert(useStore.getState().toasts.some(toast=>toast.text.includes("protected branch hook declined")),"The server's reason was not shown");
+});
+await test("File editor saves or keeps a dirty draft when switching files",async()=>{
+  const target={source:{kind:"Unstaged" as const},file:"a.txt",untracked:false,parent:null};
+  const next={...target,file:"b.txt"};
+  handlers.file_versions=()=>({old:"before",new:"original",editable:true,binary:false,new_token:"initial-token"});
+  handlers.file_diff=()=>[];
+  handlers.save_file=()=>undefined;
+  const state=useStore.getState();
+  state.setUi(tabId,{diff:target});
+  mount(<><DiffView repo={repo} tabId={tabId} target={target}/><Dialogs/></>);
+  await until(()=>!!button("Edit This File"),"edit action");
+  button("Edit This File")!.click();
+  await until(()=>monaco.editor.getModels().some(model=>model.getValue()==="original"),"file editor model");
+  monaco.editor.getModels().find(model=>model.getValue()==="original")!.setValue("saved draft");
+  await until(()=>!!button("Save Changes")&&!button("Save Changes")!.disabled,"dirty editor");
+  state.setUi(tabId,{diff:next});
+  await until(()=>!!button("Discard"),"unsaved choices");
+  const dialog=document.querySelector('[role="dialog"]')!;
+  [...dialog.querySelectorAll('button')].find(b=>b.textContent==="Cancel")!.click();
+  assert(useStore.getState().ui[tabId].diff?.file===target.file,"Cancel changed the selected file");
+  state.setUi(tabId,{diff:next});
+  await until(()=>!!button("Save"),"save navigation choice");
+  button("Save")!.click();
+  await until(()=>useStore.getState().ui[tabId].diff?.file===next.file,"navigation after save");
+  const saved=calls.find(call=>call.command==="save_file");
+  assert(saved?.args.file===target.file&&saved?.args.content==="saved draft","The draft wasn't saved to its original file");
+});
+await test("Conflict editor keeps a dirty draft when tab close is cancelled",async()=>{
+  const file="merge.txt";
+  handlers.conflict_info=()=>({working_token:"fixture-token",working:"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",ours:"ours",theirs:"theirs",base:"base",ours_label:"ours",theirs_label:"theirs",binary:false});
+  const state=useStore.getState();state.setUi(tabId,{conflict:file});
+  mount(<><ConflictView repo={repo} tabId={tabId} file={file}/><Dialogs/></>);
+  await until(()=>!!button("Edit"),"manual conflict edit action");
+  button("Edit")!.click();
+  await until(()=>!!document.querySelector("textarea"),"conflict draft editor");
+  const output=document.querySelector("textarea")!;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")!.set!.call(output,"manual resolution");
+  output.dispatchEvent(new Event("input",{bubbles:true}));
+  await until(()=>!!button("Save Output"),"resolved draft");
+  state.closeTab(tabId);
+  await until(()=>!!button("Discard"),"tab close offers draft choices");
+  const dialog=document.querySelector('[role="dialog"]')!;
+  [...dialog.querySelectorAll('button')].find(b=>b.textContent==="Cancel")!.click();
+  assert(useStore.getState().tabs.some(tab=>tab.id===tabId),"Cancel closed the repository tab");
+  assert(document.querySelector('textarea')?.value==="manual resolution","Cancel lost conflict output");
+  state.closeTab(tabId);
+  await until(()=>!!button("Discard"),"tab close can discard on request");
+  button("Discard")!.click();
+  assert(!useStore.getState().tabs.some(tab=>tab.id===tabId),"Discard did not close the tab");
 });
 await test("B085 all commit shortcuts refuse unresolved conflicts",async()=>{
   repo.status={staged:[],unstaged:[{path:"a.txt",status:"U"}],conflicted:true};useStore.getState().setDraft(repo.path,{summary:"Unresolved",description:"Details",amend:false});
@@ -258,7 +333,7 @@ for(const amend of [false,true])for(const stripComments of [false,true])await te
   const action=calls.find(c=>c.command==="run_action"&&c.args.action.type==="commit")!.args.action;assert(action.stripComments===stripComments&&action.amend===amend,"Cleanup preference lost");
 });
 await test("B072 historical blame follows repeated renames",async()=>{
-  handlers.file_history=()=>["after.txt","middle.txt","before.txt"].map((path,i)=>({...commit(["c","b","a"][i]),path}));handlers.blame=()=>[];handlers.file_versions=()=>({old:"before",new:"after",binary:false,editable:false});
+  handlers.file_history=()=>({entries:["after.txt","middle.txt","before.txt"].map((path,i)=>({...commit(["c","b","a"][i]),path})),cursor:null});handlers.blame=()=>[];handlers.file_versions=()=>({old:"before",new:"after",binary:false,editable:false});
   for(const [id,file] of [["a","before.txt"],["b","middle.txt"],["c","after.txt"]]) {
     mount(<HistoryView repo={repo} tabId={tabId} file="after.txt" mode="history" sha={sha(id)}/>);await until(()=>calls.some(c=>c.command==="file_versions"&&c.args.file===file),"historical diff path");
     mount(<HistoryView repo={repo} tabId={tabId} file="after.txt" mode="blame" sha={sha(id)}/>);await until(()=>calls.some(c=>c.command==="blame"&&c.args.file===file&&c.args.rev===sha(id)),"historical blame path");
@@ -293,6 +368,20 @@ await test("B098 conflict output requires conversion consent",async()=>{
   mount(<><ConflictView repo={repo} tabId={tabId} file="file.txt"/><Dialogs/></>);await until(()=>!!button("Create Conflict Chunks")||!!button("Save Output"),"conflict ready");(button("Create Conflict Chunks")??button("Save Output"))!.click();
   await until(()=>!!button("Convert output to UTF-8"),"lossy conflict confirmation");assert(!calls.some(c=>c.command==="run_action"||c.command==="save_file"),"Conflict saved before consent");button("Convert output to UTF-8")!.click();await until(()=>calls.some(c=>c.command==="save_file"||c.command==="run_action"),"explicit conflict save");
   const save=calls.find(c=>c.command==="save_file"||c.command==="run_action")!.args;assert(save.utf8===true||save.action?.utf8===true,"Conflict conversion flag lost");
+});
+await test("Hunk view highlights changed words without altering selectable lines", async () => {
+  handlers.file_versions = () => ({old:"const count = 1;",new:"const total = 2;",binary:false,editable:true});
+  handlers.file_diff = () => [
+    {kind:"Hunk",old_no:null,new_no:null,text:"@@ -1 +1 @@"},
+    {kind:"Removed",old_no:1,new_no:null,text:"const count = 1;"},
+    {kind:"Added",old_no:null,new_no:1,text:"const total = 2;"},
+  ];
+  const target = {source:{kind:"Unstaged"} as const,file:"file.txt",untracked:false,parent:null};
+  useStore.getState().setSettings({diffMode:"hunk"});
+  mount(<DiffView repo={repo} tabId={tabId} target={target}/>);
+  await until(() => !!document.querySelector("[data-hunk] span[class~='bg-good/45']"), "inline word highlights");
+  const spans = [...document.querySelectorAll("[data-hunk] td span")].map(span => span.textContent);
+  assert(spans.includes("total") && spans.includes("count") && !spans.includes("const"), "Highlighted tokens differ from the replacement");
 });
 await test("O026 dense hunk rows stay bounded and preserve original indexes",async()=>{
   useStore.getState().setSettings({diffMode:"hunk",wordWrap:false});repo.status.unstaged=[{path:"dense.txt",status:"M"}];
@@ -389,6 +478,22 @@ await test("B099 URL fetch retry retains the newly added remote",async()=>{
   assert(calls.filter(c=>c.command==="run_action"&&c.args.action.type==="addRemote").length===1,"Fetch retry tried to recreate the remote");
   assert(fetches===2,"Fetch was not retried");
 });
+await test("Graph canvas redraws when display scale changes", async () => {
+  mount(<div style={{height:300,width:900}}><GraphView repo={repo} tabId={tabId}/></div>);
+  await until(() => (document.querySelector("canvas")?.width ?? 0) > 1, "initial canvas");
+  const canvas = document.querySelector("canvas")!;
+  const original = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+  const width = canvas.width;
+  try {
+    Object.defineProperty(window, "devicePixelRatio", { value: window.devicePixelRatio * 2, configurable: true });
+    window.dispatchEvent(new Event("resize"));
+    await until(() => canvas.width >= width * 2 - 1, "redrawn scaled canvas");
+  } finally {
+    if (original) Object.defineProperty(window, "devicePixelRatio", original);
+    else Reflect.deleteProperty(window, "devicePixelRatio");
+    window.dispatchEvent(new Event("resize"));
+  }
+});
 await test("graph columns resize, align, persist and reset",async()=>{
   const {startPersistence,flushPersistence}=await import("../../src/lib/persistence");
   const stop=startPersistence();
@@ -451,7 +556,7 @@ await test("B101 history failure retry and real empty state", async () => {
   mount(<HistoryView repo={repo} tabId={tabId} file="a.txt" mode="history" sha={null}/>);
   await until(() => !!button("Retry"), "history error retry");
   assert(!document.body.textContent?.includes("No commits touch this file"), "Error rendered as empty history");
-  handlers.file_history = () => []; button("Retry")!.click();
+  handlers.file_history = () => ({ entries: [], cursor: null }); button("Retry")!.click();
   await until(() => document.body.textContent?.includes("No commits touch this file") ?? false, "empty history after recovery");
 });
 await test("B102 avatars recover on reconnect and honor initials", async () => {
@@ -474,7 +579,7 @@ await test("B102 avatars recover on reconnect and honor initials", async () => {
 });
 
 await test("O027 50000 blame lines stay bounded and navigate", async () => {
-  handlers.file_history = () => [];
+  handlers.file_history = () => ({ entries: [], cursor: null });
   handlers.blame = () => Array.from({length: 50000}, (_, i) => ({sha: sha("a"), author: "Fixture", time: 1, summary: "Commit", line: i + 1, text: `line ${i + 1}`}));
   mount(<div style={{height: 400, width: 900}}><HistoryView repo={repo} tabId={tabId} file="a.txt" mode="blame" sha={null}/></div>);
   await until(() => !!document.querySelector('[aria-label="Blame lines"] [data-virtual-row]'), "blame rows");
@@ -515,7 +620,7 @@ await test("O028 worktree status reads stay within four IPC calls", async () => 
   assert(calls.filter(c => c.command === "repo_status").length === before, "Unmount retained queued reads");
 });
 await test("S003 history skips unrelated store updates", async () => {
-  handlers.file_history = () => [];
+  handlers.file_history = () => ({ entries: [], cursor: null });
   let commits = 0;
   mount(<React.Profiler id="history" onRender={() => commits++}><HistoryView repo={repo} tabId={tabId} file="a.txt" mode="history" sha={null}/></React.Profiler>);
   await until(() => document.body.textContent?.includes("No commits touch") ?? false, "history settled");
@@ -547,7 +652,7 @@ await test("O037 initial pages, continuation retry and deduplication", async () 
 });
 
 await test("O027 wrapped blame rows measure actual heights", async () => {
-  handlers.file_history = () => [];
+  handlers.file_history = () => ({ entries: [], cursor: null });
   handlers.blame = () => Array.from({length: 1000}, (_, i) => ({sha:sha("a"),author:"Fixture",time:1,summary:"Commit",line:i+1,text: i === 0 ? "wrapped words ".repeat(80) : `line ${i+1}`}));
   mount(<div style={{height:400,width:650}}><HistoryView repo={repo} tabId={tabId} file="wrapped.txt" mode="blame" sha={null}/></div>);
   await until(() => !!document.querySelector('[data-virtual-row="0"]'), "wrapped row"); await sleep(50);
@@ -599,8 +704,84 @@ await test("O037 comment pages preserve rows through failure retry and deduplica
   await until(()=>!!button("Load more comments"),"comment continuation");button("Load more comments")!.click();
   await until(()=>!!button("Retry comments"),"comment retry");assert(document.body.textContent?.includes("Comment one"),"Failed page discarded comments");button("Retry comments")!.click();
   await until(()=>document.body.textContent?.includes("Comment two")??false,"comments recovered");
-  assert([...document.querySelectorAll('div')].filter(d=>d.textContent==="Comment one").length===1,"Duplicate comment after retry");
+  assert([...document.querySelectorAll('.hosted-markdown')].filter(d=>d.textContent?.trim()==="Comment one").length===1,"Duplicate comment after retry");
 });
+await test("F039 system theme follows dark mode and high contrast", async () => {
+  const { applyTheme } = await import("../../src/lib/prefs");
+  const original = window.matchMedia;
+  const entries = new Map<string, EventTarget & { matches: boolean }>();
+  window.matchMedia = ((query: string) => {
+    const entry = Object.assign(new EventTarget(), { matches: false });
+    entries.set(query, entry);
+    return entry;
+  }) as typeof window.matchMedia;
+  const previous = document.documentElement.dataset.theme;
+  const cleanup = applyTheme("system");
+  try {
+    assert(document.documentElement.dataset.theme === "light", "System light theme was ignored");
+    const dark = entries.get("(prefers-color-scheme: dark)")!;
+    dark.matches = true;
+    dark.dispatchEvent(new Event("change"));
+    assert(String(document.documentElement.dataset.theme) === "dark", "OS dark mode did not update the app");
+    const contrast = entries.get("(forced-colors: active)")!;
+    contrast.matches = true;
+    contrast.dispatchEvent(new Event("change"));
+    assert(String(document.documentElement.dataset.theme) === "dark-hc", "System high contrast did not apply");
+  } finally {
+    cleanup();
+    window.matchMedia = original;
+    if (previous === undefined) delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = previous;
+  }
+});
+
+await test("F028 hosted Markdown renders GitHub-flavored markup within the image and link policy", async () => {
+  const {HostedMarkdown}=await import("../../src/components/HostedMarkdown");
+  mount(<HostedMarkdown base="https://example.invalid/team/repo/pull/1" text={'- [x] Done\n\n[Details](../2)\n\n![External logo](https://example.invalid/logo.png)\n\n<strong>raw</strong>\n\n~~~ts\nconst x = 1;\n~~~'} />);
+  assert(document.querySelector(".hosted-markdown input:checked"), "Task item was omitted");
+  assert(document.querySelector(".hosted-markdown a")?.getAttribute("href")==="https://example.invalid/team/repo/2", "Relative link was not resolved");
+  assert(!document.querySelector(".hosted-markdown img, .hosted-markdown strong"), "External image or raw HTML was rendered");
+  assert(document.querySelector(".hosted-markdown pre code")?.textContent?.includes("const x"), "Code fence was omitted");
+});
+
+await test("F035 switching pull request filters loads the selected server collection", async () => {
+  handlers.repo_remote=()=>({provider:"github",service:"github",web:"https://example.invalid/team/repo"});
+  handlers.list_prs_page=({filter})=>({items:[{number:1,title:"Filter " + filter,author:"Fixture",source:"topic",target:"main",state:filter,url:"https://example.invalid/pr"}],cursor:null});
+  mount(<LeftPanel repo={repo} tabId={tabId} onSelectSha={() => {}} />);
+  await until(() => !!button("PULL REQUESTS"), "pull request section");
+  button("PULL REQUESTS")!.click();
+  await until(()=>document.body.textContent?.includes("Filter open")??false,"open pull requests");
+  const select=document.querySelector<HTMLSelectElement>('[aria-label="Filter pull requests"]')!;
+  select.value="merged";
+  select.dispatchEvent(new Event("change",{bubbles:true}));
+  await until(()=>document.body.textContent?.includes("Filter merged")??false,"merged pull requests");
+});
+
+await test("F008 submits inline review comments on the selected diff side and commit", async () => {
+  handlers.repo_remote=()=>({provider:"github",service:"github",web:"https://example.invalid/team/repo"});
+  handlers.pr_details=()=>({number:1,title:"Review fixture",author:"Fixture",source:"topic",source_sha:sha("a"),target:"main",draft:false,state:"open",body:"",updated:"",url:"https://example.invalid/pr"});
+  handlers.pull_review_data=()=>({reviewers:["reviewer"],reviews:[],files:[{path:"file.txt",patch:"@@ -2 +2 @@\n-old\n+new"}],comments:[]});
+  handlers.submit_pull_review=()=>null;
+  mount(<PullRequestView repo={repo} tabId={tabId} number={1}/>);
+  await until(()=>[...document.querySelectorAll("summary")].some(e=>e.textContent==="Review"),"review controls");
+  [...document.querySelectorAll("summary")].find(e=>e.textContent==="Review")!.click();
+  await until(()=>!!document.querySelector('option[value="file.txt"]'),"review diff");
+  const file=document.querySelector<HTMLOptionElement>('option[value="file.txt"]')!.parentElement as HTMLSelectElement;
+  file.value="file.txt";
+  file.dispatchEvent(new Event("change",{bubbles:true}));
+  await until(()=>!!button("2 +new"), "added line");
+  button("2 +new")!.click();
+  await until(()=>!!button("Post inline comment"),"inline comment form");
+  const text=document.querySelector<HTMLTextAreaElement>("details[open] label textarea")!;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")!.set!.call(text,"Reviewed");
+  text.dispatchEvent(new Event("input",{bubbles:true}));
+  await until(()=>!button("Post inline comment")!.disabled,"typed inline comment");
+  button("Post inline comment")!.click();
+  await until(()=>calls.some(call=>call.command==="submit_pull_review"),"review IPC");
+  const payload=calls.find(call=>call.command==="submit_pull_review")!.args;
+  assert(payload.expected===sha("a") && payload.action.line===2 && payload.action.side==="RIGHT" && payload.action.path==="file.txt","Review selected the wrong Git diff location");
+});
+
 await test("S003 large commit panel ignores unrelated drafts settings and progress", async () => {
   useStore.getState().setSettings({authorInitials:true});
   useStore.getState().setUi(tabId,{selection:{type:"commit",sha:repo.commits[0].sha}});

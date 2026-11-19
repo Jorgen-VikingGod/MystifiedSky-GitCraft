@@ -2,7 +2,7 @@
 
 use crate::{ai, ai_cli, hosting::secret_get};
 use serde_json::Value;
-use std::{collections::HashSet, io::Read, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Model {
@@ -66,11 +66,7 @@ fn list_api(config: &ai::AiConfig, key: Option<&str>) -> Result<Vec<Model>, Stri
             "Save your {name} API key first, then fetch models."
         ));
     }
-    // Keep the credential on the selected endpoint, even if it redirects.
-    let client = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(12))
-        .build();
+    let client = crate::hosting::http_client();
     let anthropic = provider == "anthropic";
     if anthropic && !url.query_pairs().any(|(k, _)| k == "limit") {
         url.query_pairs_mut().append_pair("limit", "100");
@@ -82,29 +78,36 @@ fn list_api(config: &ai::AiConfig, key: Option<&str>) -> Result<Vec<Model>, Stri
         if let Some(cursor) = &cursor {
             page.query_pairs_mut().append_pair("after_id", cursor);
         }
-        let mut request = client.get(page.as_str()).set("Accept", "application/json");
+        let mut request = client.get(page.as_str()).header("Accept", "application/json");
         if let Some(key) = key {
             request = if anthropic {
                 request
-                    .set("x-api-key", key)
-                    .set("anthropic-version", ai::API_VERSION)
+                    .header("x-api-key", key)
+                    .header("anthropic-version", ai::API_VERSION)
             } else {
-                request.set("Authorization", &format!("Bearer {key}"))
+                request.bearer_auth(key)
             };
         }
-        let response = request.call().map_err(|error| match error {
-            ureq::Error::Status(401 | 403, _) => format!("{name} rejected access to the model list. Check the saved API key."),
-            ureq::Error::Status(404 | 405, _) => format!("{name} does not expose a model list at this endpoint. You can still enter a model ID manually."),
-            ureq::Error::Status(code, _) => format!("{name} returned HTTP {code} while listing models."),
-            _ => format!("Could not reach {name} to list models. Check the endpoint and try again."),
-        })?;
-        if !(200..300).contains(&response.status()) {
-            return Err(format!(
-                "{name} redirected the model request. Set the endpoint to the final address."
-            ));
-        }
-        let body: Value = serde_json::from_reader(response.into_reader().take(4 * 1024 * 1024))
-            .map_err(|_| format!("{name} did not return a readable model list."))?;
+        let context = crate::read_jobs::context();
+        let body: Value = tauri::async_runtime::block_on(crate::read_jobs::wait_http(async {
+            let mut response = request.send().await.map_err(crate::hosting::transport_error)?;
+            let status = response.status().as_u16();
+            match status {
+                200..=299 => {}
+                300..=399 => return Err(format!("{name} redirected the model request. Set the endpoint to the final address.")),
+                401 | 403 => return Err(format!("{name} rejected access to the model list. Check the saved API key.")),
+                404 | 405 => return Err(format!("{name} does not expose a model list at this endpoint. You can still enter a model ID manually.")),
+                code => return Err(format!("{name} returned HTTP {code} while listing models.")),
+            }
+            let mut data = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(crate::hosting::transport_error)? {
+                if data.len() + chunk.len() > 4 * 1024 * 1024 {
+                    return Err(format!("{name} returned a model list larger than 4 MB."));
+                }
+                data.extend_from_slice(&chunk);
+            }
+            serde_json::from_slice(&data).map_err(|_| format!("{name} did not return a readable model list."))
+        }, context, Duration::from_secs(12)))?;
         let rows = body["data"].as_array().ok_or_else(|| {
             format!("{name} did not return a model list. You can enter a model ID manually.")
         })?;

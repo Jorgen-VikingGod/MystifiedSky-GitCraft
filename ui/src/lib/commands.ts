@@ -3,11 +3,11 @@ import { openFavorite } from "@/components/RepoManagement";
 // handler runs them, and the shortcut editor changes their keys. Groups are the
 // Keyboard Shortcuts headers (Repo Actions, Navigation, Command Palette, UI).
 import { api } from "./api";
-import { act, confirmThen, promptBranch, promptStash, promptTag, repoData } from "./repo";
+import { act, confirmThen, promptBranch, promptStash, promptTag, promptUpstream, pullModeFor, repoData } from "./repo";
 import { useStore } from "./store";
 import { resetZoom, stepZoom } from "./zoom";
-import { addRemote, addSubmodule, addWorktree, initGitflow, openCleanup } from "./manage";
-import { promptUpstream } from "./menus";
+import { addRemote, addSubmodule, compareCommitRanges, repositoryMaintenance, addWorktree, fetchMoreHistory, initGitflow, openCleanup } from "./manage";
+import { isMac } from "./utils";
 
 export type Group = "Repo Actions" | "Navigation" | "Command Palette" | "UI";
 
@@ -19,6 +19,8 @@ export interface Command {
   keys?: string;
   /** More default shortcuts (some commands have two). */
   alsoKeys?: string[];
+  macKeys?: string;
+  macAlsoKeys?: string[];
   keywords?: string;
   /** Needs an open repository. */
   repo?: boolean;
@@ -57,12 +59,14 @@ function selectTab(n: number) {
 export const COMMANDS: Command[] = [
   // Repo Actions
   { id: "repo:fetch", label: "Fetch All", group: "Repo Actions", keys: "Ctrl+L", repo: true, run: (p) => act(p!, { type: "fetch" }) },
-  { id: "repo:pull", label: "Pull", group: "Repo Actions", repo: true, run: (p) => act(p!, { type: "pull", mode: st().settings.pullMode === "fetch" ? "ff" : st().settings.pullMode }) },
+  { id: "repo:pull", label: "Pull", group: "Repo Actions", repo: true, run: (p) => act(p!, { type: "pull", mode: pullModeFor(p, false) }) },
   { id: "repo:push", label: "Push", group: "Repo Actions", repo: true, run: (p) => act(p!, { type: "push", force: false }) },
   { id: "repo:createBranch", label: "Create Branch", group: "Repo Actions", keys: "Ctrl+B", repo: true, run: (p) => promptBranch(p!, null) },
   { id: "repo:checkout", label: "Checkout", group: "Repo Actions", repo: true, picker: "checkout", keywords: "switch branch" },
   { id: "repo:createTag", label: "Create Tag", group: "Repo Actions", repo: true, run: (p) => promptTag(p!, null) },
   { id: "repo:stash", label: "Stash", group: "Repo Actions", repo: true, run: (p) => promptStash(p!) },
+  { id: "repo:stash-keep-index", label: "Stash and Keep Staged Changes", group: "Repo Actions", repo: true, run: (p) => promptStash(p!, "stashKeepIndex") },
+  { id: "repo:stash-untracked", label: "Stash Untracked Files Only", group: "Repo Actions", repo: true, run: (p) => promptStash(p!, "stashUntracked") },
   { id: "repo:pop", label: "Pop Stash", group: "Repo Actions", repo: true, run: (p) => act(p!, { type: "stashPop", index: 0 }) },
   { id: "repo:stageAll", label: "Stage all changes", group: "Repo Actions", keys: "Ctrl+Shift+S", repo: true, run: (p) => act(p!, { type: "stageAll" }, true) },
   { id: "repo:unstageAll", label: "Unstage all changes", group: "Repo Actions", keys: "Ctrl+Shift+U", repo: true, run: (p) => act(p!, { type: "unstageAll" }, true) },
@@ -124,6 +128,10 @@ export const COMMANDS: Command[] = [
     } },
   { id: "repo:addWorktree", label: "Add a new worktree", group: "Repo Actions", repo: true, run: (p) => repoData(p!) && addWorktree(repoData(p!)!) },
   { id: "repo:addSubmodule", label: "Add Submodule", group: "Repo Actions", repo: true, run: (p) => addSubmodule(p!) },
+  { id: "repo:rangeDiff", label: "Compare commit ranges", group: "Repo Actions", repo: true, run: path => compareCommitRanges(path!) },
+  { id: "repo:maintenance", label: "Repository maintenance", group: "Repo Actions", repo: true, run: path => repositoryMaintenance(path!) },
+  { id: "repo:fetchHistory", label: "Fetch more repository history", group: "Repo Actions", repo: true, run: path => void fetchMoreHistory(path!) },
+  { id: "repo:reflog", label: "Recover commits from reflog", group: "Repo Actions", repo: true, run: path => st().setDialog({ kind: "reflog", path: path! }) },
   { id: "repo:cleanup", label: "Clean Up Local Branches", group: "Repo Actions", repo: true, run: openCleanup },
   { id: "ui:integrations", label: "Integrations", group: "UI", keywords: "github gitlab bitbucket azure jira trello connect", run: () => st().setDialog({ kind: "prefs", section: "integrations" }) },
   { id: "repo:sparse", label: "Sparse Checkout", group: "Repo Actions", repo: true, run: () => st().setDialog({ kind: "sparse" }) },
@@ -132,8 +140,8 @@ export const COMMANDS: Command[] = [
   { id: "nav:newTab", label: "New Tab", group: "Navigation", keys: "Ctrl+T", inInputs: true, run: () => st().newTab() },
   { id: "nav:closeTab", label: "Close Tab", group: "Navigation", keys: "Ctrl+W", inInputs: true, run: () => st().closeTab(st().activeId) },
   { id: "nav:reopenTab", label: "Reopen Closed Tab", group: "Navigation", keys: "Ctrl+Shift+T", inInputs: true, run: () => st().reopenTab() },
-  { id: "nav:nextTab", label: "Jump to the next open tab", group: "Navigation", keys: "Ctrl+Tab", inInputs: true, run: () => cycleTab(1) },
-  { id: "nav:prevTab", label: "Jump to the previous open tab", group: "Navigation", keys: "Ctrl+Shift+Tab", inInputs: true, run: () => cycleTab(-1) },
+  { id: "nav:nextTab", label: "Jump to the next open tab", group: "Navigation", keys: "Ctrl+Tab", macKeys: "Ctrl+Tab", macAlsoKeys: ["Meta+Shift+]"], inInputs: true, run: () => cycleTab(1) },
+  { id: "nav:prevTab", label: "Jump to the previous open tab", group: "Navigation", keys: "Ctrl+Shift+Tab", macKeys: "Ctrl+Shift+Tab", macAlsoKeys: ["Meta+Shift+["], inInputs: true, run: () => cycleTab(-1) },
   { id: "nav:moveTabLeft", label: "Move Tab Left", group: "Navigation", keys: "Ctrl+Shift+PageUp", inInputs: true, keywords: "reorder rearrange", run: () => moveActiveTab(-1) },
   { id: "nav:moveTabRight", label: "Move Tab Right", group: "Navigation", keys: "Ctrl+Shift+PageDown", inInputs: true, keywords: "reorder rearrange", run: () => moveActiveTab(1) },
   ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(
@@ -153,7 +161,7 @@ export const COMMANDS: Command[] = [
   // UI
   { id: "ui:leftPanel", label: "Toggle Left Panel", group: "UI", keys: "Ctrl+J", run: () => st().setSettings({ showLeft: !st().settings.showLeft }) },
   { id: "ui:detailPanel", label: "Toggle Commit Details Panel", group: "UI", keys: "Ctrl+K", run: () => st().setSettings({ showRight: !st().settings.showRight }) },
-  { id: "ui:terminalPanel", label: "Toggle Terminal Panel", group: "UI", keys: "Ctrl+`", inInputs: true, keywords: "in-app terminal command line console", run: () => st().setSettings({ showTerminal: !st().settings.showTerminal }) },
+  { id: "ui:terminalPanel", label: "Toggle Terminal Panel", group: "UI", keys: "Ctrl+`", macKeys: "Ctrl+`", inInputs: true, keywords: "in-app terminal command line console", run: () => st().setSettings({ showTerminal: !st().settings.showTerminal }) },
   { id: "ui:zoomIn", label: "Increase Zoom", group: "UI", keys: "Ctrl+=", inInputs: true, run: () => stepZoom(1) },
   { id: "ui:zoomOut", label: "Decrease Zoom", group: "UI", keys: "Ctrl+-", inInputs: true, run: () => stepZoom(-1) },
   { id: "ui:zoomReset", label: "Reset Zoom", group: "UI", keys: "Ctrl+0", inInputs: true, run: resetZoom },
@@ -186,19 +194,37 @@ export function comboOf(e: KeyboardEvent): string | null {
   // Use the physical key for digits and symbols so Shift doesn't change them ("Ctrl+Shift+1").
   if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
   else if (e.code === "Backquote") key = "`";
+  else if (e.code === "BracketLeft") key = "[";
+  else if (e.code === "BracketRight") key = "]";
   if (key.length === 1) key = key.toUpperCase();
   const parts = [];
-  if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.metaKey) parts.push("Meta");
   if (e.altKey) parts.push("Alt");
   if (e.shiftKey) parts.push("Shift");
   parts.push(key);
   return parts.join("+");
 }
 
-/** Current shortcut of a command: the person's choice, else the default ("" = none). */
-export function keysOf(c: Command): string {
+/** All effective bindings for dispatch and clash detection, primary first. */
+export function bindingsOf(c: Command): string[] {
   const custom = st().settings.keybindings?.[c.id];
-  return custom !== undefined ? custom : c.keys ?? "";
+  if (custom !== undefined) return custom ? [custom] : [];
+  const defaults = [c.keys ?? "", ...(c.alsoKeys ?? [])];
+  if (!isMac) return defaults.filter(Boolean);
+  const mapped = defaults.map(key => key.replace(/^Ctrl(?=\+)/, "Meta"));
+  const primary = c.macKeys ?? mapped[0];
+  return [primary, ...(c.macAlsoKeys ?? mapped.slice(1))].filter(Boolean);
+}
+
+export function keysOf(c: Command): string { return bindingsOf(c)[0] ?? ""; }
+
+export function shortcutLabel(key: string): string {
+  return key.replace(/(^|\+)Meta(?=\+)/, (_, prefix: string) => prefix + (isMac ? "⌘" : "Win"));
+}
+
+export function isShortcut(combo: string): boolean {
+  return /^(?:Ctrl|Meta|Alt)\+|^F\d+$/.test(combo);
 }
 
 export function runCommand(c: Command) {
@@ -213,13 +239,10 @@ export function runCommand(c: Command) {
 export function dispatchKey(e: KeyboardEvent, typing: boolean): boolean {
   const combo = comboOf(e);
   if (!combo) return false;
-  const hasMod = /Ctrl|Alt/.test(combo) || /^F\d+$/.test(combo);
-  if (!hasMod) return false;
+  if (!isShortcut(combo)) return false;
+  const pressed = combo.toUpperCase();
   for (const c of COMMANDS) {
-    const own = keysOf(c).toUpperCase();
-    // Extra default bindings only apply while the person has not chosen their own shortcut for the command.
-    const extra = st().settings.keybindings?.[c.id] === undefined ? (c.alsoKeys ?? []).map((k) => k.toUpperCase()) : [];
-    if (own !== combo.toUpperCase() && !extra.includes(combo.toUpperCase())) continue;
+    if (!bindingsOf(c).some(key => key.toUpperCase() === pressed)) continue;
     if (typing && !c.inInputs) return false; // leave editor and text-box shortcuts with their owner
     const terminal = (e.target as HTMLElement | null)?.closest?.(".xterm");
     if (terminal && c.id !== "ui:terminalPanel" && c.id !== "palette:toggle") return false;
