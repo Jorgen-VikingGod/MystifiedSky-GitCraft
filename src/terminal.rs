@@ -12,6 +12,7 @@ struct Session {
     writer: std::sync::mpsc::SyncSender<Vec<u8>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Box<dyn Child + Send + Sync>,
+    tree: Option<crate::process_tree::ProcessTree>,
     output: Arc<OutputFlow>,
 }
 
@@ -131,6 +132,7 @@ impl Terminals {
     pub fn open(
         &self,
         owner: &str,
+        owner_is_open: impl FnOnce() -> bool,
         shell: &str,
         cwd: &str,
         cols: u16,
@@ -159,14 +161,19 @@ impl Terminals {
                 }
             }
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-        drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        // Serialize the shell startup with removal of the owner's sessions.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|error| error.into_inner());
+        if !owner_is_open() { return Err("The repository window has closed.".into()); }
+        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        drop(pair.slave);
+        let tree = crate::process_tree::ProcessTree::terminal_group(child.as_ref());
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let input = input_queue(writer);
         let output = Arc::new(OutputFlow::default());
-        self.sessions.lock().unwrap_or_else(|error| error.into_inner()).insert(id, Session { owner: owner.into(), writer: input, master: Arc::new(Mutex::new(pair.master)), child, output: output.clone() });
+        sessions.insert(id, Session { owner: owner.into(), writer: input, master: Arc::new(Mutex::new(pair.master)), child, tree, output: output.clone() });
+        drop(sessions);
         let sessions = self.sessions.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -245,6 +252,7 @@ impl Terminals {
 
     fn stop(mut session: Session) {
         session.output.close();
+        if let Some(tree) = &session.tree { tree.kill(); }
         let _ = session.child.kill();
         std::thread::spawn(move || { let _ = session.child.wait(); });
     }
@@ -332,7 +340,7 @@ mod tests {
     fn closing_one_window_preserves_other_terminal_sessions() {
         let terminals = Terminals::default();
         let directory = std::env::temp_dir();
-        let open = |owner| terminals.open(owner, "", &directory.to_string_lossy(), 80, 24, None,
+        let open = |owner| terminals.open(owner, || true, "", &directory.to_string_lossy(), 80, 24, None,
             Arc::new(|_, _| {}), Arc::new(|_| {})).unwrap();
         let first = open("first");
         let second = open("second");
@@ -352,7 +360,7 @@ mod tests {
         let o2 = out.clone();
         let ack = t.clone();
         let id = t
-            .open("main", "", &std::env::temp_dir().to_string_lossy(), 80, 24, None, Arc::new(move |id, s| { o2.lock().unwrap().push_str(&s); ack.acknowledge("main", id, s.len()); }), Arc::new(|_| {}))
+            .open("main", || true, "", &std::env::temp_dir().to_string_lossy(), 80, 24, None, Arc::new(move |id, s| { o2.lock().unwrap().push_str(&s); ack.acknowledge("main", id, s.len()); }), Arc::new(|_| {}))
             .unwrap();
         // Like xterm.js does in the app: answer the console's "where is the cursor?" request.
         let mut answered = false;

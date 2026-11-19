@@ -59,21 +59,42 @@ impl ProcessTree {
     }
 
     fn attach(child: &Child) -> Result<Self, String> {
-        #[cfg(windows)] unsafe {
+        #[cfg(windows)] {
             use std::os::windows::io::AsRawHandle;
+            Self::windows_job(child.as_raw_handle())
+        }
+        #[cfg(not(windows))] { Ok(Self { id: child.id() as usize }) }
+    }
+
+    pub fn terminal_group(child: &dyn portable_pty::Child) -> Option<Self> {
+        let mut registry = registry().lock().unwrap_or_else(|error| error.into_inner());
+        if registry.stopping { return None; }
+        #[cfg(windows)]
+        let tree = Self::windows_job(child.as_raw_handle()?).ok()?;
+        // The Unix PTY starts the shell as the leader of a new session and process group.
+        #[cfg(unix)]
+        let tree = Self { id: child.process_id()? as usize };
+        #[cfg(not(any(windows, unix)))]
+        let tree = Self { id: child.process_id()? as usize };
+        registry.active.insert(tree.id);
+        Some(tree)
+    }
+
+    #[cfg(windows)]
+    fn windows_job(handle: std::os::windows::io::RawHandle) -> Result<Self, String> {
+        unsafe {
             use windows_sys::Win32::{Foundation::CloseHandle, System::JobObjects::*};
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as _, std::mem::size_of_val(&info) as u32) == 0 || AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0 {
+            if SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as _, std::mem::size_of_val(&info) as u32) == 0 || AssignProcessToJobObject(job, handle as _) == 0 {
                 let error = std::io::Error::last_os_error().to_string();
                 CloseHandle(job);
                 return Err(error);
             }
             Ok(Self { id: job as usize })
         }
-        #[cfg(not(windows))] { Ok(Self { id: child.id() as usize }) }
     }
     pub fn kill(&self) -> bool { kill_tree(self.id) }
 }

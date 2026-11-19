@@ -871,14 +871,14 @@ impl Engine {
                 }
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
                 let msg = stash_message(message, &branch);
-                let previous_stash = self.rev(dir, "refs/stash");
                 let o = match action {
                     Action::StashKeepIndex { .. } => self.git(dir, &["stash", "push", "--include-untracked", "--keep-index", "-m", &msg]),
                     Action::StashUntracked { .. } => crate::files::stash_untracked(dir, &msg),
                     _ => self.git(dir, &["stash", "push", "--include-untracked", "-m", &msg]),
                 };
-                // A stash with no local changes is reported as an error, not as success.
-                if o.ok && self.rev(dir, "refs/stash") == previous_stash {
+                // GitCraft runs Git with English diagnostics. Inspect this
+                // invocation's result even if another process updates refs/stash.
+                if o.ok && o.stdout.lines().any(|line| line.trim() == STASH_NOTHING) {
                     return ActionResult { ok: false, message: STASH_NOTHING.into() };
                 }
                 done(o, "Stashed changes")

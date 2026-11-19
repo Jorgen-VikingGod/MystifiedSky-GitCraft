@@ -378,6 +378,7 @@ fn term_open(cwd: String, cols: u16, rows: u16, shell: Option<String>, agent_env
     let exit_window = window.clone();
     state.terminals.open(
         window.label(),
+        || window.app_handle().get_webview_window(window.label()).is_some(),
         shell.as_deref().unwrap_or(""),
         &cwd,
         cols,
