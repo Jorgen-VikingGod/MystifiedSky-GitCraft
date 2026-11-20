@@ -102,22 +102,16 @@ impl LayoutCursor {
 
             // Continue with the parents.
             let mut down = Vec::new();
-            // A lane further right that waits for our first parent is folded into our lane.
-            let mut redirect: Option<usize> = None;
             for (pi, p) in c.parents.iter().enumerate() {
                 if pi == 0 {
-                    // First parent: same lane, unless another lane already waits for it.
+                    // First parent: same lane, unless a lane to the left already waits for it.
+                    // A sibling's lane to the right keeps running and joins at the parent itself,
+                    // so a line never ends on a commit that is not its parent.
                     match lanes.iter().position(|l| l.as_deref() == Some(p.as_str())) {
                         Some(j) if j < col => {
                             down.push(Seg { from: col as u16, to: j as u16, color: (col % GRAPH_COLORS) as u8 });
                         }
-                        Some(j) => {
-                            lanes[j] = None;
-                            lanes[col] = Some(p.clone());
-                            redirect = Some(j);
-                            down.push(Seg { from: col as u16, to: col as u16, color: (col % GRAPH_COLORS) as u8 });
-                        }
-                        None => {
+                        _ => {
                             lanes[col] = Some(p.clone());
                             down.push(Seg { from: col as u16, to: col as u16, color: (col % GRAPH_COLORS) as u8 });
                         }
@@ -135,9 +129,6 @@ impl LayoutCursor {
                 if l.is_some() && i != col && !down.iter().any(|s| s.to as usize == i && s.from as usize == col) {
                     down.push(Seg { from: i as u16, to: i as u16, color: (i % GRAPH_COLORS) as u8 });
                 }
-            }
-            if let Some(j) = redirect {
-                down.push(Seg { from: j as u16, to: col as u16, color: (j % GRAPH_COLORS) as u8 });
             }
             // Drop trailing empty lanes so the graph doesn't keep growing.
             while lanes.len() > first_free && matches!(lanes.last(), Some(None)) {
@@ -246,6 +237,20 @@ mod tests {
         assert_eq!(g.rows[3].col, 0);
         assert_eq!(g.width, 2);
         assert!(g.rows[0].merge);
+    }
+
+    #[test]
+    fn sibling_line_joins_at_the_shared_parent() {
+        // d and c are siblings with parent p. d's lane sits right of c's, so it must run past c
+        // and join at p; joining at c would make d look like c's child.
+        let commits = vec![c("x", &["c"]), c("d", &["p"]), c("c", &["p"]), c("p", &[])];
+        let g = layout(&commits);
+        assert_eq!((g.rows[1].col, g.rows[2].col, g.rows[3].col), (1, 0, 0));
+        let c_row = &g.rows[2];
+        assert!(c_row.down.iter().all(|s| s.from == s.to), "no lane changes below c: {:?}", c_row.down);
+        assert_eq!(c_row.down_runs, vec![[0, 1]], "c's line and d's line both continue to p");
+        let p_row = &g.rows[3];
+        assert!(p_row.up.iter().any(|s| s.from == 1 && s.to == 0), "d's line joins at p: {:?}", p_row.up);
     }
 
     #[test]

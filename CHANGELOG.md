@@ -38,6 +38,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
 - Show the first bad bisect commit on newer Git versions.
 - Close repository windows independently, save their drafts, and stop their terminals. Stop managed subprocesses on app exit.
 - Find build tools in the active or default installation when a desktop editor omits them from PATH.
