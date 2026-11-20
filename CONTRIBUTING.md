@@ -10,15 +10,19 @@ Open an [issue](https://github.com/MystifiedSky/GitCraft/issues) with the behavi
 
 Report security vulnerabilities privately using the process in [SECURITY.md](SECURITY.md).
 
+## Pick a change
+
+Choose a [good first issue](https://github.com/MystifiedSky/GitCraft/labels/good%20first%20issue) or propose a focused improvement. Docs, translations, and reproducible test cases all help. Comment on the issue when you start so others can coordinate. Open an issue before investing in a large feature or architectural change. See the [roadmap](docs/ROADMAP.md) for current priorities.
+
 ## Build and check a change
 
 Install Git, stable Rust, and Node.js 22.12 or later. On Windows, also install Visual Studio Build Tools with the **Desktop development with C++** workload, a Windows SDK, and the Microsoft Edge WebView2 Runtime. See [TESTING.md](TESTING.md) for Linux and macOS prerequisites. From the directory containing `Cargo.toml`:
 
 ```powershell
-npm --prefix ui ci
-npm --prefix ui run typecheck
+npm --prefix ui ci --ignore-scripts
+npm --prefix ui run build
 npm --prefix ui test
-cargo test --locked
+cargo test --locked -- --test-threads=1
 node --test scripts/changelog-release.test.mjs
 ```
 
@@ -28,13 +32,17 @@ See [TESTING.md](TESTING.md) for Ubuntu/WSL and macOS setup and the desktop smok
 
 ## Submit a pull request
 
+1. Fork GitCraft and create a new feature branch from the current `main` in your fork.
+2. Push the branch to your fork and open a pull request into `MystifiedSky/GitCraft:main`. Use a draft while you want early feedback or are still testing.
+3. Link the issue, complete the PR template, and mark it ready for review. Maintainers check that Windows, macOS, Linux, and browser CI passed before merging.
+
 - Explain the problem, the resulting behavior, and the checks you ran.
 - Include screenshots for visible changes, using sample data.
 - Add a regression test when it helps verify a behavior change.
 - Document notable changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). Use the existing categories and leave published releases and comparison links alone.
 - Keep dependency lockfiles in sync and explain dependency changes.
 
-Contributions are distributed under the project's [GPL-3.0-only license](LICENSE). Retain notices for third-party code and assets.
+Contributions are distributed under the project's [GPL-3.0-only license](LICENSE). For third-party code, icons, fonts, or other assets, include the source and license and retain the original notices. Use original work, public specifications, or suitably licensed material.
 
 ## Build from source and package
 
@@ -60,5 +68,5 @@ On Windows, the executable is `target/release/gitcraft.exe`. To package an insta
 npm --prefix ui run installer
 ```
 
-Installers are written to `target/release/bundle/`. Pushes to `main` build and publish signed updates through GitHub Actions; see [RELEASING.md](RELEASING.md).
+Installers are written to `target/release/bundle/`. Maintainers publish preview installers and signed stable updates through GitHub Actions. See [RELEASING.md](RELEASING.md).
 

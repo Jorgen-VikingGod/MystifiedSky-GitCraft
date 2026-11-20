@@ -1,27 +1,28 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'CHANGELOG.md'
-      - 'README.md'
-      - 'docs/**'
-      - '.github/assets/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE/**'
   workflow_dispatch:
+    inputs:
+      channel:
+        description: GitHub release channel
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - stable
 
 permissions:
   contents: read
 
-# Keep publication ordered and let pushes wait for their turn.
+# Keep preview and stable publication ordered.
 concurrency:
   group: gitcraft-release
   queue: max
 
 jobs:
   tests:
+    if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/test.yml
 
   version:
@@ -193,8 +194,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.number }}
+          CHANNEL: ${{ inputs.channel }}
         shell: bash
         run: |
+          case "$CHANNEL" in
+            preview)
+              draft_flags=(--prerelease)
+              channel_flags=(--prerelease --latest=false)
+              rm release-assets/latest.json
+              ;;
+            stable)
+              draft_flags=()
+              channel_flags=(--prerelease=false --latest=true)
+              ;;
+            *)
+              echo "::error::Unknown release channel."
+              exit 1
+              ;;
+          esac
           tag="v$VERSION"
           if release=$(gh release view "$tag" --json isDraft,targetCommitish 2>/dev/null); then
             if [[ $(jq -r .targetCommitish <<<"$release") != "$GITHUB_SHA" ]]; then
@@ -233,7 +250,7 @@ jobs:
           if [[ -n "${release:-}" ]]; then
             gh release edit "$tag" --notes-file release-notes.md
           else
-            if ! created=$(gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --notes-file release-notes.md 2>&1); then
+            if ! created=$(gh release create "$tag" --draft --target "$GITHUB_SHA" --title "GitCraft $tag" --notes-file release-notes.md "${draft_flags[@]}" 2>&1); then
               printf '%s\n' "$created" >&2
               case "$created" in
                 *'HTTP 403: Resource not accessible by integration'*|*'HTTP 404:'*) ;;
@@ -254,4 +271,4 @@ jobs:
           fi
           gh release upload "$tag" release-assets/* --clobber
 
-          gh release edit "$tag" --draft=false --latest=true
+          gh release edit "$tag" --draft=false "${channel_flags[@]}"

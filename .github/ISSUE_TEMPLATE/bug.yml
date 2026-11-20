@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem in GitCraft.
+labels: [bug]
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: GitCraft version, operating system, and Git version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use a disposable repository or the bundled sample. Remove credentials, private URLs, and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+      description: For Git operations, include what happened to the branch, staging area, or working tree.
+    validations:
+      required: true

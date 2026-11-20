@@ -1,0 +1,17 @@
+name: Feature request
+description: Propose a capability or an improvement to an existing workflow.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Describe your workflow and where you get stuck.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would a good outcome look like?
+    validations:
+      required: true

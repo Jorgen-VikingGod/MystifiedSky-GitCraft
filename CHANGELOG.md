@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
+
 - Join the GitCraft community from the Help menu.
 - Copy diagnostics from Help, open a repository in another window, and open clone URLs in a prefilled dialog.
 - Bisect from the graph. Stash selected changes, retain staged changes, or stash only untracked files.
