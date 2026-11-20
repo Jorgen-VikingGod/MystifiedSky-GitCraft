@@ -8,6 +8,6 @@ Include the affected GitCraft version, platform, steps to reproduce the issue, l
 
 ## Updates and fixes
 
-Use the [latest published release](https://github.com/MystifiedSky/GitCraft/releases/latest). Security fixes are recorded in the [changelog](CHANGELOG.md); older releases may not receive backports.
+Use the [latest published release](https://github.com/MystifiedSky/GitCraft/releases/latest). The latest stable release is the supported release line. Security fixes are recorded in the [changelog](CHANGELOG.md). Backports are evaluated case by case.
 
 Dependency advisories are reviewed against the code GitCraft actually builds. If a dependency requires a temporary backport, its source, changes, and removal conditions should be documented alongside the patch.

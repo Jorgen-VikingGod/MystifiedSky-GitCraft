@@ -100,6 +100,10 @@ Choose a theme, shape the graph, and set up the tools that fit your workflow. Gi
 
 ## Contributing
 
+[Find a first issue](https://github.com/MystifiedSky/GitCraft/labels/good%20first%20issue) or see the [roadmap](docs/ROADMAP.md). First issues include docs, translations, and platform verification.
+
+Try the [sample repository walkthrough](https://github.com/MystifiedSky/GitCraft/issues/28), [macOS shortcut checks](https://github.com/MystifiedSky/GitCraft/issues/29), [Spanish update setting](https://github.com/MystifiedSky/GitCraft/issues/30), [mixed-DPI graph checks](https://github.com/MystifiedSky/GitCraft/issues/31), or [Linux file reveal checks](https://github.com/MystifiedSky/GitCraft/issues/32).
+
 Code, documentation, and feedback are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to build from source and get involved.
 
 ## License
