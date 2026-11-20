@@ -1,4 +1,3 @@
-
 name: Discord GitHub Stars
 
 on:
@@ -8,14 +7,54 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+# Serialize announcements from the same account, avoiding racing cooldown checks.
+concurrency:
+  group: gitcraft-stars-${{ github.repository }}-${{ github.actor }}
+  cancel-in-progress: false
 
 jobs:
   announce-star:
     name: Announce GitHub Star
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
+      - name: Suppress repeated announcements from the same account
+        if: github.event_name == 'watch'
+        id: cooldown
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          STAR_ACTOR: ${{ github.actor }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # At most one successful announcement per user within 24 hours.
+          # Fail closed if run history cannot be checked.
+          recent_runs=$(gh api --paginate \
+            "repos/${REPOSITORY}/actions/workflows/discord-stars.yml/runs?event=watch&actor=${STAR_ACTOR}&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .conclusion, .created_at] | @tsv')
+
+          now=$(date -u +%s)
+          while IFS=$'\t' read -r run_id conclusion created_at; do
+            [ -n "$run_id" ] || continue
+            [ "$run_id" != "$CURRENT_RUN_ID" ] || continue
+            [ "$conclusion" = "success" ] || continue
+            created=$(date -u -d "$created_at" +%s)
+            if (( now - created < 86400 )); then
+              echo "Skipping repeat star announcement from ${STAR_ACTOR} within 24 hours."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done <<< "$recent_runs"
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Send Discord announcement
+        if: github.event_name == 'workflow_dispatch' || steps.cooldown.outputs.skip != 'true'
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_STARS_WEBHOOK }}
           GITHUB_ACTOR_NAME: ${{ github.actor }}
@@ -27,6 +66,13 @@ jobs:
           if [ -z "$WEBHOOK_URL" ]; then
             echo "::error::DISCORD_STARS_WEBHOOK is not configured."
             exit 1
+          fi
+
+          # Preserve existing query parameters such as thread_id.
+          if [[ "$WEBHOOK_URL" == *\?* ]]; then
+            WEBHOOK_URL="${WEBHOOK_URL}&wait=true"
+          else
+            WEBHOOK_URL="${WEBHOOK_URL}?wait=true"
           fi
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -56,9 +102,48 @@ jobs:
               }]
             }')
 
-          curl --fail-with-body --silent --show-error \
-            --retry 3 \
-            -H "Content-Type: application/json" \
-            -X POST \
-            --data "$PAYLOAD" \
-            "$WEBHOOK_URL"
+          # Do not blindly retry non-idempotent POSTs after ambiguous failures.
+          # Explicit HTTP 429 responses are safe to retry with backoff.
+          for attempt in 1 2 3 4 5 6; do
+            response_file=$(mktemp)
+            http_code=$(curl --silent --show-error \
+              --connect-timeout 10 --max-time 30 \
+              --output "$response_file" --write-out '%{http_code}' \
+              -H "Content-Type: application/json" \
+              --data "$PAYLOAD" "$WEBHOOK_URL") || {
+                rm -f "$response_file"
+                echo "::error::Webhook request failed; not retrying an ambiguous delivery."
+                exit 1
+              }
+
+            if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+              if ! jq -e '.id != null' "$response_file" > /dev/null; then
+                rm -f "$response_file"
+                echo "::error::Discord did not confirm a saved message."
+                exit 1
+              fi
+              rm -f "$response_file"
+              echo "Discord confirmed the message was saved."
+              exit 0
+            fi
+
+            if [ "$http_code" != "429" ]; then
+              echo "::error::Discord returned HTTP $http_code. Not retrying to avoid duplicates."
+              rm -f "$response_file"
+              exit 1
+            fi
+
+            if [ "$attempt" -eq 6 ]; then
+              rm -f "$response_file"
+              echo "::error::Rate limited after six attempts; rerun this failed workflow later."
+              exit 1
+            fi
+
+            delay=$(jq -r '.retry_after // 5' "$response_file")
+            rm -f "$response_file"
+            if ! [[ "$delay" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              delay=5
+            fi
+            echo "Discord rate limited the request; retrying after ${delay}s."
+            sleep "$delay"
+          done
