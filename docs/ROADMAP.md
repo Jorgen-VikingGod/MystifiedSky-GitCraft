@@ -8,7 +8,15 @@
 
 ## Support
 
-The latest stable release is the supported release line. Prioritize data loss, broken updates, and regressions in core Git workflows. The [test guide](../TESTING.md) records build prerequisites, the minimum Git version, and platform checks. The [release guide](../RELEASING.md) records the packages built for each platform.
+The latest stable release is the supported release line. Prioritize data loss, broken updates, and regressions in core Git workflows. The [test guide](../TESTING.md) records build prerequisites, the minimum Git version, and platform checks. GitCraft requires Git 2.38 or newer.
+
+| Platform | Native PR tests | Release packages |
+| --- | --- | --- |
+| Windows | GitHub Actions Windows Server 2022 x64 | x64 MSI and NSIS, ARM64 NSIS |
+| macOS | GitHub Actions latest macOS runner | Universal DMG for Apple silicon and Intel |
+| Linux | GitHub Actions Ubuntu 22.04 x64 | x64 and ARM64 AppImage, DEB, and RPM |
+
+The runner versions describe the environments used for automated tests. Installer smoke testing on real desktops is tracked in the [validation checklist](../BUGS_AND_OPTIMIZATIONS.md). Current build and update instructions are in the [release guide](../RELEASING.md).
 
 Use [GitHub Issues](https://github.com/MystifiedSky/GitCraft/issues) to track reproducible bugs and accepted work. Use [Discord](https://discord.gg/BsUgBu65YG) for usage questions and early ideas. Follow the [security policy](../SECURITY.md) for private vulnerability reporting.
 

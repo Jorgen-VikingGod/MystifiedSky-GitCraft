@@ -4,7 +4,7 @@ Run **Release** from Actions on `main` and select **preview** or **stable**. The
 
 The workflow builds Windows x64 (NSIS and MSI) and ARM64 (NSIS), macOS (universal DMG), and Linux x64 and ARM64 (AppImage, DEB, and RPM). It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
 
-Use **preview** for changes that benefit from testing on installed builds. Share the prerelease URL with volunteers and ask them to exercise the changed workflows on disposable repositories. Preview releases omit the updater manifest and the stable updater stays on the latest stable release.
+Use **preview** for changes that benefit from testing on installed builds. Share the prerelease URL with volunteers and ask them to exercise the changed workflows on disposable repositories. Preview releases omit the updater manifest and the stable updater stays on the latest stable release. Preview users can reinstall the current stable version manually. The updater offers stable again once its version is newer than the installed preview.
 
 When a preview is ready for everyone, dispatch **stable** on `main` after verifying that its tip is the commit you tested. The stable run builds a new version and publishes its updater manifest. Treat a different tip as a new candidate.
 
