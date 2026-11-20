@@ -1,0 +1,64 @@
+
+name: Discord GitHub Stars
+
+on:
+  watch:
+    types: [started]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  announce-star:
+    name: Announce GitHub Star
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send Discord announcement
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_STARS_WEBHOOK }}
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::error::DISCORD_STARS_WEBHOOK is not configured."
+            exit 1
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            DESCRIPTION="This is a test announcement from GitHub Actions."
+            TITLE="GitCraft Stars - Test"
+          else
+            DESCRIPTION="[@${GITHUB_ACTOR_NAME}](https://github.com/${GITHUB_ACTOR_NAME}) just starred **GitCraft**! Thank you for the support!"
+            TITLE="GitCraft received a new star!"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            --arg description "$DESCRIPTION" \
+            --arg url "https://github.com/${REPOSITORY}" \
+            --arg avatar "https://github.com/${GITHUB_ACTOR_NAME}.png" \
+            '{
+              username: "GitCraft Stars",
+              allowed_mentions: {parse: []},
+              embeds: [{
+                title: $title,
+                description: $description,
+                url: $url,
+                color: 16766720,
+                thumbnail: {url: $avatar},
+                footer: {text: "GitCraft | GitHub"},
+                timestamp: (now | todateiso8601)
+              }]
+            }')
+
+          curl --fail-with-body --silent --show-error \
+            --retry 3 \
+            -H "Content-Type: application/json" \
+            -X POST \
+            --data "$PAYLOAD" \
+            "$WEBHOOK_URL"
