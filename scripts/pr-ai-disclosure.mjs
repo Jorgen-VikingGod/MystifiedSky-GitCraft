@@ -7,9 +7,11 @@ export function disclosureError(body) {
   let fence;
   let inComment = false;
   for (const line of (body ?? "").split(/\r?\n/)) {
-    const marker = inComment ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    const marker = inComment ? null : line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fence) {
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !line.slice(marker[0].length).trim()) {
+        fence = undefined;
+      }
     } else if (marker) {
       fence = marker[1];
     } else {
@@ -47,7 +49,7 @@ export function disclosureError(body) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const pullRequest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+  const pullRequest = JSON.parse(readFileSync(0, "utf8"));
   const error = disclosureError(pullRequest.body);
   if (error) {
     console.error(error);
