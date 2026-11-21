@@ -37,3 +37,9 @@ test("comment markers in fenced code do not hide a disclosure", () => {
   assert.equal(disclosureError("```html\n<!--\n```\n\n" + body), undefined);
   assert.equal(disclosureError("<!--\n```html\n-->\n\n" + body), undefined);
 });
+
+test("an indented heading starts a separate disclosure answer", () => {
+  const body = "## AI disclosure\n- [x] I used AI for this PR.\n### Tools and models\n ### How AI was used\nDrafted tests.";
+  assert.match(disclosureError(body), /Tools and models/);
+  assert.equal(disclosureError(body.replace("### Tools and models", "### Tools and models\nExample assistant")), undefined);
+});

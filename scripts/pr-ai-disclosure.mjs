@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+function markdownHeading(line) {
+  const marker = line.match(/^ {0,3}(#{1,6})[ \t]+/);
+  if (marker) return { level: marker[1].length, text: line.slice(marker[0].length).trimEnd() };
+}
+
 export function disclosureError(body) {
   // Ignore comments and fenced code without reading their contents as Markdown.
   const visible = [];
@@ -29,21 +34,23 @@ export function disclosureError(body) {
     }
   }
 
-  const start = visible.findIndex(line => /^## AI disclosure\s*$/i.test(line));
+  const headings = visible.map(markdownHeading);
+  const start = headings.findIndex(heading => heading?.level === 2 && heading.text.toLowerCase() === "ai disclosure");
   if (start < 0) return "Add the AI disclosure section from the pull request template.";
-  const next = visible.findIndex((line, i) => i > start && /^#{1,2}\s/.test(line));
+  const next = headings.findIndex((heading, index) => index > start && heading && heading.level <= 2);
   const section = visible.slice(start + 1, next < 0 ? undefined : next);
+  const sectionHeadings = headings.slice(start + 1, next < 0 ? undefined : next);
 
   const selections = section.filter(line => /^- \[x\] (I used AI for this PR|I did not use AI for this PR)\.?\s*$/i.test(line));
   if (selections.length !== 1) return "Select exactly one AI disclosure checkbox.";
   if (/did not use AI/i.test(selections[0])) return;
 
-  for (const heading of ["Tools and models", "How AI was used"]) {
-    const start = section.findIndex(line => line.trim() === `### ${heading}`);
-    const end = section.findIndex((line, i) => i > start && /^#{1,3}\s/.test(line));
-    const value = start < 0 ? "" : section.slice(start + 1, end < 0 ? undefined : end).join(" ").trim();
+  for (const title of ["Tools and models", "How AI was used"]) {
+    const headingIndex = sectionHeadings.findIndex(heading => heading?.level === 3 && heading.text === title);
+    const end = sectionHeadings.findIndex((heading, index) => index > headingIndex && heading && heading.level <= 3);
+    const value = headingIndex < 0 ? "" : section.slice(headingIndex + 1, end < 0 ? undefined : end).join(" ").trim();
     if (!value || /^(?:[-*]\s+)?(?:todo|tbd|none|n\/?a|not applicable|\?+|[-.]+)[.!]?$/i.test(value)) {
-      return `Complete the "${heading}" part of the AI disclosure.`;
+      return `Complete the "${title}" part of the AI disclosure.`;
     }
   }
 }
