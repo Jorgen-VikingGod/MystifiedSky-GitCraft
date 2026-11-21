@@ -1,0 +1,33 @@
+name: Contribution policy
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: contribution-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-disclosure:
+    name: AI disclosure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Read the current pull request body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/pull-request.json"
+      - name: Check the AI disclosure
+        run: node scripts/pr-ai-disclosure.mjs < "${RUNNER_TEMP}/pull-request.json"

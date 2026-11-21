@@ -1,0 +1,18 @@
+name: Documentation or translation
+description: Suggest a clearer explanation, example, or translation.
+labels: [documentation]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Where is the problem or gap?
+      description: Give the page and heading, or the app screen and language.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: What would help?
+      description: Explain what is unclear or missing and what someone should be able to do afterward. Suggested wording is welcome.
+    validations:
+      required: true

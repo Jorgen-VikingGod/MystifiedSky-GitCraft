@@ -60,6 +60,8 @@ jobs:
         run: node --test scripts/cdp-messages.test.mjs
       - name: Test desktop harness path boundaries
         run: node --test scripts/desktop-harness-paths.test.mjs
+      - name: Test PR disclosure validation
+        run: node --test scripts/pr-ai-disclosure.test.mjs
       - name: Check Rust lints
         if: runner.os == 'Linux'
         run: cargo clippy --locked --all-targets -- -D clippy::correctness

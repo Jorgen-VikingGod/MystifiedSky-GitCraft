@@ -24,4 +24,4 @@ Use [GitHub Issues](https://github.com/MystifiedSky/GitCraft/issues) to track re
 
 Start with a [good first issue](https://github.com/MystifiedSky/GitCraft/labels/good%20first%20issue) or the [contributing guide](../CONTRIBUTING.md). The [validation and optimization checklist](../BUGS_AND_OPTIMIZATIONS.md) records deeper work that still needs investigation. Invite repeat contributors to review areas they know well. Keep release publishing and signing keys with maintainers.
 
-Review new issues and pull requests weekly. Look first for data loss, broken updates, and reports with enough detail to reproduce. Link issues here when they represent a current priority.
+Use the [maintainer guide](MAINTAINING.md) during weekly triage. Link issues here when they represent a current priority.

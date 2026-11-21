@@ -6,12 +6,18 @@ body:
     id: workflow
     attributes:
       label: What are you trying to do?
-      description: Describe your workflow and where you get stuck.
+      description: Describe who needs this, where they get stuck, and any workaround they use today.
     validations:
       required: true
   - type: textarea
     id: outcome
     attributes:
       label: What would a good outcome look like?
+      description: Give a concrete example of the workflow after the change. A proposed implementation is optional.
     validations:
       required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Scope and related work
+      description: If useful, link related issues, identify a small first step, or describe platform and accessibility needs.
