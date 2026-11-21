@@ -6,19 +6,32 @@ body:
     id: environment
     attributes:
       label: GitCraft version, operating system, and Git version
+      placeholder: Include the package format or source build when relevant.
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Steps to reproduce
-      description: Use a disposable repository or the bundled sample. Remove credentials, private URLs, and personal data.
+      description: Use the bundled sample or a disposable repository. Include any starting conditions, such as staged changes or an in-progress merge.
+      placeholder: Number the steps and include the action or shortcut that triggers the problem.
     validations:
       required: true
   - type: textarea
-    id: result
+    id: expected
     attributes:
-      label: Expected and actual behavior
-      description: For Git operations, include what happened to the branch, staging area, or working tree.
+      label: Expected behavior
     validations:
       required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the visible error and any effects on the branch, staging area, working tree, or saved data.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional evidence
+      description: If known, include how often it happens, the last version that worked, related issues, or sanitized logs and screenshots. Remove credentials, private repository URLs, and personal data before posting.

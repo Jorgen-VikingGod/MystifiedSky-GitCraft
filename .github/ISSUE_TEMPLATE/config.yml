@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
+  - name: Contributing guide
+    url: https://github.com/MystifiedSky/GitCraft/blob/main/CONTRIBUTING.md
+    about: Find a first issue and learn how to submit a change.
   - name: Usage questions and early feature feedback
     url: https://discord.gg/BsUgBu65YG
     about: Ask the GitCraft community on Discord.

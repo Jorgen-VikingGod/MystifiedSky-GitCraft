@@ -104,7 +104,7 @@ Choose a theme, shape the graph, and set up the tools that fit your workflow. Gi
 
 Try the [sample repository walkthrough](https://github.com/MystifiedSky/GitCraft/issues/28), [macOS shortcut checks](https://github.com/MystifiedSky/GitCraft/issues/29), [Spanish update setting](https://github.com/MystifiedSky/GitCraft/issues/30), [mixed-DPI graph checks](https://github.com/MystifiedSky/GitCraft/issues/31), or [Linux file reveal checks](https://github.com/MystifiedSky/GitCraft/issues/32).
 
-Code, documentation, and feedback are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to build from source and get involved.
+Code, documentation, and feedback are welcome. See the [contributing guide](CONTRIBUTING.md) to build from source and get involved, or use the [code map](docs/ARCHITECTURE.md) to find the relevant files.
 
 ## License
 

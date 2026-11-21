@@ -45,7 +45,7 @@ Install stable Rust and Node.js 22.12 or later, clone the repository, and use th
 From the directory containing `Cargo.toml` on each OS:
 
 ```bash
-npm --prefix ui ci
+npm --prefix ui ci --ignore-scripts
 npm --prefix ui run build
 npm --prefix ui test
 node --test scripts/changelog-release.test.mjs
@@ -56,6 +56,17 @@ cargo run --locked
 The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Linux runs the GLib security regression as part of the full native suite.
 
 To package the app locally, run `npm --prefix ui run installer`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
+
+## Choose the right checks
+
+| Change | Start with | Evidence to include in the PR |
+| --- | --- | --- |
+| Git reads or writes | An existing Rust fixture near the operation or in [src/regressions.rs](src/regressions.rs) | The starting repo state, the action, and the resulting refs, staged changes, or working files that matter to the fix |
+| Renderer logic or interactions | The nearest frontend test and, for browser interactions, the [browser checks](#headless-component-regression-checks) | The test and outcome, with before and after screenshots for visible changes |
+| Native windows, file dialogs, launchers, credential storage, or updater behavior | A [desktop smoke test](#desktop-smoke-test) on the affected platform | The OS, architecture, package or build tested, and repeatable steps |
+| Documentation or translations | Follow the steps or open the changed screen in the affected language | The command, screen, or links you checked |
+
+For a bug fix, reproduce the original failure when practical and keep the fixture as small as possible. Prefer a disposable repository with synthetic files and a local remote. For example, the [stash regression](src/regressions.rs) checks the live index and unselected work after a stash. If you cannot reproduce a platform-specific report, state the gap in the PR so a reviewer can verify it.
 
 ## Desktop smoke test
 

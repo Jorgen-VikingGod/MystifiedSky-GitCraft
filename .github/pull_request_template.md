@@ -1,13 +1,11 @@
-## What changed?
+## Problem and change
 
-<!-- Describe the behavior and link the issue, if any. -->
+<!-- Describe the user-visible problem or goal and summarize the change. For a bug fix, explain the cause if you found it. Link related issues. Use “Closes #…” only when this PR completes the issue. -->
 
-## How did you verify it?
+## Verification
 
-<!-- List your checks, plus the platform and Git version when relevant. For Git operations, describe the effect on the branch, staging area, and working tree. -->
+<!-- List the checks you ran and their results. For a bug fix, point to the regression test or give repeatable manual steps. Include the platform, Git version, or package format when relevant. Use a disposable repository to verify effects on refs, the staging area, and working files. -->
 
-## Screenshots
+## Review notes
 
-<!-- Add before and after screenshots for visible changes. Use sample or disposable repository data. -->
-
-<!-- Add an Unreleased changelog entry for user-visible changes. Include the source and license for any third-party material. -->
+<!-- Include before and after screenshots for visible changes. Use sample data. Call out compatibility, migration or recovery impact, skipped checks, and anything reviewers should test separately. Add an Unreleased changelog entry when applicable, and include the source and license for third-party material. Delete this section if it does not apply. -->
