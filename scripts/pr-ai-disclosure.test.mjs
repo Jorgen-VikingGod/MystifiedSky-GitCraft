@@ -31,3 +31,9 @@ test("a disclosure in a fenced example or HTML comment does not count", () => {
   assert.match(disclosureError("~~~markdown\n" + body + "\n~~~"), /Add the AI disclosure/);
   assert.match(disclosureError("<!--\n" + body + "\n-->"), /Add the AI disclosure/);
 });
+
+test("comment markers in fenced code do not hide a disclosure", () => {
+  const body = "## AI disclosure\n- [x] I did not use AI for this PR.";
+  assert.equal(disclosureError("```html\n<!--\n```\n\n" + body), undefined);
+  assert.equal(disclosureError("<!--\n```html\n-->\n\n" + body), undefined);
+});

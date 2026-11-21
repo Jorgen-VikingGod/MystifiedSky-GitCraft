@@ -16,6 +16,7 @@ Use these review practices as responsibilities are shared across more contributo
 - For changes that write Git state, inspect the success and failure paths. Check the relevant refs, index, and working tree on a disposable repository. For UI changes, ask for before and after screenshots with sample data. For platform changes, identify the native platforms tested and any verification still pending.
 - Separate changes required for correctness from optional suggestions. Record blockers in the PR so the author and later reviewers can see what remains.
 - Check the AI disclosure for each PR. If AI was used, look for the tools and how they contributed, plus the author’s verification. For an automated dependency PR, a maintainer can complete the disclosure after confirming which automation authored it.
+- Review changes to CI workflows and their validators directly. A PR can change the code that runs its checks.
 - Confirm the required CI checks passed for the current revision before merging. Verify changelog entries, compatibility notes, and third-party notices when they apply. Use the [release guide](../RELEASING.md) when a change needs preview testing.
 
 ## Share responsibility

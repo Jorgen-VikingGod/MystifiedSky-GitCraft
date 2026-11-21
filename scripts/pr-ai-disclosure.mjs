@@ -2,20 +2,28 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export function disclosureError(body) {
-  // Ignore template comments and quoted examples in fenced blocks.
-  const lines = (body ?? "")
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, "")
-    .split(/\r?\n/);
+  // Ignore comments and fenced code without reading their contents as Markdown.
   const visible = [];
   let fence;
-  for (const line of lines) {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  let inComment = false;
+  for (const line of (body ?? "").split(/\r?\n/)) {
+    const marker = inComment ? null : line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
     } else if (marker) {
       fence = marker[1];
     } else {
-      visible.push(line);
+      let content = "";
+      let rest = line;
+      while (rest) {
+        const delimiter = inComment ? "-->" : "<!--";
+        const index = rest.indexOf(delimiter);
+        if (!inComment) content += index < 0 ? rest : rest.slice(0, index);
+        if (index < 0) break;
+        inComment = !inComment;
+        rest = rest.slice(index + delimiter.length);
+      }
+      visible.push(content);
     }
   }
 
@@ -39,8 +47,8 @@ export function disclosureError(body) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-  const error = disclosureError(event.pull_request?.body);
+  const pullRequest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+  const error = disclosureError(pullRequest.body);
   if (error) {
     console.error(error);
     process.exitCode = 1;

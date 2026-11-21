@@ -33,6 +33,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Document source setup with dependency installation scripts disabled.
 - Build the desktop interface with a faster bundler.
 - Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
 - Update the libraries for native file dialogs, file watching, and terminal links.
