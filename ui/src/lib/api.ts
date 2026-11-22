@@ -288,7 +288,7 @@ export type Action =
   | { type: "restoreDiscard"; reference: string }
   | { type: "commit"; summary: string; description: string; amend: boolean; stageAll: boolean; skipHooks?: boolean; stripComments?: boolean; signOff?: boolean }
   | { type: "checkout"; target: string }
-  | { type: "checkoutRemote"; remoteBranch: string }
+  | { type: "checkoutRemote"; remoteBranch: string; stashIfNeeded?: boolean }
   | { type: "checkoutPullRequest"; url: string; reference: string; expected: string }
   | { type: "createBranch"; name: string; at: string | null; checkout: boolean }
   | { type: "deleteBranch"; name: string }

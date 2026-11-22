@@ -185,7 +185,11 @@ impl Terminals {
                         pending.extend_from_slice(&buf[..n]);
                         let text = take_utf8(&mut pending);
                         if !text.is_empty() {
-                            if !output.reserve(text.len()) { break; }
+                            if !output.reserve(text.len()) {
+                                // Older Windows pseudoconsoles can wait for their final output to be read during shutdown.
+                                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                                break;
+                            }
                             on_data(id, text);
                         }
                     }
@@ -250,11 +254,16 @@ impl Terminals {
         for session in removed { Self::stop(session); }
     }
 
-    fn stop(mut session: Session) {
-        session.output.close();
-        if let Some(tree) = &session.tree { tree.kill(); }
-        let _ = session.child.kill();
-        std::thread::spawn(move || { let _ = session.child.wait(); });
+    fn stop(session: Session) {
+        let Session { mut child, tree, master, output, .. } = session;
+        output.close();
+        if let Some(tree) = &tree { tree.kill(); }
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            // Releasing the master can block while the reader drains the pseudoconsole.
+            drop(master);
+            let _ = child.wait();
+        });
     }
 }
 
@@ -338,19 +347,35 @@ mod tests {
 
     #[test]
     fn closing_one_window_preserves_other_terminal_sessions() {
-        let terminals = Terminals::default();
-        let directory = std::env::temp_dir();
-        let open = |owner| terminals.open(owner, || true, "", &directory.to_string_lossy(), 80, 24, None,
-            Arc::new(|_, _| {}), Arc::new(|_| {})).unwrap();
-        let first = open("first");
-        let second = open("second");
-        assert!(terminals.resize("first", second, 80, 24).is_err());
-        terminals.close("first", second);
-        terminals.close_window("first");
-        assert!(terminals.resize("first", first, 80, 24).is_err());
-        assert!(terminals.resize("second", second, 80, 24).is_ok());
-        terminals.close_all();
-        assert!(terminals.pending_output().is_empty());
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::Duration;
+
+        let timeout = Duration::from_secs(15);
+        let (finished, done) = channel();
+        let worker = std::thread::spawn(move || {
+            let terminals = Terminals::default();
+            let directory = std::env::temp_dir();
+            let (exited, exits) = channel();
+            let open = |owner| {
+                let exited = exited.clone();
+                terminals.open(owner, || true, "", &directory.to_string_lossy(), 80, 24, None,
+                    Arc::new(|_, _| {}), Arc::new(move |id| { let _ = exited.send(id); })).unwrap()
+            };
+            let first = open("first");
+            let second = open("second");
+            assert!(terminals.resize("first", second, 80, 24).is_err());
+            terminals.close("first", second);
+            terminals.close_window("first");
+            assert!(terminals.resize("first", first, 80, 24).is_err());
+            assert!(terminals.resize("second", second, 80, 24).is_ok());
+            assert_eq!(exits.recv_timeout(timeout).expect("first terminal did not stop"), first);
+            terminals.close_all();
+            assert!(terminals.pending_output().is_empty());
+            assert_eq!(exits.recv_timeout(timeout).expect("second terminal did not stop"), second);
+            let _ = finished.send(());
+        });
+        assert_ne!(done.recv_timeout(timeout * 3), Err(RecvTimeoutError::Timeout), "terminal shutdown blocked");
+        worker.join().unwrap();
     }
 
     #[test]

@@ -1001,10 +1001,181 @@ fn remote_checkout_requires_the_existing_local_branch_to_track_that_remote() {
     assert!(git::run(d,&["update-ref","refs/remotes/origin/topic",&local]).ok);assert!(git::run(d,&["update-ref","refs/remotes/upstream/topic",&base]).ok);
     assert!(git::run(d,&["branch","--set-upstream-to=origin/topic","topic"]).ok);assert!(git::run(d,&["checkout","-q","main"]).ok);
     let engine=Engine::default();let repo=d.to_string_lossy();
-    let rejected=engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()});assert!(!rejected.ok);assert!(rejected.message.contains("does not track"));assert_eq!(head(d),base);
-    assert!(git::run(d,&["branch","--unset-upstream","topic"]).ok);assert!(!engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()}).ok);
-    assert!(git::run(d,&["branch","--set-upstream-to=upstream/topic","topic"]).ok);assert!(engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into()}).ok);assert_eq!(head(d),local);
+    let rejected=engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false });assert!(!rejected.ok);assert!(rejected.message.contains("does not track"));assert_eq!(head(d),base);
+    assert!(git::run(d,&["branch","--unset-upstream","topic"]).ok);assert!(!engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false }).ok);
+    assert!(git::run(d,&["branch","--set-upstream-to=upstream/topic","topic"]).ok);assert!(engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false }).ok);assert_eq!(head(d),local);
     assert_eq!(git::run(d,&["rev-parse","--symbolic-full-name","topic@{upstream}"]).stdout.trim(),"refs/remotes/upstream/topic");
+}
+
+/// A fixture with `topic` tracking `origin/topic`, where the remote branch moved on by `remote_commits` commits that edit `file.txt`.
+fn tracked_topic_behind(label: &str, remote_commits: usize) -> (tempfile::TempDir, String, String) {
+    let folder = fixture(label); let d = folder.path();
+    assert!(git::run(d, &["remote", "add", "origin", "https://origin.example.invalid/repo"]).ok);
+    assert!(git::run(d, &["checkout", "-qb", "topic"]).ok);
+    let local = head(d);
+    assert!(git::run(d, &["update-ref", "refs/remotes/origin/topic", &local]).ok);
+    assert!(git::run(d, &["branch", "--set-upstream-to=origin/topic", "topic"]).ok);
+    assert!(git::run(d, &["checkout", "-qb", "scratch"]).ok);
+    for number in 0..remote_commits {
+        std::fs::write(d.join("file.txt"), format!("remote {number}\n")).unwrap();
+        assert!(git::run(d, &["commit", "-qam", &format!("remote {number}")]).ok);
+    }
+    let remote = head(d);
+    assert!(git::run(d, &["update-ref", "refs/remotes/origin/topic", &remote]).ok);
+    assert!(git::run(d, &["checkout", "-q", "main"]).ok);
+    assert!(git::run(d, &["branch", "-D", "scratch"]).ok);
+    (folder, local, remote)
+}
+
+fn current_branch(path: &Path) -> String { git::run(path, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_owned() }
+
+#[test]
+fn double_clicking_a_newer_remote_branch_fast_forwards_the_tracking_branch() {
+    let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-ff-", 2); let d = folder.path();
+    let engine = Engine::default(); let repo = d.to_string_lossy();
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(result.ok, "{}", result.message); assert!(result.message.contains("fast-forwarded"), "{}", result.message);
+    assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), remote);
+    assert_eq!(git::run(d, &["rev-parse", "refs/heads/topic"]).stdout.trim(), remote);
+    assert_eq!(std::fs::read_to_string(d.join("file.txt")).unwrap().replace("\r\n", "\n"), "remote 1\n");
+    assert_eq!(git::run(d, &["rev-list", "--merges", "--count", "main..topic"]).stdout.trim(), "0");
+    // Undo reverses the fast-forward first, then the switch.
+    assert!(engine.perform(&repo, Action::Undo).ok); assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), local);
+    assert!(engine.perform(&repo, Action::Undo).ok); assert_eq!(current_branch(d), "main");
+}
+
+#[test]
+fn double_clicking_the_remote_of_the_current_branch_fast_forwards_it_in_place() {
+    let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-ff-current-", 1); let d = folder.path();
+    assert!(git::run(d, &["checkout", "-q", "topic"]).ok); assert_eq!(head(d), local);
+    let engine = Engine::default(); let repo = d.to_string_lossy();
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(result.ok, "{}", result.message); assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), remote);
+    // Already level: nothing moves and nothing is recorded to undo.
+    let again = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(again.ok && again.message.contains("already up to date"), "{}", again.message); assert_eq!(head(d), remote);
+    assert!(engine.perform(&repo, Action::Undo).ok); assert_eq!(head(d), local);
+}
+
+#[test]
+fn a_diverged_or_ahead_tracking_branch_is_switched_to_but_never_merged_or_reset() {
+    let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-diverged-", 1); let d = folder.path();
+    let engine = Engine::default(); let repo = d.to_string_lossy();
+    assert!(git::run(d, &["checkout", "-q", "topic"]).ok); std::fs::write(d.join("other.txt"), "mine\n").unwrap();
+    assert!(git::run(d, &["add", "other.txt"]).ok); assert!(git::run(d, &["commit", "-qm", "local only"]).ok); let mine = head(d);
+    assert_ne!(mine, local);
+    assert!(git::run(d, &["checkout", "-q", "main"]).ok);
+    let diverged = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(diverged.ok && diverged.message.contains("diverged"), "{}", diverged.message);
+    assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), mine); assert_ne!(head(d), remote);
+    let still = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(still.ok && still.message.contains("diverged"), "{}", still.message); assert_eq!(head(d), mine);
+    // Ahead only: the remote is an ancestor of the local branch.
+    assert!(git::run(d, &["update-ref", "refs/remotes/origin/topic", &local]).ok);
+    let ahead = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(ahead.ok && ahead.message.contains("ahead"), "{}", ahead.message); assert_eq!(head(d), mine);
+}
+
+#[test]
+fn a_fast_forward_that_would_overwrite_local_edits_keeps_them_and_the_branch_in_place() {
+    let (folder, local, _remote) = tracked_topic_behind("gitcraft-remote-ff-dirty-", 1); let d = folder.path();
+    assert!(git::run(d, &["checkout", "-q", "topic"]).ok);
+    std::fs::write(d.join("file.txt"), "unsaved local edit\n").unwrap();
+    let engine = Engine::default(); let repo = d.to_string_lossy();
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(!result.ok && result.message.starts_with("Local changes block this checkout."), "{}", result.message);
+    assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), local);
+    assert_eq!(std::fs::read_to_string(d.join("file.txt")).unwrap().replace("\r\n", "\n"), "unsaved local edit\n");
+    // Staged, unstaged and untracked edits to unrelated paths stay in place.
+    assert!(git::run(d, &["checkout", "--", "file.txt"]).ok); std::fs::write(d.join("untouched.txt"), "scratch\n").unwrap();
+    std::fs::write(d.join("staged.txt"), "staged contents\n").unwrap();
+    assert!(git::run(d, &["add", "staged.txt"]).ok);
+    std::fs::write(d.join("staged.txt"), "working contents\n").unwrap();
+    let retry = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    assert!(retry.ok && retry.message.starts_with("Fast-forwarded"), "{}", retry.message);
+    let updated = head(d);
+    let undo = engine.perform(&repo, Action::Undo);
+    assert!(!undo.ok && undo.message.contains("staged changes"), "{}", undo.message);
+    assert_eq!(head(d), updated);
+    assert_eq!(git::run(d, &["show", ":staged.txt"]).stdout.trim(), "staged contents");
+    assert_eq!(std::fs::read_to_string(d.join("staged.txt")).unwrap(), "working contents\n");
+    assert_eq!(std::fs::read_to_string(d.join("untouched.txt")).unwrap(), "scratch\n");
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+}
+
+#[test]
+fn remote_checkout_can_save_blocking_edits_before_fast_forwarding() {
+    let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-ff-stash-", 1);
+    let d = folder.path();
+    assert!(git::run(d, &["switch", "--quiet", "topic"]).ok);
+    std::fs::write(d.join("file.txt"), "my staged changes\n").unwrap();
+    assert!(git::run(d, &["add", "file.txt"]).ok);
+    std::fs::write(d.join("file.txt"), "my unstaged changes\n").unwrap();
+    std::fs::write(d.join("untracked.txt"), "my untracked file\n").unwrap();
+    // The repository's merge settings must not stash or reapply changes implicitly.
+    assert!(git::run(d, &["config", "merge.autostash", "true"]).ok);
+    let engine = Engine::default();
+    let repo = d.to_string_lossy();
+    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed };
+    let blocked = engine.perform(&repo, action(false));
+    assert!(!blocked.ok && blocked.message.starts_with("Local changes block this checkout."), "{}", blocked.message);
+    assert_eq!(head(d), local);
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+
+    let result = engine.perform(&repo, action(true));
+    assert!(result.ok && result.message.contains("saved in the stash"), "{}", result.message);
+    assert_eq!(head(d), remote);
+    assert!(git::run(d, &["status", "--porcelain"]).stdout.is_empty());
+    let stashes = git::run(d, &["stash", "list"]);
+    assert_eq!(stashes.stdout.lines().count(), 1);
+    assert!(stashes.stdout.contains("Changes before checking out origin/topic"));
+    for (revision, contents) in [("stash@{0}:file.txt", "my unstaged changes"),
+        ("stash@{0}^2:file.txt", "my staged changes"), ("stash@{0}^3:untracked.txt", "my untracked file")] {
+        assert_eq!(git::run(d, &["show", revision]).stdout.trim(), contents);
+    }
+    assert!(engine.perform(&repo, Action::Undo).ok);
+    assert_eq!(head(d), local);
+    assert!(git::run(d, &["stash", "apply", "--index", "stash@{0}"]).ok);
+    assert_eq!(git::run(d, &["show", ":file.txt"]).stdout.trim(), "my staged changes");
+    assert_eq!(std::fs::read_to_string(d.join("file.txt")).unwrap().trim(), "my unstaged changes");
+    assert_eq!(std::fs::read_to_string(d.join("untracked.txt")).unwrap().trim(), "my untracked file");
+}
+
+#[test]
+fn creating_a_tracking_branch_protects_an_untracked_file_on_checkout() {
+    let folder = fixture("gitcraft-remote-new-dirty-");
+    let d = folder.path();
+    assert!(git::run(d, &["remote", "add", "origin", "https://origin.example.invalid/repo"]).ok);
+    assert!(git::run(d, &["switch", "-q", "-c", "scratch"]).ok);
+    std::fs::write(d.join("collision.txt"), "remote file\n").unwrap();
+    assert!(git::run(d, &["add", "collision.txt"]).ok);
+    assert!(git::run(d, &["commit", "-qm", "remote file"]).ok);
+    let remote = head(d);
+    assert!(git::run(d, &["update-ref", "refs/remotes/origin/topic", &remote]).ok);
+    assert!(git::run(d, &["switch", "-q", "main"]).ok);
+    std::fs::write(d.join("collision.txt"), "local untracked file\n").unwrap();
+    let engine = Engine::default();
+    let repo = d.to_string_lossy();
+    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed };
+    let excludes = d.join(".git/info/exclude");
+    let original_excludes = std::fs::read(&excludes).unwrap_or_default();
+    std::fs::write(&excludes, "collision.txt\n").unwrap();
+    let ignored = engine.perform(&repo, action(true));
+    assert!(!ignored.ok, "{}", ignored.message);
+    assert_eq!(current_branch(d), "main");
+    assert_eq!(std::fs::read_to_string(d.join("collision.txt")).unwrap(), "local untracked file\n");
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+    std::fs::write(&excludes, original_excludes).unwrap();
+    let blocked = engine.perform(&repo, action(false));
+    assert!(!blocked.ok && blocked.message.starts_with("Local changes block this checkout."), "{}", blocked.message);
+    assert_eq!(current_branch(d), "main");
+    assert_eq!(std::fs::read_to_string(d.join("collision.txt")).unwrap(), "local untracked file\n");
+    let result = engine.perform(&repo, action(true));
+    assert!(result.ok && result.message.contains("saved in the stash"), "{}", result.message);
+    assert_eq!(current_branch(d), "topic");
+    assert_eq!(head(d), remote);
+    assert_eq!(git::run(d, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).stdout.trim(), "refs/remotes/origin/topic");
+    assert_eq!(git::run(d, &["show", "stash@{0}^3:collision.txt"]).stdout.trim(), "local untracked file");
 }
 
 #[test]

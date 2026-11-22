@@ -104,7 +104,7 @@ export function LeftPanel({ repo, tabId, onSelectSha }: { repo: RepoView | undef
             repo && !isHead && act(repo.path, r.kind === "Remote" ? { type: "checkoutRemote", remoteBranch: r.name } : { type: "checkout", target: r.name })
           }
           className={isHead ? "bg-good/20 text-white" : undefined}
-          title={isHead ? "Checked out" : "Double-click to checkout"}
+          title={isHead ? "Checked out" : r.kind === "Remote" ? "Double-click to check out and fast-forward the local branch if it's behind" : "Double-click to checkout"}
           action={repo && (
             <button
               title={hiddenList.includes(r.full) ? "Show in the graph" : "Hide in the graph"}

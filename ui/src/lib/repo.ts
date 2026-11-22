@@ -281,6 +281,7 @@ const BUSY_LABEL: Partial<Record<Action["type"], string>> = {
   deleteRemoteTag: "Deleting remote tag…",
   commit: "Committing…",
   checkout: "Checking out…",
+  checkoutRemote: "Checking out remote branch…",
   merge: "Merging…",
   rebase: "Rebasing…",
   stash: "Stashing…",
@@ -341,6 +342,16 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   actionChanges.set(path, { full: false });
   try {
     const r = await api.run(path, action);
+    if (!r.ok && !quiet && action.type === "checkoutRemote" && !action.stashIfNeeded && r.message.startsWith("Local changes block this checkout.")) {
+      confirmThen(
+        "Stash changes and continue?",
+        `Git needs to replace files that have local changes. Save your staged, unstaged, and untracked changes in a named stash, then retry checking out ${action.remoteBranch}. You can restore the stash when you're ready.\n\n${r.message}`,
+        "Stash and continue",
+        () => void act(path, { ...action, stashIfNeeded: true }),
+        false,
+      );
+      return false;
+    }
     if (!r.ok && action.type === "push" && !action.force && r.message === "This repository has no remote to push to. Add one first.") {
       confirmThen(
         "No remote to push to",
@@ -377,7 +388,8 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
       void offerSignInHelp(path, action, r.message);
       return false;
     }
-    if (!r.ok || (!quiet && st.settings.notifySuccess)) st.toast(r.ok, r.message);
+    const checkoutStashed = action.type === "checkoutRemote" && action.stashIfNeeded && r.message.includes("Your local changes are saved in the stash");
+    if (!r.ok || (!quiet && (st.settings.notifySuccess || checkoutStashed))) st.toast(r.ok, r.message);
     ok = r.ok;
     await afterAction(path, action, r.ok, r.message, wasMerging);
     return r.ok;

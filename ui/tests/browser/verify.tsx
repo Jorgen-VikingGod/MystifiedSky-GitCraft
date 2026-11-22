@@ -82,6 +82,32 @@ await test("B025 empty upstream submission",async()=>{
   await until(()=>calls.some(call=>call.command==="run_action"&&call.args.action.type==="setUpstream"),"upstream action");
   assert(calls.find(call=>call.command==="run_action")!.args.action.upstream==="","Empty upstream was rejected");
 });
+await test("Remote branch double-click offers a stash only after Git reports blocking edits", async () => {
+  repo.refs = [{ name: "origin/topic", full: "refs/remotes/origin/topic", kind: "Remote", sha: sha("b"), upstream: null, ahead: 0, behind: 0 }];
+  handlers.run_action = ({ action }) => action.stashIfNeeded
+    ? { ok: true, message: "Fast-forwarded topic to origin/topic. Your local changes are saved in the stash." }
+    : { ok: false, message: "Local changes block this checkout.\n\nGit would overwrite tracked.txt." };
+  mount(<><LeftPanel repo={repo} tabId={tabId} onSelectSha={() => {}} /><Dialogs /></>);
+  const section = button("REMOTE");
+  assert(section, "Remote section missing");
+  section.click();
+  const row = () => document.querySelector(`[title="Double-click to check out and fast-forward the local branch if it's behind"] > button`);
+  await until(() => !!row(), "remote branch row");
+  const doubleClick = () => row()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const actions = () => calls.filter(call => call.command === "run_action").map(call => call.args.action);
+  doubleClick();
+  await until(() => !!button("Stash and continue"), "stash confirmation");
+  assert(actions().length === 1 && !actions()[0].stashIfNeeded, "Checkout attempted to stash before confirmation");
+  button("Cancel")!.click();
+  await until(() => !button("Stash and continue") && useStore.getState().busy === null, "cancelled checkout");
+  assert(actions().length === 1, "Cancel retried the checkout");
+  doubleClick();
+  await until(() => !!button("Stash and continue"), "second stash confirmation");
+  button("Stash and continue")!.click();
+  await until(() => actions().length === 3 && useStore.getState().busy === null, "confirmed checkout retry");
+  const retry = actions()[2];
+  assert(retry.type === "checkoutRemote" && retry.remoteBranch === "origin/topic" && retry.stashIfNeeded, "Retry did not use the confirmed remote branch and stash mode");
+});
 await test("B035 delayed commit retains next draft",async()=>{
   repo.status.staged=[{path:"a.txt",status:"M"}];useStore.getState().setDraft(repo.path,{summary:"First draft",description:"",amend:false});
   let release!:(value:any)=>void;handlers.run_action=()=>new Promise(resolve=>{release=resolve;});

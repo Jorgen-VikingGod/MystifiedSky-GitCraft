@@ -78,6 +78,11 @@ fn branch_config(dir: &Path, name: &str) -> Result<Vec<(String,String)>, git::Gi
 /// (a stash with no local changes is refused instead of reported as done).
 pub const STASH_NOTHING: &str = "No local changes to save";
 
+fn checkout_would_overwrite(out: &git::GitOut) -> bool {
+    !out.ok && (out.stderr.contains("would be overwritten by checkout")
+        || out.stderr.contains("would be overwritten by merge"))
+}
+
 /// A stash's name: the typed message trimmed, else "WIP on <short branch>", or "WIP on (no branch)" when
 /// HEAD is detached.
 pub fn stash_message(message: &str, branch: &str) -> String {
@@ -113,7 +118,7 @@ pub enum Action {
         sign_off: bool,
     },
     Checkout { target: String },
-    CheckoutRemote { remote_branch: String },
+    CheckoutRemote { remote_branch: String, #[serde(default)] stash_if_needed: bool },
     CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
     DeleteBranch { name: String },
@@ -242,7 +247,7 @@ enum UndoRec {
     Discard { stash: String, paths: Option<Vec<String>>, redo_state: Option<String> },
     Patch { patch: String, cached: bool, reverse: bool, label: String },
     /// History rewritten (rebase, cherry pick, fast-forward): move the branch back with reset --keep.
-    Rewrite { before: String, after: String, label: String, branch: String },
+    Rewrite { before: String, after: String, label: String, branch: String, #[serde(default)] protect_index: bool },
 }
 
 impl UndoRec {
@@ -512,6 +517,105 @@ impl Engine {
         }
     }
 
+    fn check_stash_allowed(&self, dir: &Path) -> Result<(), git::GitOut> {
+        let unmerged = self.git(dir, &["ls-files", "--unmerged", "-z"]);
+        if !unmerged.ok { return Err(unmerged); }
+        if !unmerged.stdout.is_empty() || ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]
+            .iter().any(|state| self.in_progress(dir, state)) {
+            return Err(git::GitOut::failed("Finish or abort the current merge, rebase or replay before stashing. Its conflict state was kept."));
+        }
+        Ok(())
+    }
+
+    fn checkout_remote(&self, repo: &str, remote_branch: &str, stash_if_needed: bool) -> Result<String, String> {
+        let dir = Path::new(repo);
+        let local = remote_branch.split_once('/').map(|(_, branch)| branch).unwrap_or(remote_branch);
+        let selected = format!("refs/remotes/{remote_branch}");
+        let target = self.rev(dir, &format!("{selected}^{{commit}}"));
+        let valid_branch = self.git(dir, &["check-ref-format", "--branch", local]);
+        if target.is_empty() || !valid_branch.ok || valid_branch.stdout.trim() != local {
+            return Err("That remote branch is no longer available. Refresh the repository and try again.".into());
+        }
+
+        let local_ref = format!("refs/heads/{local}");
+        let local_sha = self.rev(dir, &local_ref);
+        let exists = !local_sha.is_empty();
+        if exists {
+            let upstream = self.git(dir, &["rev-parse", "--symbolic-full-name", "--verify", &format!("{local}@{{upstream}}")]);
+            if !upstream.ok || upstream.stdout.trim() != selected {
+                return Err(format!("Local branch '{local}' does not track '{remote_branch}'. Create a differently named local branch from the selected remote commit, or explicitly change its upstream before checking it out."));
+            }
+        }
+
+        let behind = exists && local_sha != target && git::run(dir, &["merge-base", "--is-ancestor", &local_sha, &target]).ok;
+        let already_on_local = exists && self.branch_ref(dir) == local_ref;
+        if !already_on_local {
+            crate::manage::require_lfs_for_checkout(dir, if exists { &local_sha } else { &target })?;
+        }
+        if behind {
+            crate::manage::require_lfs_for_checkout(dir, &target)?;
+        }
+
+        let stash_name = format!("Changes before checking out {remote_branch}");
+        let mut stashed = false;
+        let mut run = |args: &[&str]| -> Result<(), String> {
+            let out = self.git(dir, args);
+            if out.ok { return Ok(()); }
+            if checkout_would_overwrite(&out) && !stashed {
+                if !stash_if_needed {
+                    return Err(format!("Local changes block this checkout.\n\n{}", out.message()));
+                }
+                self.check_stash_allowed(dir).map_err(|error| error.message())?;
+                let saved = self.git(dir, &["stash", "push", "--include-untracked", "-m", &stash_name]);
+                if !saved.ok { return Err(format!("Could not save local changes in a stash.\n\n{}", saved.message())); }
+                if saved.stdout.lines().any(|line| line.trim() == STASH_NOTHING) {
+                    return Err(out.message());
+                }
+                stashed = true;
+                let retry = self.git(dir, args);
+                if retry.ok { return Ok(()); }
+                return Err(retry.message());
+            }
+            Err(out.message())
+        };
+
+        let update = (|| {
+            if !already_on_local {
+                let from = self.head_name(dir);
+                if exists {
+                    run(&["switch", "-q", "--no-guess", "--no-overwrite-ignore", "--", local])?;
+                } else {
+                    run(&["switch", "-q", "--no-overwrite-ignore", "--track", "-c", local, &selected])?;
+                }
+                self.push_undo(repo, UndoRec::Checkout { from, to: local.to_string() });
+            }
+            if behind {
+                if self.branch_ref(dir) != local_ref || self.rev(dir, "HEAD") != local_sha {
+                    return Err("The local branch changed during checkout. Refresh and try again.".into());
+                }
+                run(&["merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--no-edit", &target])
+                    .map_err(|error| if already_on_local { error } else { format!("{error}\n\nThe local branch {local} is checked out.") })?;
+                if self.branch_ref(dir) != local_ref || self.rev(dir, "HEAD") != target {
+                    return Err("The local branch changed during the fast-forward. Refresh and review its current state.".into());
+                }
+                self.push_undo(repo, UndoRec::Rewrite { before: local_sha, after: target, branch: local_ref, label: format!("fast-forward {local}"), protect_index: true });
+                return Ok(if already_on_local { format!("Fast-forwarded {local} to {remote_branch}") } else { format!("Checked out {local} and fast-forwarded it to {remote_branch}") });
+            }
+            if !exists { return Ok(format!("Checked out {local}")); }
+            let summary = if local_sha == target { format!("{local} is already up to date with {remote_branch}.") }
+                else if git::run(dir, &["merge-base", "--is-ancestor", &target, &local_sha]).ok { format!("{local} is ahead of {remote_branch}.") }
+                else { format!("{local} has diverged from {remote_branch}. Merge or rebase to combine them.") };
+            Ok(if already_on_local { summary } else { format!("Checked out {local}. {summary}") })
+        })();
+
+        if stashed {
+            let saved = format!("Your local changes are saved in the stash “{stash_name}”.");
+            update.map(|message| format!("{}. {saved}", message.trim_end_matches('.'))).map_err(|error| format!("{saved}\n\n{error}"))
+        } else {
+            update
+        }
+    }
+
     /// Merge commits require an explicit mainline; reject stale or invalid choices before changing HEAD.
     fn apply_commit(&self, dir: &Path, sha: &str, mainline: Option<usize>, revert: bool) -> ActionResult {
         let resolved = git::run(dir, &["rev-parse", "--verify", "--end-of-options", &format!("{sha}^{{commit}}")]);
@@ -653,32 +757,11 @@ impl Engine {
                 if result.ok { self.push_undo(repo, UndoRec::Checkout { from, to: expected }); }
                 done(result, "Checked out the pull request's source commit")
             }
-            Action::CheckoutRemote { remote_branch } => {
-                let local = remote_branch.split_once('/').map(|x| x.1).unwrap_or(&remote_branch).to_string();
-                let selected = format!("refs/remotes/{remote_branch}");
-                if !self.git(dir, &["check-ref-format", "--branch", &local]).ok || self.rev(dir, &selected).is_empty() {
-                    return done(git::GitOut::failed("That remote branch is no longer available. Refresh the repository and try again."), "");
+            Action::CheckoutRemote { remote_branch, stash_if_needed } => {
+                match self.checkout_remote(repo, &remote_branch, stash_if_needed) {
+                    Ok(message) => ActionResult { ok: true, message },
+                    Err(message) => ActionResult { ok: false, message },
                 }
-                let exists = !self.rev(dir, &format!("refs/heads/{local}")).is_empty();
-                if exists {
-                    let upstream = self.git(dir, &["rev-parse", "--symbolic-full-name", "--verify", &format!("{local}@{{upstream}}")]);
-                    if !upstream.ok || upstream.stdout.trim() != selected {
-                        return done(git::GitOut::failed(&format!("Local branch '{local}' does not track '{remote_branch}'. Create a differently named local branch from the selected remote commit, or explicitly change its upstream before checking it out.")), "");
-                    }
-                }
-                if let Err(error) = crate::manage::require_lfs_for_checkout(dir, if exists { &local } else { &selected }) {
-                    return done(git::GitOut::failed(&error), "");
-                }
-                let from = self.head_name(dir);
-                let o = if exists {
-                    self.git(dir, &["checkout", "-q", &local])
-                } else {
-                    self.git(dir, &["checkout", "-q", "-b", &local, "--track", &remote_branch])
-                };
-                if o.ok {
-                    self.push_undo(repo, UndoRec::Checkout { from, to: local.clone() });
-                }
-                done(o, &format!("Checked out {local}"))
             }
             Action::CreateBranch { name, at, checkout } => {
                 let name = name.trim().replace(' ', "-");
@@ -799,7 +882,7 @@ impl Engine {
                 };
                 if out.ok && !before.is_empty() && self.branch_ref(dir) == branch {
                     let after = self.rev(dir, "HEAD");
-                    if after != before && !after.is_empty() { self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "pull (local branch)".into() }); }
+                    if after != before && !after.is_empty() { self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "pull (local branch)".into(), protect_index: false }); }
                 }
                 done(out, message)
             }
@@ -864,11 +947,7 @@ impl Engine {
                 done(self.job(repo, "push", dir, &["push", "--set-upstream", "--progress", &remote, &refspec]), &format!("Pushed {branch}"))
             }
             Action::Stash { ref message } | Action::StashKeepIndex { ref message } | Action::StashUntracked { ref message } => {
-                let unmerged=self.git(dir, &["ls-files", "--unmerged", "-z"]);
-                if !unmerged.ok { return done(unmerged, ""); }
-                if !unmerged.stdout.is_empty() || ["MERGE_HEAD","CHERRY_PICK_HEAD","REVERT_HEAD","rebase-merge","rebase-apply","sequencer"].iter().any(|state|self.in_progress(dir,state)) {
-                    return done(git::GitOut::failed("Finish or abort the current merge, rebase or replay before stashing. Its conflict state was kept."), "");
-                }
+                if let Err(error) = self.check_stash_allowed(dir) { return done(error, ""); }
                 let branch = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_string();
                 let msg = stash_message(message, &branch);
                 let o = match action {
@@ -922,7 +1001,7 @@ impl Engine {
                 let o = self.git(dir, &["rebase", "--autostash", &onto]);
                 if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}") });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("rebase onto {onto}"), protect_index: false });
                 }
                 done(o, &format!("Rebased onto {onto}"))
             }
@@ -952,7 +1031,7 @@ impl Engine {
                     if let Some((before, branch)) = original {
                         let after = self.rev(dir, "HEAD");
                         if before != after && !after.is_empty() && self.branch_ref(dir) == branch && crate::rewrite::replay_original(dir).is_none() {
-                            self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "rebase".into() });
+                            self.push_undo(repo, UndoRec::Rewrite { before, after, branch, label: "rebase".into(), protect_index: false });
                         }
                     }
                 }
@@ -1344,7 +1423,7 @@ impl Engine {
                     ActionResult { ok: true, message: "Rebase paused. Amend or split the commit, then choose Continue Rebase.".into() }
                 } else if o.ok {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive rebase".into() });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive rebase".into(), protect_index: false });
                     ActionResult { ok: true, message: "Rebase complete".into() }
                 } else if self.in_progress(dir, "rebase-merge") {
                     ActionResult { ok: false, message: "The rebase paused. Check conflicts or the Git activity log, then continue, skip, or abort the rebase.".into() }
@@ -1357,7 +1436,7 @@ impl Engine {
                 let o = crate::rewrite::interactive_cherry_pick(dir, &items, skip_hooks);
                 let after = self.rev(dir, "HEAD");
                 if after != before {
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive cherry pick".into() });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: "interactive cherry pick".into(), protect_index: false });
                 }
                 done(o, "Cherry pick complete")
             }
@@ -1436,7 +1515,7 @@ impl Engine {
                 };
                 if o.ok && head == branch {
                     let after = self.rev(dir, "HEAD");
-                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}") });
+                    self.push_undo(repo, UndoRec::Rewrite { before, after, branch: self.branch_ref(dir), label: format!("fast-forward {branch}"), protect_index: false });
                 }
                 done(o, &format!("Fast-forwarded {branch} to {to}"))
             }
@@ -1531,6 +1610,13 @@ impl Engine {
             let expected = if undo { after } else { before };
             if self.branch_ref(dir) != *branch || self.rev(dir, "HEAD") != *expected {
                 return git::GitOut::failed("Return to the original branch and commit before undoing or redoing this action; the repository has changed.");
+            }
+        }
+        if matches!(rec, UndoRec::Rewrite { protect_index: true, .. }) {
+            let staged = self.git(dir, &["diff", "--cached", "--name-only", "-z"]);
+            if !staged.ok { return staged; }
+            if !staged.stdout.is_empty() {
+                return git::GitOut::failed("Stash or commit staged changes before undoing or redoing this fast-forward. The staged changes were kept.");
             }
         }
         if let UndoRec::InitialCommit { after, branch, .. } = rec {
