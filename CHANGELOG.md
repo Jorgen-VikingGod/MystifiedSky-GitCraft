@@ -41,6 +41,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts.
 - In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
 - Show the first bad bisect commit on newer Git versions.
 - Close repository windows independently, save their drafts, and stop their terminals. Stop managed subprocesses on app exit.
