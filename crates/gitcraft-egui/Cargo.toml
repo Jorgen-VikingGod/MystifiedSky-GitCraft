@@ -1,0 +1,99 @@
+[package]
+name = "gitcraft-egui"
+version.workspace = true
+edition = "2024"
+description = "GitCraft's native interface, drawn with egui"
+license = "GPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "gitcraft-egui"
+path = "src/main.rs"
+
+# Installers, built with `cargo packager -p gitcraft-egui --release` (see RELEASING.md). Paths are
+# relative to this folder. The update feed and its signatures stay as they were, so installed
+# copies update to these builds.
+[package.metadata.packager]
+product-name = "GitCraft"
+identifier = "dev.gitcraft.desktop"
+description = "A graphical Git client"
+long-description = "GitCraft is a desktop Git client with a commit graph, staging, interactive rebase, a merge tool, GitHub and GitLab pull requests, and AI helpers."
+homepage = "https://github.com/MystifiedSky/GitCraft"
+publisher = "GitCraft"
+category = "DeveloperTool"
+license-file = "../../LICENSE"
+icons = ["../../icons/32x32.png", "../../icons/128x128.png", "../../icons/icon.png", "../../icons/icon.ico", "../../icons/icon.icns"]
+binaries = [{ path = "gitcraft-egui", main = true }]
+deep-link-protocols = [{ schemes = ["gitcraft"], name = "GitCraft clone link" }]
+
+[package.metadata.packager.deb]
+depends = ["git (>= 1:2.38)"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "10.15"
+# The Finder's "Open in GitCraft" service (src/macos.rs).
+info-plist-path = "../../installer/finder-services.plist"
+
+[package.metadata.packager.wix]
+fragment-paths = ["../../installer/windows-explorer.wxs"]
+component-refs = ["GitCraftExplorerCommands"]
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"
+# "Open in GitCraft" on folders and folder backgrounds in Explorer, removed again on uninstall.
+preinstall-section = """
+Section ExplorerCommands
+  WriteRegStr HKCU "Software\\Classes\\Directory\\shell\\GitCraft" "" "Open in GitCraft"
+  WriteRegStr HKCU "Software\\Classes\\Directory\\shell\\GitCraft\\command" "" '"$INSTDIR\\${MAINBINARYNAME}.exe" "%1"'
+  WriteRegStr HKCU "Software\\Classes\\Directory\\Background\\shell\\GitCraft" "" "Open in GitCraft"
+  WriteRegStr HKCU "Software\\Classes\\Directory\\Background\\shell\\GitCraft\\command" "" '"$INSTDIR\\${MAINBINARYNAME}.exe" "%V"'
+SectionEnd
+
+Section un.ExplorerCommands
+  DeleteRegKey HKCU "Software\\Classes\\Directory\\shell\\GitCraft"
+  DeleteRegKey HKCU "Software\\Classes\\Directory\\Background\\shell\\GitCraft"
+SectionEnd
+"""
+
+[dependencies]
+gitcraft-core = { path = "../gitcraft-core" }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland", "accesskit"] }
+# Without this the system clipboard is off.
+egui-wgpu = "0.37"
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard"] }
+# `experimental`: the widget theme hooks in theme.rs.
+egui = { version = "0.37", features = ["experimental"] }
+egui_extras = { version = "0.37", default-features = false, features = ["svg", "image"] }
+# Pictures in diffs (before / after).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "ico"] }
+base64 = "0.22"
+# Syntax colours in diffs and the editor, and line diffs for the inline and split views.
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+similar = "2"
+# The in-app terminal's screen: escape sequences and the character grid.
+alacritty_terminal = "0.25"
+# Hosted descriptions and comments.
+pulldown-cmark = { version = "0.13", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Shared Craft libraries (MIT OR Apache-2.0), pinned to one commit of
+# https://github.com/storytold/craft-libs. Update every pin together, with the egui patch block
+# in the workspace manifest.
+craft-window = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c", features = ["egui", "restore"] }
+craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c", features = ["egui"] }
+craft-menu = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
+craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c", features = ["egui"] }
+craft-platform = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c", features = ["appearance", "egui"] }
+craft-dialogs = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
+# One window per user: later launches hand their folders and links over.
+craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
+
+# gitcraft:// links and the Finder's "Open in GitCraft" service.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSPasteboard", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSAppleEventDescriptor", "NSAppleEventManager", "NSArray", "NSObject", "NSString", "NSURL", "NSEnumerator"] }

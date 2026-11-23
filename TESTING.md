@@ -50,8 +50,13 @@ npm --prefix ui run build
 npm --prefix ui test
 node --test scripts/changelog-release.test.mjs
 cargo test --locked -- --test-threads=1
+cargo test --locked -p gitcraft-egui
 cargo run --locked
 ```
+
+The native egui interface is being built next to the desktop app in [crates/gitcraft-egui](crates/gitcraft-egui). It reads and writes the same `settings.json`. Run it with `cargo run --locked -p gitcraft-egui`, or take a picture of the window without touching your preferences with `cargo run --locked -p gitcraft-egui -- --screenshot shot.png --theme light`.
+
+Only one native window runs per user: a second launch hands its folder or `gitcraft://clone?url=` link to the running one and exits. To try that without touching your own preferences, start both launches with `HOME` (on Windows, `LOCALAPPDATA`) pointing at an empty folder, for example `HOME=/tmp/gc cargo run -p gitcraft-egui -- repo-a`, then `HOME=/tmp/gc cargo run -p gitcraft-egui -- repo-b`: the second command exits at once and `repo-b` opens as a tab in the first window. `--new-window` opens a separate window instead. To build the native installers locally, run `cargo build --release -p gitcraft-egui` and then `cargo packager --release -p gitcraft-egui --formats deb` (or `nsis`, `app`, `appimage` for the platform you are on).
 
 The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Linux runs the GLib security regression as part of the full native suite.
 

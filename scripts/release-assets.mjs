@@ -1,10 +1,12 @@
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const [version, repo] = process.argv.slice(2);
-if (!/^\d+\.\d+\.\d+$/.test(version ?? "") || !/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) {
-  throw new Error("Usage: node scripts/release-assets.mjs <version> <owner/repo>");
+const [version, repo, ui = "desktop"] = process.argv.slice(2);
+if (!/^\d+\.\d+\.\d+$/.test(version ?? "") || !/^[\w.-]+\/[\w.-]+$/.test(repo ?? "") || !["desktop", "native"].includes(ui)) {
+  throw new Error("Usage: node scripts/release-assets.mjs <version> <owner/repo> [desktop|native]");
 }
+// The native interface's packager makes no RPM packages.
+const rpm = ui === "desktop";
 
 const output = "release-assets";
 mkdirSync(output);
@@ -46,10 +48,10 @@ bundle("macos", ".dmg");
 bundle("macos", ".app.tar.gz", ["darwin-aarch64", "darwin-x86_64"]);
 bundle("linux", ".AppImage", ["linux-x86_64"]);
 bundle("linux", ".deb");
-bundle("linux", ".rpm");
+if (rpm) bundle("linux", ".rpm");
 bundle("linux-arm64", ".AppImage", ["linux-aarch64"]);
 bundle("linux-arm64", ".deb");
-bundle("linux-arm64", ".rpm");
+if (rpm) bundle("linux-arm64", ".rpm");
 
 writeFileSync(join(output, "latest.json"), JSON.stringify({
   version,

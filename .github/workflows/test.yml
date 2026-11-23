@@ -64,7 +64,7 @@ jobs:
         run: node --test scripts/pr-ai-disclosure.test.mjs
       - name: Check Rust lints
         if: runner.os == 'Linux'
-        run: cargo clippy --locked --all-targets -- -D clippy::correctness
+        run: cargo clippy --locked --workspace --all-targets -- -D clippy::correctness
       - name: Audit npm dependencies
         if: runner.os == 'Linux'
         run: npm --prefix ui audit --audit-level=high
@@ -79,6 +79,8 @@ jobs:
         env:
           RUST_BACKTRACE: short
         run: cargo test --locked -- --test-threads=1
+      - name: Test the native interface
+        run: cargo test --locked -p gitcraft-egui
 
   browser:
     name: Headless browser regressions

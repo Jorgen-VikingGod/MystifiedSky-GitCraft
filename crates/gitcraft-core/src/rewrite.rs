@@ -179,7 +179,7 @@ pub fn interactive_cherry_pick(dir: &Path, items: &[TodoItem], skip_hooks: bool)
 }
 
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct ConflictInfo {
     pub working_token: String,
     pub decoding_loss: bool,

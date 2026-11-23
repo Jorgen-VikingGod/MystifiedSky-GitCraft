@@ -11,6 +11,14 @@ on:
         options:
           - preview
           - stable
+      interface:
+        description: Interface to ship (native is the egui build, for testing until it replaces the desktop app)
+        required: true
+        default: desktop
+        type: choice
+        options:
+          - desktop
+          - native
 
 permissions:
   contents: read
@@ -42,9 +50,11 @@ jobs:
           number=$(node --input-type=module - <<'NODE'
           import { readFileSync } from 'node:fs';
           const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
-          const base = /^(\d+)\.(\d+)\.(\d+)$/.exec(config.version);
+          const cargo = readFileSync('Cargo.toml', 'utf8');
+          const version = /^\[workspace\.package\]\r?\n(?:[^\[\r\n][^\r\n]*\r?\n)*?version = "([^"]+)"/m.exec(cargo)?.[1];
+          const base = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? '');
           if (!base || !config.plugins.updater.pubkey) {
-            throw new Error('Set a stable base version and the updater public key in tauri.conf.json.');
+            throw new Error('Set a stable base version in Cargo.toml ([workspace.package]) and the updater public key in tauri.conf.json.');
           }
           const patch = Number(base[3]) + Number(process.env.GITHUB_RUN_NUMBER);
           if (!Number.isInteger(patch) || patch > 65535 || Number(base[1]) > 255 || Number(base[2]) > 255) {
@@ -66,26 +76,31 @@ jobs:
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
             bundles: nsis,msi
+            formats: nsis,wix
           - runner: windows-11-arm
             platform: windows-arm64
             target: aarch64-pc-windows-msvc
             rust-targets: aarch64-pc-windows-msvc
             bundles: nsis
+            formats: nsis
           - runner: macos-latest
             platform: macos
             target: universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             bundles: app,dmg
+            formats: app,dmg
           - runner: ubuntu-22.04
             platform: linux
             target: x86_64-unknown-linux-gnu
             rust-targets: x86_64-unknown-linux-gnu
             bundles: deb,rpm,appimage
+            formats: deb,appimage
           - runner: ubuntu-22.04-arm
             platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             rust-targets: aarch64-unknown-linux-gnu
             bundles: deb,rpm,appimage
+            formats: deb,appimage
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -94,10 +109,16 @@ jobs:
           persist-credentials: false
 
       - name: Install Linux build packages
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.interface == 'desktop'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Linux build packages (native)
+        if: runner.os == 'Linux' && inputs.interface == 'native'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev patchelf file
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -118,6 +139,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Stamp and build the front end
+        if: inputs.interface == 'desktop'
         env:
           VERSION: ${{ needs.version.outputs.number }}
         shell: bash
@@ -129,10 +151,11 @@ jobs:
           npm --prefix ui run build
 
       - name: Check the GLib security backport on Linux
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.interface == 'desktop'
         run: cargo test --locked glib_variant_string_iterator -- --nocapture
 
       - name: Build installers and sign updates
+        if: inputs.interface == 'desktop'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -151,6 +174,35 @@ jobs:
           fi
           node ui/node_modules/@tauri-apps/cli/tauri.js build --ci \
             "${configs[@]}" --target "$TARGET" --bundles "$BUNDLES" -- --locked
+
+      - name: Build native installers and sign updates
+        if: inputs.interface == 'native'
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.number }}
+          TARGET: ${{ matrix.target }}
+          FORMATS: ${{ matrix.formats }}
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. See RELEASING.md."
+            exit 1
+          fi
+          node ui/scripts/set-version.mjs "$VERSION"
+          cargo install cargo-packager --locked --version 0.11.8
+          bin_dir="target/$TARGET/release"
+          if [[ "$TARGET" == universal-apple-darwin ]]; then
+            for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked -p gitcraft-egui --target "$arch"
+            done
+            mkdir -p "$bin_dir"
+            lipo -create -output "$bin_dir/gitcraft-egui" target/aarch64-apple-darwin/release/gitcraft-egui target/x86_64-apple-darwin/release/gitcraft-egui
+          else
+            cargo build --release --locked -p gitcraft-egui --target "$TARGET"
+          fi
+          cargo packager --release -p gitcraft-egui --formats "$FORMATS" --binaries-dir "$bin_dir" --out-dir "$bin_dir/bundle/packager"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -189,7 +241,8 @@ jobs:
       - name: Prepare installers and the update manifest
         env:
           VERSION: ${{ needs.version.outputs.number }}
-        run: node scripts/release-assets.mjs "$VERSION" "$GITHUB_REPOSITORY"
+          INTERFACE: ${{ inputs.interface }}
+        run: node scripts/release-assets.mjs "$VERSION" "$GITHUB_REPOSITORY" "$INTERFACE"
       - name: Publish the complete release
         env:
           GH_TOKEN: ${{ github.token }}

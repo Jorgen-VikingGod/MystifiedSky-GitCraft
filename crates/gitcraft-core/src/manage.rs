@@ -304,7 +304,7 @@ pub fn submodules(dir: &Path) -> Vec<Submodule> {
 
 
 /// Git LFS: whether it's installed, the tracked patterns and the current locks.
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct LfsInfo {
     pub available: bool,
     pub version: String,
@@ -438,7 +438,7 @@ pub fn ignore(dir: &Path, pattern: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct SparseInfo {
     pub enabled: bool,
     pub patterns: Vec<String>,

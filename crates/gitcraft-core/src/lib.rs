@@ -28,9 +28,11 @@ pub mod publishing;
 pub mod read_jobs;
 pub mod rewrite;
 pub mod sample;
+pub mod session;
 pub mod settings_file;
 pub mod shell;
 pub mod terminal;
+pub mod updates;
 pub mod watch_plan;
 pub mod watch;
 #[cfg(test)]

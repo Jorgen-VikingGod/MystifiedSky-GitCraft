@@ -126,9 +126,9 @@ pub fn history_fetch_info(dir: &Path) -> Result<HistoryFetchInfo, String> {
 
 #[derive(Serialize)]
 pub struct ReflogEntry {
-    sha: String,
-    selector: String,
-    message: String,
+    pub sha: String,
+    pub selector: String,
+    pub message: String,
 }
 
 pub fn reflog(dir: &Path) -> Result<Vec<ReflogEntry>, String> {
@@ -182,7 +182,7 @@ pub fn apply_patch_file(dir: &Path, file: &Path, run: &dyn Fn(&[&str]) -> git::G
     }
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct RepoSummary {
     /// False when the folder is gone or isn't a repository ("Repo is unreachable and may have been deleted").
     pub exists: bool,

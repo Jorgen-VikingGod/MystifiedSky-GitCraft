@@ -336,8 +336,8 @@ pub fn signed_in(agent: Agent, program: &str, config_dir: &str) -> bool {
 
 #[derive(serde::Serialize)]
 pub struct DetectedProgram {
-    path: String,
-    version: String,
+    pub path: String,
+    pub version: String,
 }
 
 /// Verify the discovered binary locally; this does not sign in or send a prompt.

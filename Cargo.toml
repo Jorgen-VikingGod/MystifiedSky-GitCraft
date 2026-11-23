@@ -1,11 +1,16 @@
 [workspace]
-members = [".", "crates/gitcraft-core"]
+members = [".", "crates/gitcraft-core", "crates/gitcraft-egui"]
 default-members = [".", "crates/gitcraft-core"]
 resolver = "2"
 
+# The base version of every GitCraft build. The Release workflow adds its run number to the patch
+# component (see RELEASING.md).
+[workspace.package]
+version = "0.1.0"
+
 [package]
 name = "gitcraft"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "GitCraft - a graphical Git client"
 license = "GPL-3.0-only"
@@ -59,6 +64,19 @@ opt-level = 2
 # backport the upstream VariantStrIter soundness fix until that constraint changes.
 [patch.crates-io]
 glib = { path = "vendor/glib" }
+# The egui interface uses the craft-libs crates, which are built against this egui and winit.
+# Cargo does not pass a dependency's patches on, so they are repeated here with the same commits.
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 glib = "0.18.5"

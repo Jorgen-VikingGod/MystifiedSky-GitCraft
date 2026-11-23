@@ -1,0 +1,264 @@
+//! The 50 px toolbar under the tabs: repository and branch pickers on the left, the main Git
+//! buttons centred in the window, Actions and Search at the right edge.
+
+use super::App;
+use super::ctxmenu::{self, Entry, Later, item};
+use super::icons::{self, Icon};
+use super::repo::RepoTab;
+use super::theme::{ACCENT, p};
+use egui::{Align2, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use gitcraft_core::actions::Action;
+use gitcraft_core::git::RefKind;
+
+const PULL_LABELS: [(&str, &str); 4] = [("fetch", "Fetch All"), ("ff", "Pull (fast-forward if possible)"), ("ffonly", "Pull (fast-forward only)"), ("rebase", "Pull (rebase)")];
+
+/// A toolbar button 52 px wide: a label over an icon, maybe a count badge, or a spinner while
+/// its action runs.
+fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str, enabled: bool, badge: usize, spinning: bool) -> egui::Response {
+    let c = p();
+    let resp = ui.interact(rect, ui.scope_id().with(("tb", label)), if enabled && !spinning { Sense::click() } else { Sense::hover() });
+    if resp.hovered() && enabled {
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, c.white(0.05));
+    }
+    let fade = if enabled || spinning { 1.0 } else { 0.35 };
+    let show_label = labels || spinning;
+    let icon_y = if show_label { rect.center().y + 7.0 } else { rect.center().y };
+    if show_label {
+        ui.painter().text(pos2(rect.center().x, rect.center().y - 10.0), Align2::CENTER_CENTER, label, FontId::proportional(11.0), c.white(0.75).gamma_multiply(fade));
+    }
+    let ir = Rect::from_center_size(pos2(rect.center().x, icon_y), Vec2::splat(19.0));
+    if spinning {
+        let t = ui.input(|i| i.time) as f32;
+        ui.painter().add(egui::Shape::line(
+            (0..=24).map(|k| {
+                let a = t * 6.0 + k as f32 / 24.0 * std::f32::consts::TAU * 0.75;
+                pos2(ir.center().x + 8.0 * a.cos(), ir.center().y + 8.0 * a.sin())
+            }).collect(),
+            Stroke::new(2.0, c.white(0.9)),
+        ));
+        ui.ctx().request_repaint();
+    } else {
+        icons::paint(ui, ir, icon, 19.0, c.white(0.9).gamma_multiply(fade));
+    }
+    if badge > 0 {
+        let text = badge.to_string();
+        let w = (text.len() as f32 * 6.0 + 6.0).max(15.0);
+        let br = Rect::from_min_size(pos2(ir.right() + 11.0 - w, ir.top() - 5.0), vec2(w, 14.0));
+        ui.painter().rect_filled(br, CornerRadius::same(7), ACCENT);
+        ui.painter().text(br.center(), Align2::CENTER_CENTER, text, super::fonts::bold(9.5), c.white(1.0));
+    }
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+}
+
+impl App {
+    pub(crate) fn toolbar(&self, ui: &mut Ui, tab: u64, r: Option<&RepoTab>, later: &mut Vec<Later>) {
+        let c = p();
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, c.toolbar);
+        ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, c.black(0.3)));
+        let v = r.and_then(|r| r.view.as_ref());
+        let path = v.map(|v| v.path.clone());
+        let labels = self.settings.flag("toolbarLabels", true);
+        let pull_mode = path.as_deref().map_or_else(|| self.settings.string("pullMode", "ff"), |p| self.pull_mode(p));
+        let has_repo_mode = path.as_deref().and_then(|p| self.repo_pref(p, "pullMode")).is_some();
+        let detached = v.is_some_and(|v| v.data.head_branch.is_none());
+        let head = v.and_then(|v| v.data.refs.iter().find(|r| r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref()));
+        let has_changes = v.is_some_and(|v| !v.data.status.unstaged.is_empty() || !v.data.status.staged.is_empty());
+        let spin = r.and_then(|r| r.spinning);
+        // Left: repository and branch pickers.
+        let center_w = gitcraft_core::metrics::TOOLBAR_CENTER_WIDTH as f32;
+        let left_max = gitcraft_core::metrics::TOOLBAR_LEFT_MAX as f32;
+        let left_w = (rect.width() - center_w - 108.0).clamp(300.0_f32.min(rect.width() * 0.45), left_max).min(rect.width() * 0.45);
+        let repo_rect = Rect::from_min_size(rect.min, vec2(150.0_f32.min(left_w - 150.0).max(80.0), rect.height()));
+        let resp = ui.interact(repo_rect, ui.scope_id().with("repo_picker"), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(repo_rect, CornerRadius::ZERO, c.white(0.05));
+        }
+        ui.painter().text(pos2(repo_rect.left() + 17.0, rect.center().y - 9.0), Align2::LEFT_CENTER, "repository", FontId::proportional(11.0), c.white(0.6));
+        let name = v.map_or_else(|| "—".to_owned(), |v| v.name.clone());
+        let g = super::widgets::fit(ui, &name, super::fonts::bold(15.0), c.white(0.9), repo_rect.width() - 25.0);
+        ui.painter().galley(pos2(repo_rect.left() + 17.0, rect.center().y + 1.0), g, c.white(0.9));
+        egui::Popup::menu(&resp).show(|ui| {
+            let mut entries = vec![Entry::Heading("Open Repositories".into())];
+            for t in self.tabs.iter().filter(|t| t.path().is_some()) {
+                let id = t.id;
+                entries.push(item(t.title.clone(), move |app| app.activate(id)));
+            }
+            entries.push(Entry::Separator);
+            entries.push(Entry::Heading("Recent".into()));
+            for rp in self.settings.recents().into_iter().take(8) {
+                entries.push(item(rp.clone(), move |app| app.open_repo(&rp)));
+            }
+            entries.push(Entry::Separator);
+            entries.push(item("Open Repo...", |app| app.open_repo_dialog()));
+            entries.push(item("Clone Repo...", |app| app.clone_dialog("")));
+            entries.push(item("Init Repo...", |app| app.init_dialog()));
+            ctxmenu::show(ui, entries, later);
+        });
+        let chev = Rect::from_min_size(pos2(repo_rect.right() + 2.0, rect.center().y - 8.0), Vec2::splat(16.0));
+        icons::paint(ui, chev, Icon::ChevronRight, 16.0, c.white(0.5));
+        let branch_rect = Rect::from_min_size(pos2(chev.right() + 2.0, rect.top()), vec2(130.0, rect.height()));
+        let resp = ui.interact(branch_rect, ui.scope_id().with("branch_picker"), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(branch_rect, CornerRadius::ZERO, c.white(0.05));
+        }
+        ui.painter().text(pos2(branch_rect.left() + 8.0, rect.center().y - 9.0), Align2::LEFT_CENTER, "branch", FontId::proportional(11.0), c.white(0.6));
+        let bname = v.map_or_else(|| "—".to_owned(), |v| v.data.head_branch.clone().unwrap_or_else(|| format!("{} (detached)", v.data.head_sha.chars().take(6).collect::<String>())));
+        let g = super::widgets::fit(ui, &bname, FontId::proportional(15.0), c.white(0.9), branch_rect.width() - 34.0);
+        let gw = g.size().x;
+        ui.painter().galley(pos2(branch_rect.left() + 8.0, rect.center().y + 1.0), g, c.white(0.9));
+        icons::paint(ui, Rect::from_min_size(pos2(branch_rect.left() + 12.0 + gw, rect.center().y + 3.0), Vec2::splat(14.0)), Icon::ChevronDown, 14.0, c.white(0.9));
+        if let Some(v) = v {
+            egui::Popup::menu(&resp).show(|ui| {
+                let mut entries = vec![Entry::Heading("Checkout a local branch".into())];
+                for b in v.data.refs.iter().filter(|r| r.kind == RefKind::Local) {
+                    let is_head = Some(&b.name) == v.data.head_branch.as_ref();
+                    let name = b.name.clone();
+                    entries.push(item(format!("{}{}", if is_head { "✓ " } else { "   " }, b.name), move |app| {
+                        if !is_head {
+                            app.act(tab, Action::Checkout { target: name });
+                        }
+                    }));
+                }
+                entries.push(Entry::Separator);
+                entries.push(item(format!("Create branch...    {}+B", super::menu::MOD), move |app| app.prompt_branch(tab, None, true)));
+                ctxmenu::show(ui, entries, later);
+            });
+        }
+        // Centre: Undo, Redo, Pull, Push, Branch, Stash, Pop | Terminal.
+        let group_w = 52.0 * 7.0 + 16.0 + 14.0 + 1.0 + 8.0 + 52.0;
+        let right_w = 56.0 + 52.0;
+        let ideal = rect.center().x - group_w / 2.0 + 20.0;
+        let min_x = branch_rect.right() + 20.0;
+        let max_x = rect.right() - right_w - group_w;
+        let mut x = ideal.max(min_x).min(max_x.max(min_x));
+        let slot = |x: f32, w: f32| Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
+        let undo = v.and_then(|v| v.undo.undo.clone());
+        let redo = v.and_then(|v| v.undo.redo.clone());
+        if tb(ui, slot(x, 52.0), Icon::Undo2, "Undo", labels, &undo.as_ref().map_or("Nothing to undo".into(), |u| format!("Undo {u}")), undo.is_some(), 0, false).clicked() {
+            later.push(Box::new(move |app| app.act(tab, Action::Undo)));
+        }
+        x += 52.0;
+        if tb(ui, slot(x, 52.0), Icon::Redo2, "Redo", labels, &redo.as_ref().map_or("Nothing to redo".into(), |u| format!("Redo {u}")), redo.is_some(), 0, false).clicked() {
+            later.push(Box::new(move |app| app.act(tab, Action::Redo)));
+        }
+        x += 52.0;
+        let pull_tip = if detached { "Pull is not available when in a detached HEAD state" } else { PULL_LABELS.iter().find(|(m, _)| *m == pull_mode).map_or("Pull", |(_, l)| l) };
+        let pulling = spin == Some("pull");
+        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, "Pull", labels, pull_tip, v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
+            let mode = pull_mode.clone();
+            later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
+        }
+        x += 52.0;
+        let chev = Rect::from_min_size(pos2(x, rect.top()), vec2(14.0, rect.height()));
+        let cresp = ui.interact(chev, ui.scope_id().with("pull_options"), if pulling { Sense::hover() } else { Sense::click() });
+        if cresp.hovered() {
+            ui.painter().rect_filled(chev, CornerRadius::ZERO, c.white(0.05));
+        }
+        icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if pulling { 0.35 } else { 1.0 }));
+        let cresp = cresp.on_hover_text("Pull options");
+        egui::Popup::menu(&cresp).show(|ui| {
+            let entries = PULL_LABELS
+                .iter()
+                .map(|(m, l)| {
+                    let (m, path) = (m.to_string(), path.clone());
+                    item(format!("{} {l}", if pull_mode == m { "●" } else { "○" }), move |app| {
+                        match path.filter(|_| has_repo_mode) {
+                            Some(p) => {
+                                let mut prefs: serde_json::Value = app.settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
+                                prefs[&p]["pullMode"] = serde_json::Value::String(m);
+                                app.settings.set("repoPrefs", prefs);
+                            }
+                            None => app.settings.set("pullMode", m),
+                        }
+                    })
+                })
+                .collect();
+            ctxmenu::show(ui, entries, later);
+        });
+        x += 16.0;
+        let pushing = spin == Some("push");
+        if tb(ui, slot(x, 52.0), Icon::ArrowUpFromLine, "Push", labels, if detached { "Push is not available when in a detached HEAD state" } else { "Push" }, v.is_some() && !detached, head.map_or(0, |h| h.ahead), pushing).clicked() {
+            later.push(Box::new(move |app| app.act(tab, Action::Push { force: false, lease: None, review: None })));
+        }
+        x += 52.0;
+        if tb(ui, slot(x, 52.0), Icon::GitBranch, "Branch", labels, &format!("Create branch ({}+B)", super::menu::MOD), v.is_some(), 0, false).clicked() {
+            later.push(Box::new(move |app| app.prompt_branch(tab, None, true)));
+        }
+        x += 52.0;
+        let stashing = spin == Some("stash");
+        if tb(ui, slot(x, 52.0), Icon::Download, "Stash", labels, "Stash changes", has_changes || stashing, 0, stashing).clicked() {
+            later.push(Box::new(move |app| app.act(tab, Action::Stash { message: String::new() })));
+        }
+        x += 52.0;
+        if v.is_some() {
+            let chev = Rect::from_min_size(pos2(x, rect.top()), vec2(14.0, rect.height()));
+            let sresp = ui.interact(chev, ui.scope_id().with("stash_options"), Sense::click());
+            icons::paint(ui, chev, Icon::ChevronDown, 12.0, if sresp.hovered() { c.fg } else { c.fg3 });
+            let untracked = v.is_some_and(|v| v.data.status.unstaged.iter().any(|f| f.status == '?'));
+            let sresp = sresp.on_hover_text("Stash options");
+            egui::Popup::menu(&sresp).show(|ui| {
+                let entries = vec![
+                    ctxmenu::off(item("Stash with a title", move |app| app.prompt_stash(tab, "stash")), has_changes),
+                    ctxmenu::off(item("Stash and keep staged changes", move |app| app.prompt_stash(tab, "keep")), has_changes),
+                    ctxmenu::off(item("Stash untracked files only", move |app| app.prompt_stash(tab, "untracked")), untracked),
+                ];
+                ctxmenu::show(ui, entries, later);
+            });
+            x += 14.0;
+        }
+        let popping = spin == Some("pop");
+        if tb(ui, slot(x, 52.0), Icon::Upload, "Pop", labels, "Pop the latest stash", v.is_some_and(|v| !v.data.stashes.is_empty()) || popping, 0, popping).clicked() {
+            later.push(Box::new(move |app| app.act(tab, Action::StashPop { index: 0, expected: None, without_index: false })));
+        }
+        x += 52.0 + 4.0;
+        ui.painter().rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(1.0, 34.0)), CornerRadius::ZERO, c.white(0.2));
+        x += 5.0;
+        if tb(ui, slot(x, 52.0), Icon::SquareTerminal, "Terminal", labels, "Toggle the terminal panel (Ctrl+`)", v.is_some(), 0, false).clicked() {
+            later.push(Box::new(|app| app.settings.toggle("showTerminal", false)));
+        }
+        // Right: Actions and Search.
+        let search = slot(rect.right() - 52.0, 52.0);
+        let actions = slot(search.left() - 56.0, 56.0);
+        let aresp = tb(ui, actions, Icon::Zap, "Actions", labels, "", v.is_some(), 0, false);
+        if v.is_some() {
+            egui::Popup::menu(&aresp).show(|ui| ctxmenu::show(ui, self.actions_menu(tab), later));
+        }
+        if tb(ui, search, Icon::Search, "Search", labels, &format!("Search commits ({}+F)", super::menu::MOD), v.is_some(), 0, false).clicked() {
+            later.push(Box::new(move |app| app.open_search(tab)));
+        }
+    }
+
+    fn actions_menu(&self, tab: u64) -> Vec<Entry> {
+        vec![
+            item(format!("Fetch all remotes    {}+L", super::menu::MOD), ctxmenu::act(tab, Action::Fetch)),
+            item("Fetch more history…", move |app| app.fetch_more_history(tab)),
+            item("Open in File Manager", move |app| app.run(&app.ctx.clone(), "repo.file_manager")),
+            item("Open External Terminal", move |app| app.open_terminal(tab)),
+            Entry::Separator,
+            item("Add remote...", move |app| app.add_remote(tab)),
+            item("Repository maintenance…", move |app| app.repository_maintenance(tab)),
+            item("Compare commit ranges…", move |app| app.compare_ranges(tab)),
+            item("Recover commits from reflog…", move |app| app.reflog_dialog(tab)),
+            item("Recover discarded changes…", move |app| app.recover_discarded(tab)),
+            item("Activity log", |app| app.log_dialog()),
+            Entry::Separator,
+            item("Initialize / edit Gitflow...", move |app| app.init_gitflow(tab)),
+            item("Add Submodule...", move |app| app.add_submodule(tab)),
+            item("Add a new worktree...", move |app| app.add_worktree(tab, None)),
+            item("Clean Up Local Branches...", move |app| app.cleanup_dialog(tab)),
+            item("Sparse Checkout...", move |app| app.sparse_dialog(tab)),
+            Entry::Separator,
+            item("Git LFS: enable for this repository", ctxmenu::act(tab, Action::LfsInstall)),
+            item("Git LFS: track a pattern...", move |app| app.lfs_track_prompt(tab)),
+            item("Git LFS: pull LFS files", ctxmenu::act(tab, Action::LfsPull)),
+        ]
+    }
+
+    pub(crate) fn open_search(&mut self, tab: u64) {
+        if let Some(r) = self.repo_mut(tab) {
+            r.ui.search_open = true;
+            r.ui.focus_search = true;
+        }
+    }
+}

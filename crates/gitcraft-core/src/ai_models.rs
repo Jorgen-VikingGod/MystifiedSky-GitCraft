@@ -4,7 +4,7 @@ use crate::{ai, ai_cli, hosting::secret_get};
 use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
 
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, Clone)]
 pub struct Model {
     pub id: String,
     pub name: String,

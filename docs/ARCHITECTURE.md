@@ -1,6 +1,6 @@
 # GitCraft code map
 
-GitCraft is a Tauri desktop app. React renders the interface, Tauri connects the renderer to the Rust backend, and Rust invokes the configured Git executable and handles native platform integration. The Rust backend lives in [crates/gitcraft-core](../crates/gitcraft-core), which has no Tauri dependency; [src/main.rs](../src/main.rs) is the Tauri shell around it.
+GitCraft is a Tauri desktop app. React renders the interface, Tauri connects the renderer to the Rust backend, and Rust invokes the configured Git executable and handles native platform integration. The Rust backend lives in [crates/gitcraft-core](../crates/gitcraft-core), which has no Tauri dependency; [src/main.rs](../src/main.rs) is the Tauri shell around it. [crates/gitcraft-egui](../crates/gitcraft-egui) is the native egui interface that will replace the Tauri shell and React renderer; the migration is planned in phases, starting with the window, menus, tabs and themes.
 
 | Area | Start here | Where to verify it |
 | --- | --- | --- |

@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Start the native interface, drawn with egui, for contributors to try with `cargo run -p gitcraft-egui`. It has the window, menus, tabs, the five themes, zoom, the start screen, the commit graph, the branch and file panels, staging and committing, Git actions with their right-click menus, the Hunk, Inline and Split diffs with line staging, the file viewer and editor, File History and Blame, interactive rebase and cherry pick, the merge conflict tool, pull requests, issues, CI checks and the Launchpad, the AI buttons, the Agents view, the built-in terminal, Preferences, auto-fetch, the command palette and keyboard shortcuts so far, and shares preferences, drafts and open tabs with the desktop app. It keeps one window per user (folders and `gitcraft://` links opened later arrive as tabs), opens repositories in windows of their own, offers "Open in GitCraft" in Explorer and the Finder, and updates itself from the same release feed. Releases still ship the desktop app; maintainers can build preview releases of the native interface from the Release workflow.
 - Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
 
 - Double-clicking a remote branch whose local branch is behind it now fast-forwards that local branch after switching to it. Diverged branches are switched to but never merged, and local edits are never overwritten.
