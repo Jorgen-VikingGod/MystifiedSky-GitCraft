@@ -1,6 +1,7 @@
 //! File History and Blame for one file: the commits that changed it on the left, and the
 //! selected commit's change or who last changed each line on the right.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::Later;
 use super::icons::{self, Icon};
@@ -110,7 +111,7 @@ impl App {
             close = true;
         }
         if target.mode == HistoryMode::Blame {
-            widgets::checkbox(&mut right, &mut h.ignore_revs, "Ignore revisions", 11.5).on_hover_text("Apply Git's blame ignore lists, including .git-blame-ignore-revs when present");
+            widgets::checkbox(&mut right, &mut h.ignore_revs, "Ignore revisions", 11.5).tip("Apply Git's blame ignore lists, including .git-blame-ignore-revs when present");
         }
         // History / Blame switch.
         let (seg, _) = right.allocate_exact_size(vec2(160.0, 20.0), Sense::hover());
@@ -195,7 +196,7 @@ impl App {
                     let g = widgets::fit(ui, &format!("was {}", e.path), FontId::proportional(10.5), c.fg3, row.right() - x - 8.0);
                     ui.painter().galley(pos2(x, row.top() + 42.0), g, c.fg3);
                 }
-                let resp = resp.on_hover_text("Double-click to view on the graph");
+                let resp = resp.tip("Double-click to view on the graph");
                 if resp.double_clicked() {
                     on_graph = Some(e.commit.sha.clone());
                 } else if resp.clicked() {
@@ -311,7 +312,8 @@ impl App {
                 let empty = (dark, Vec::new(), Vec::new());
                 let hl = cache.hl.as_ref().filter(|h| h.0 == dark).unwrap_or(&empty);
                 let split = self.settings.string("diffMode", "hunk") == "split";
-                super::diff::compare_view(ui, ui.scope_id().with(("hist_cmp", &key)), cmp, &target.file, split, hl, false, false, &mut r.diff_ui.jump);
+                let wrap = self.settings.flag("wordWrap", false);
+                super::diff::compare_view(ui, ui.scope_id().with(("hist_cmp", &key)), cmp, &target.file, split, wrap, hl, false, false, &mut r.diff_ui.jump);
             }
             _ => {
                 let (o, n, f) = (v.old.clone().unwrap_or_default(), v.new.clone().unwrap_or_default(), target.file.clone());
@@ -389,7 +391,7 @@ fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, _wra
                 let meta = Rect::from_min_size(row.min, vec2(230.0, 19.0));
                 let mresp = ui.interact(meta, ui.scope_id().with(("blame_meta", i)), Sense::click());
                 let tip = if uncommitted(l) { "Not committed yet".to_owned() } else { format!("{}\n{}\nClick to view on the graph", l.summary, widgets::format_date(l.time, "MM/DD/YYYY @ h:mm A")) };
-                if mresp.on_hover_text(tip).clicked() && !uncommitted(l) {
+                if mresp.tip(tip).clicked() && !uncommitted(l) {
                     pick = Some(l.sha.clone());
                 }
             }

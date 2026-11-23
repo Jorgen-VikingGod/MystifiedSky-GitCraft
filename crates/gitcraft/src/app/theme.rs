@@ -296,8 +296,8 @@ pub fn apply_style(ctx: &egui::Context) {
     s.interact_size = Vec2::new(40.0, 22.0);
     s.scroll.bar_width = 7.0;
     s.scroll.floating = true;
-    // Menus: 8 px above and below the items, rows 5 px by 18 px.
-    s.menu_margin = egui::Margin::symmetric(0, 8);
+    // Menus: 6 px around the items, as craft-menu lays them out by default.
+    s.menu_margin = 6.into();
     s.window_margin = 12.into();
 
     let mut v = if c.dark { egui::Visuals::dark() } else { egui::Visuals::light() };

@@ -3,6 +3,7 @@
 //! and changes columns. Only the rows on screen are drawn. The working changes get a "// WIP"
 //! row on top; more history loads as the end comes near.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Entry, Later, item};
 use super::icons::{self, Icon};
@@ -345,6 +346,18 @@ impl App {
             commits.iter().enumerate().filter(|(_, c)| c.summary.to_lowercase().contains(&q) || c.author.to_lowercase().contains(&q) || c.sha.starts_with(&q) || c.body.to_lowercase().contains(&q)).map(|(i, _)| i).collect()
         };
         let match_set: HashSet<usize> = matches.iter().copied().collect();
+        // Stash rows: drawn as a dashed box joined to the commit they were made on by a dashed
+        // line, with the stash's menu. (lane, stash row, commit row) for each.
+        let stash_of: HashMap<&str, &gitcraft_core::git::Stash> = v.data.stashes.iter().map(|s| (s.sha.as_str(), s)).collect();
+        let stash_lines: Vec<(u16, usize, usize)> = commits
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let s = stash_of.get(c.sha.as_str())?;
+                Some((v.graph.rows.get(i)?.col, i, *r.index.get(&s.base)?))
+            })
+            .collect();
+        let dashed_at = |row: usize, lane: u16, up: bool| stash_lines.iter().any(|(l, from, to)| *l == lane && if up { row > *from && row <= *to } else { row >= *from && row < *to });
 
         // ---- Header row (and the bars under it) ----
         let pane_w = ui.available_width();
@@ -397,7 +410,7 @@ impl App {
         tx -= 22.0;
         let gear_resp = ui.interact(gear, ui.scope_id().with("columns_menu"), Sense::click());
         icons::paint(ui, gear, Icon::Settings2, 13.0, if gear_resp.hovered() { c.white(1.0) } else { c.white(0.7) });
-        let gear_resp = gear_resp.on_hover_text("Column settings");
+        let gear_resp = gear_resp.tip("Column settings");
         egui::Popup::menu(&gear_resp).show(|ui| {
             let mut entries = vec![Entry::Heading("Columns".into())];
             for (key, label, on) in [("refs", "Branch / Tag", cols.refs), ("graph", "Graph", cols.graph), ("description", "Commit Description", cols.description), ("author", "Author", cols.author), ("date", "Commit Date / Time", cols.date), ("sha", "Sha", cols.sha), ("changes", "Changes", cols.changes)] {
@@ -431,7 +444,7 @@ impl App {
         });
         let desc = Rect::from_min_size(pos2(tx - 22.0, head_rect.top()), vec2(22.0, HEADER));
         tx -= 22.0;
-        let desc_resp = ui.interact(desc, ui.scope_id().with("desc_toggle"), Sense::click()).on_hover_text("Show commit description in graph");
+        let desc_resp = ui.interact(desc, ui.scope_id().with("desc_toggle"), Sense::click()).tip("Show commit description in graph");
         icons::paint(ui, desc, Icon::MessageSquare, 13.0, if cols.description || desc_resp.hovered() { c.white(1.0) } else { c.white(0.5) });
         if desc_resp.clicked() {
             later.push(Box::new(move |app| {
@@ -445,7 +458,7 @@ impl App {
             let label = format!("{}", hidden_refs.len());
             let w = 30.0 + label.len() as f32 * 6.0;
             let eye = Rect::from_min_size(pos2(tx - w, head_rect.top()), vec2(w, HEADER));
-            let eye_resp = ui.interact(eye, ui.scope_id().with("hidden_menu"), Sense::click()).on_hover_text("Hidden Branches / Tags");
+            let eye_resp = ui.interact(eye, ui.scope_id().with("hidden_menu"), Sense::click()).tip("Hidden Branches / Tags");
             let ink = if eye_resp.hovered() { c.white(1.0) } else { WARN };
             icons::paint(ui, Rect::from_min_size(pos2(eye.left() + 4.0, eye.center().y - 6.5), Vec2::splat(13.0)), Icon::EyeOff, 13.0, ink);
             ui.painter().text(pos2(eye.left() + 21.0, eye.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.0), ink);
@@ -582,6 +595,24 @@ impl App {
         };
         let hover_active = !highlighted.is_empty();
         let mut new_hover_ref: Option<usize> = None;
+        // Rows outside a hovered label fade after a 1 s pause, over half a second.
+        let clock = ui.input(|i| i.time);
+        let since_id = hover_ref_id.with("since");
+        let since = match ui.data(|d| d.get_temp::<(Option<usize>, f64)>(since_id)) {
+            Some((was, at)) if was == hover_ref => at,
+            _ => {
+                ui.data_mut(|d| d.insert_temp(since_id, (hover_ref, clock)));
+                clock
+            }
+        };
+        let dim_t = if hover_active { (((clock - since) - 1.0) / 0.5).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        if hover_active && dim_t < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        // The stack of every label on a commit, shown while one of its labels is hovered: the
+        // row it belongs to and when the pointer was last on it.
+        let stack_id = ui.scope_id().with(("ref_stack", tab));
+        let mut stack: Option<(usize, f64)> = ui.data(|d| d.get_temp(stack_id)).flatten();
         let selected_idx = match r.ui.selection() {
             Selection::Wip => wip.then_some(0),
             Selection::Commit(sha) => r.index.get(&sha).map(|i| i + off),
@@ -617,6 +648,14 @@ impl App {
         let mut wip_commit: Option<bool> = None;
         let draft = self.draft(&path);
         let stats = &r.stats;
+        // Markers beside the scroll bar for where branches, tags, the checked-out commit, the
+        // selection and the search matches sit in the whole list (Preferences > UI Customization;
+        // the selection and the matches also show while a search is on).
+        let all_markers = self.settings.flag("scrollMarkers", false);
+        let show_markers = overflowing && (all_markers || !matches.is_empty());
+        if show_markers {
+            scroll = scroll.max_width((ui.available_width() - MARKER_STRIP).max(0.0));
+        }
         let output = scroll.show_viewport(ui, |ui, viewport| {
             let origin = ui.min_rect().min;
             let (_, _) = ui.allocate_exact_size(vec2(content_w.max(ui.available_width()), (total as f32 * ROW).max(viewport.height())), Sense::hover());
@@ -679,7 +718,7 @@ impl App {
                         let center = rect.center_top() + vec2(0.0, ROW / 2.0);
                         let center = pos2(origin.x + viewport.center().x, center.y);
                         if let Some(err) = &r.page_error {
-                            let resp = ui.put(Rect::from_center_size(center, vec2(220.0, ROW)), egui::Label::new(egui::RichText::new("Could not load history. Retry").size(12.0).color(c.link)).sense(Sense::click())).on_hover_text(err);
+                            let resp = ui.put(Rect::from_center_size(center, vec2(220.0, ROW)), egui::Label::new(egui::RichText::new("Could not load history. Retry").size(12.0).color(c.link)).sense(Sense::click())).tip(err);
                             if resp.clicked() {
                                 want_more = true;
                             }
@@ -703,15 +742,21 @@ impl App {
                 let dim = !q.is_empty() && !match_set.contains(&i);
                 let fade = if dim { MIN_ALPHA } else { 1.0 };
                 let resp = ui.interact(rect, ui.scope_id().with(("row", tab, &commit.sha)), Sense::click());
+                // Hovered anywhere on the row, its labels included.
+                let hovered = ui.rect_contains_pointer(rect);
                 if sel {
                     painter.rect_filled(rect, CornerRadius::ZERO, c.selrow);
+                } else if hovered {
+                    painter.rect_filled(rect, CornerRadius::ZERO, c.hoverrow);
                 }
                 if resp.clicked() {
                     clicked_row = Some((d, ui.input(|i| i.modifiers)));
                 }
-                let hovered = resp.hovered();
                 let commit_for_menu = commit.clone();
-                ctxmenu::attach(&resp, later, || self.commit_menu(tab, v, &commit_for_menu));
+                match stash_of.get(commit.sha.as_str()) {
+                    Some(st) => ctxmenu::attach(&resp, later, || self.stash_menu(tab, st)),
+                    None => ctxmenu::attach(&resp, later, || self.commit_menu(tab, v, &commit_for_menu)),
+                }
                 // Timeline line and label.
                 if d > 0 && (!cols.date || !q.is_empty())
                     && let Some(label) = timelines.get(&i)
@@ -736,10 +781,11 @@ impl App {
                         let more_w = if more > 0 { 5.0 + 8.0 + format!("+{more}").len() as f32 * 6.5 } else { 0.0 };
                         let max_w = (zone.width() - REF_MARGIN - 6.0 - more_w).max(20.0);
                         let fill = widgets::mix(color, 0.28);
-                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)));
+                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), Sense::click());
                         end_x = label_rect.right();
                         if lresp.hovered() {
                             new_hover_ref = Some(i);
+                            stack = Some((i, clock));
                         }
                         if lresp.clicked() {
                             clicked_row = Some((d, ui.input(|i| i.modifiers)));
@@ -749,7 +795,7 @@ impl App {
                             later.push(Box::new(move |app| app.checkout_ref(tab, &target)));
                         }
                         let (f2, r2) = (first.clone(), remote.cloned());
-                        let lresp = lresp.on_hover_text(describe_ref(first, v) + &r2.as_ref().map(|r| format!("; {}", describe_ref(r, v))).unwrap_or_default());
+                        let lresp = lresp.tip(describe_ref(first, v) + &r2.as_ref().map(|r| format!("; {}", describe_ref(r, v))).unwrap_or_default());
                         ctxmenu::attach(&lresp, later, || {
                             let mut items = self.branch_menu(tab, v, &f2);
                             if let Some(rem) = &r2 {
@@ -765,26 +811,65 @@ impl App {
                             painter.text(mr.center(), Align2::CENTER_CENTER, format!("+{more}"), FontId::proportional(11.0), c.fg);
                             let mresp = ui.interact(mr, ui.scope_id().with(("more_refs", tab, i)), Sense::click());
                             end_x = mr.right();
-                            if mresp.hovered() {
+                            if mresp.hovered() || mresp.clicked() {
                                 new_hover_ref = Some(i);
+                                stack = Some((i, clock));
                             }
-                            let groups_owned: Vec<(GitRef, Option<GitRef>)> = groups.iter().map(|(a, b)| ((*a).clone(), b.cloned())).collect();
-                            egui::Popup::from_response(&mresp).open_memory(None).show(|ui| {
-                                ui.set_min_width(200.0);
-                                for (g, rem) in &groups_owned {
-                                    let text = format!("{}{}", g.name, if rem.is_some() { "  ☁" } else { "" });
-                                    let br = ui.add(egui::Button::new(egui::RichText::new(text).size(12.0)).frame(false));
-                                    if br.double_clicked() {
-                                        let target = g.clone();
-                                        later.push(Box::new(move |app| app.checkout_ref(tab, &target)));
+                        }
+                        if more > 0 && stack.is_some_and(|(row, _)| row == i) {
+                            let shown = groups.len().min(m::REF_ZONE_MAX_REFS as usize);
+                            let widest = groups.iter().take(shown).map(|(g, rem)| ref_width(ui, g, *rem, v)).fold(0.0_f32, f32::max);
+                            let screen = ui.ctx().content_rect();
+                            let w = (widest + 16.0).max(end_x - label_rect.left()).min(320.0).min(screen.width() - 16.0);
+                            let desired = shown as f32 * INNER;
+                            let below = screen.bottom() - label_rect.top() - 8.0;
+                            let above = label_rect.bottom() - screen.top() - 8.0;
+                            let upwards = desired > below && above > below;
+                            let h = desired.min(if upwards { above } else { below }).max(INNER);
+                            let top = if upwards { label_rect.bottom() - h } else { label_rect.top() };
+                            let left = label_rect.left().min(screen.right() - w - 8.0).max(screen.left() + 8.0);
+                            egui::Area::new(stack_id.with("area")).order(egui::Order::Foreground).fixed_pos(pos2(left, top)).constrain(false).show(ui.ctx(), |ui| {
+                                let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                ui.painter().rect_filled(area, CornerRadius::same(2), fill);
+                                let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
+                                inner.set_clip_rect(area);
+                                egui::ScrollArea::vertical().id_salt(stack_id.with("scroll")).max_height(h).auto_shrink([false, true]).show(&mut inner, |ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                                    for (k, (g, rem)) in groups.iter().take(shown).enumerate() {
+                                        let (row, rresp) = ui.allocate_exact_size(vec2(w, INNER), Sense::click());
+                                        if rresp.hovered() {
+                                            ui.painter().rect_filled(row, CornerRadius::ZERO, c.white(0.1));
+                                        }
+                                        let chevron = if k == 0 { 14.0 } else { 0.0 };
+                                        let painter = ui.painter().clone();
+                                        let (lr, _) = ref_label(ui, &painter, pos2(row.left(), row.center().y), w - chevron, g, *rem, v, Color32::TRANSPARENT, 1.0, ui.scope_id().with(("stack_label", &g.full)), Sense::hover());
+                                        if k == 0 {
+                                            icons::paint(ui, Rect::from_min_size(pos2(lr.right(), row.center().y - 5.5), Vec2::splat(11.0)), Icon::ChevronDown, 11.0, c.fg.gamma_multiply(0.6));
+                                        }
+                                        if rresp.clicked() {
+                                            clicked_row = Some((d, ui.input(|i| i.modifiers)));
+                                        }
+                                        if rresp.double_clicked() {
+                                            let target = (*g).clone();
+                                            later.push(Box::new(move |app| app.checkout_ref(tab, &target)));
+                                        }
+                                        let (g2, r2) = ((*g).clone(), rem.cloned());
+                                        let rresp = rresp.tip(describe_ref(g, v) + &r2.as_ref().map(|r| format!("; {}", describe_ref(r, v))).unwrap_or_default());
+                                        ctxmenu::attach(&rresp, later, || {
+                                            let mut items = self.branch_menu(tab, v, &g2);
+                                            if let Some(rem) = &r2 {
+                                                items.push(Entry::Separator);
+                                                items.push(ctxmenu::sub(format!("Remote branch: {}", rem.name), self.branch_menu(tab, v, rem)));
+                                            }
+                                            items
+                                        });
                                     }
-                                    let g2 = g.clone();
-                                    ctxmenu::attach(&br, later, || self.branch_menu(tab, v, &g2));
+                                });
+                                if ui.rect_contains_pointer(area) {
+                                    new_hover_ref = Some(i);
+                                    stack = Some((i, clock));
                                 }
                             });
-                            if mresp.clicked() {
-                                egui::Popup::toggle_id(ui.ctx(), mresp.id.with("popup"));
-                            }
                         }
                     } else if ghost_on && (hovered || sel) {
                         // The branch this commit is on, faint and dashed.
@@ -818,7 +903,8 @@ impl App {
                     painter.circle_filled(pos2(tx + 3.0, msg.center().y), 3.0, Color32::from_rgb(0xf2, 0xca, 0x33));
                     tx += 12.0;
                 }
-                let text_alpha = if hover_active && !highlighted.contains(&i) { 0.5 } else { 1.0 } * fade;
+                let faded = if sel { 0.5 } else { 0.2 };
+                let text_alpha = if hover_active && !highlighted.contains(&i) { 1.0 - (1.0 - faded) * dim_t } else { 1.0 } * fade;
                 let mut job = egui::text::LayoutJob::default();
                 job.append(&commit.summary, 0.0, egui::TextFormat::simple(FontId::proportional(12.5), c.fg.gamma_multiply(text_alpha)));
                 if cols.description && !commit.body.is_empty() {
@@ -903,23 +989,27 @@ impl App {
                     let Some(row) = v.graph.rows.get(i) else { continue };
                     let dim = if !q.is_empty() && !match_set.contains(&i) { MIN_ALPHA } else { 1.0 };
                     let _ = dim;
+                    // A stash's line to its commit is dashed.
+                    let line = |pts: &[Pos2], stroke: Stroke, dashed: bool| {
+                        if dashed { gp.extend(egui::Shape::dashed_line(pts, stroke, 3.0, 3.0)) } else { gp.add(egui::Shape::line(pts.to_vec(), stroke)); }
+                    };
                     for [a, b] in &row.up_runs {
                         for lane in *a..=*b {
-                            gp.line_segment([pos2(lx(lane as usize), y0), pos2(lx(lane as usize), yc)], Stroke::new(2.0, lane_color(lane as usize)));
+                            line(&[pos2(lx(lane as usize), y0), pos2(lx(lane as usize), yc)], Stroke::new(2.0, lane_color(lane as usize)), dashed_at(i, lane, true));
                         }
                     }
                     for [a, b] in &row.down_runs {
                         for lane in *a..=*b {
-                            gp.line_segment([pos2(lx(lane as usize), yc), pos2(lx(lane as usize), y1)], Stroke::new(2.0, lane_color(lane as usize)));
+                            line(&[pos2(lx(lane as usize), yc), pos2(lx(lane as usize), y1)], Stroke::new(2.0, lane_color(lane as usize)), dashed_at(i, lane, false));
                         }
                     }
                     for s in &row.up {
                         curve(&mut pts, pos2(lx(s.from as usize), y0), pos2(lx(s.to as usize), yc), false);
-                        gp.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, lane_color(s.color as usize))));
+                        line(&pts, Stroke::new(2.0, lane_color(s.color as usize)), dashed_at(i, s.from, true));
                     }
                     for s in &row.down {
                         curve(&mut pts, pos2(lx(s.from as usize), yc), pos2(lx(s.to as usize), y1), true);
-                        gp.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, lane_color(s.color as usize))));
+                        line(&pts, Stroke::new(2.0, lane_color(s.color as usize)), dashed_at(i, s.from, false));
                     }
                 }
                 // Nodes over the lines.
@@ -930,22 +1020,78 @@ impl App {
                     let x = lx(row.col as usize);
                     let color = lane_color(row.color as usize);
                     let fade = if !q.is_empty() && !match_set.contains(&i) { MIN_ALPHA } else { 1.0 };
-                    if row.merge {
+                    if stash_of.contains_key(commit.sha.as_str()) {
+                        // A stash: a dashed box with the stash icon.
+                        let b = Rect::from_center_size(pos2(x, yc), Vec2::splat(NODE - 4.0));
+                        gp.rect_filled(b, CornerRadius::same(3), c.app);
+                        let corners = [b.left_top(), b.right_top(), b.right_bottom(), b.left_bottom(), b.left_top()];
+                        gp.extend(egui::Shape::dashed_line(&corners, Stroke::new(1.5, color.gamma_multiply(fade)), 3.0, 2.0));
+                        icons::paint(ui, Rect::from_center_size(pos2(x, yc), Vec2::splat(11.0)), Icon::Archive, 11.0, color.gamma_multiply(fade));
+                    } else if row.merge {
                         gp.circle_filled(pos2(x, yc), 6.0, color.gamma_multiply(fade));
                     } else {
                         gp.circle_filled(pos2(x, yc), NODE / 2.0, color.gamma_multiply(fade));
                         let center = pos2(x, yc);
                         let inner = m::AVATAR_INNER_DIAMETER as f32;
-                        gp.circle_filled(center, inner / 2.0, widgets::author_color(&commit.email.trim().to_lowercase()).gamma_multiply(fade));
-                        gp.text(center, Align2::CENTER_CENTER, widgets::initials(&commit.author), FontId::proportional(7.5), Color32::WHITE.gamma_multiply(fade));
+                        match super::avatars::texture(ui.ctx(), &commit.email) {
+                            Some(picture) => super::avatars::paint(&gp, &picture, center, inner, fade),
+                            None => {
+                                gp.circle_filled(center, inner / 2.0, widgets::author_color(&commit.email.trim().to_lowercase()).gamma_multiply(fade));
+                                gp.text(center, Align2::CENTER_CENTER, widgets::initials(&commit.author), FontId::proportional(7.5), Color32::WHITE.gamma_multiply(fade));
+                            }
+                        }
                     }
                 }
             }
         });
+        if show_markers {
+            let strip = Rect::from_min_size(pos2(output.inner_rect.right(), output.inner_rect.top()), vec2(MARKER_STRIP, output.inner_rect.height()));
+            let mut rows = MarkerRows { matches: matches.iter().map(|i| i + off).collect(), selection: selected_idx.into_iter().collect(), ..Default::default() };
+            if all_markers {
+                let upstreams: HashSet<&str> = v.data.refs.iter().filter(|r| r.kind == RefKind::Local && !r.upstream.is_empty()).map(|r| r.upstream.as_str()).collect();
+                for (i, commit) in commits.iter().enumerate() {
+                    let row = i + off;
+                    if stash_of.contains_key(commit.sha.as_str()) {
+                        rows.stashes.push(row);
+                        continue;
+                    }
+                    let refs = by_sha.get(commit.sha.as_str()).map(Vec::as_slice).unwrap_or_default();
+                    if commit.sha == v.data.head_sha {
+                        rows.head.push(row);
+                    } else if refs.iter().any(|r| r.kind == RefKind::Local) {
+                        rows.local.push(row);
+                    }
+                    if refs.iter().any(|r| r.kind == RefKind::Tag) {
+                        rows.tags.push(row);
+                    }
+                    if refs.iter().any(|r| r.kind == RefKind::Remote) {
+                        rows.remote.push(row);
+                    }
+                    if refs.iter().any(|r| r.kind == RefKind::Remote && upstreams.contains(r.name.as_str())) {
+                        rows.upstream.push(row);
+                    }
+                }
+            }
+            let painter = ui.painter().with_clip_rect(strip);
+            painter.rect_filled(strip, CornerRadius::ZERO, c.panel.gamma_multiply(0.6));
+            painter.line_segment([strip.left_top(), strip.left_bottom()], Stroke::new(1.0, c.black(0.2)));
+            let lane_w = MARKER_STRIP / 3.0;
+            for t in marker_ticks(&rows, total, strip.height()) {
+                painter.rect_filled(Rect::from_min_size(pos2(strip.left() + t.lane as f32 * lane_w, strip.top() + t.top), vec2(lane_w * t.lanes as f32, t.height)), CornerRadius::ZERO, t.color);
+            }
+        }
         ui.data_mut(|d| {
             d.insert_temp(scroll_id.with("x"), output.state.clamped_offset().x);
             d.insert_temp(hover_ref_id, new_hover_ref);
         });
+        if let Some((_, at)) = stack {
+            if clock - at > 0.12 && !egui::Popup::is_any_open(ui.ctx()) {
+                stack = None;
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(130));
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(stack_id, stack));
         // Apply what was clicked or typed.
         if let Some(text) = wip_draft {
             let path = path.clone();
@@ -1096,7 +1242,21 @@ fn describe_ref(r: &GitRef, v: &RepoView) -> String {
 /// One branch or tag label: check mark for the checked-out branch, the name, kind icons, ahead
 /// and behind counts. Returns its rect and response.
 #[allow(clippy::too_many_arguments)]
-fn ref_label(ui: &mut Ui, painter: &egui::Painter, left_center: Pos2, max_w: f32, r: &GitRef, remote: Option<&GitRef>, v: &RepoView, fill: Color32, fade: f32, id: egui::Id) -> (Rect, egui::Response) {
+/// How wide a label is with its whole name.
+fn ref_width(ui: &Ui, r: &GitRef, remote: Option<&GitRef>, v: &RepoView) -> f32 {
+    let head = r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref();
+    let icons = match r.kind {
+        RefKind::Local if remote.is_some() => 2.0,
+        _ => 1.0,
+    } + if head { 1.0 } else { 0.0 };
+    let counts = if r.kind == RefKind::Local && (r.ahead > 0 || r.behind > 0) { format!("↑{}↓{}", r.ahead, r.behind) } else { String::new() };
+    let counts_w = if counts.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(counts, FontId::proportional(10.5), p().fg).size().x + 4.0 };
+    let name_w = ui.painter().layout_no_wrap(r.name.clone(), FontId::proportional(12.0), p().fg).size().x;
+    10.0 + icons * 17.0 + name_w + counts_w
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ref_label(ui: &mut Ui, painter: &egui::Painter, left_center: Pos2, max_w: f32, r: &GitRef, remote: Option<&GitRef>, v: &RepoView, fill: Color32, fade: f32, id: egui::Id, sense: Sense) -> (Rect, egui::Response) {
     let c = p();
     let head = r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref();
     let mut icons_w = 0.0;
@@ -1119,7 +1279,7 @@ fn ref_label(ui: &mut Ui, painter: &egui::Painter, left_center: Pos2, max_w: f32
     let name = widgets::fit(ui, &r.name, FontId::proportional(12.0), c.fg.gamma_multiply(fade), (max_w - 10.0 - icons_w - counts_w).max(10.0));
     let w = (10.0 + icons_w + name.size().x + counts_w).min(max_w);
     let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - INNER / 2.0), vec2(w, INNER));
-    let resp = ui.interact(rect, id, Sense::click());
+    let resp = ui.interact(rect, id, sense);
     painter.rect_filled(rect, CornerRadius::same(2), fill.gamma_multiply(fade));
     let mut x = rect.left() + 5.0;
     let ink = c.fg.gamma_multiply(fade);
@@ -1204,8 +1364,87 @@ fn state_banner(ui: &mut Ui, tab: u64, v: &RepoView, note: &str, later: &mut Vec
     let _ = (BAD, ACCENT);
 }
 
+/// Width of the strip of markers beside the graph's scroll bar.
+const MARKER_STRIP: f32 = 12.0;
+
+/// The rows the marker strip marks, by kind (rows count the WIP row).
+#[derive(Default)]
+struct MarkerRows {
+    stashes: Vec<usize>,
+    tags: Vec<usize>,
+    remote: Vec<usize>,
+    local: Vec<usize>,
+    matches: Vec<usize>,
+    upstream: Vec<usize>,
+    head: Vec<usize>,
+    selection: Vec<usize>,
+}
+
+/// One tick in the marker strip: top and height in the strip, the first lane and how many.
+#[derive(Debug, PartialEq)]
+struct Tick {
+    top: f32,
+    height: f32,
+    lane: usize,
+    lanes: usize,
+    color: Color32,
+}
+
+/// The ticks to draw, in drawing order, for `total` rows in a strip `height` tall. Blocks mark
+/// stashes, branches, tags, search matches and the checked-out commit across three lanes; a thin line
+/// across all of them marks the selection.
+fn marker_ticks(rows: &MarkerRows, total: usize, height: f32) -> Vec<Tick> {
+    if total == 0 || height <= 0.0 {
+        return Vec::new();
+    }
+    // Sizes scale with the rows per point, within limits: (base in row units, min, max).
+    const ROW_UNITS: f32 = 28.0;
+    let size = |base: f32, min: f32, max: f32| {
+        let h = (height / (total as f32 * ROW_UNITS) * base).clamp(min, max);
+        let slice = height / total as f32;
+        (h, if h >= slice { 0.0 } else { (slice - h) / 2.0 })
+    };
+    let block = size(ROW_UNITS, 5.0, 20.0);
+    let line = size(ROW_UNITS / 2.0, 2.0, 4.0);
+    // (rows, first lane, lanes, colour, (height, offset)), in drawing order.
+    let kinds = [
+        (&rows.stashes, 0, 1, Color32::from_rgb(0xfb, 0x94, 0xff), block),
+        (&rows.tags, 2, 1, Color32::from_rgb(0xaf, 0xfc, 0xff), block),
+        (&rows.remote, 2, 1, Color32::from_rgb(0xff, 0xd6, 0x8b), block),
+        (&rows.local, 0, 1, Color32::from_rgb(0xff, 0xa5, 0x00), block),
+        (&rows.matches, 1, 1, Color32::from_rgb(0xe6, 0xe6, 0x2b), block),
+        (&rows.upstream, 1, 2, Color32::from_rgb(0x9b, 0xff, 0x9b), block),
+        (&rows.head, 0, 2, Color32::from_rgb(0x16, 0xc2, 0x16), block),
+        (&rows.selection, 0, 3, Color32::from_rgb(0x08, 0x21, 0xff), line),
+    ];
+    let mut out = Vec::new();
+    for (list, lane, lanes, color, (h, offset)) in kinds {
+        for row in list {
+            out.push(Tick { top: *row as f32 * height / total as f32 + offset - h / 2.0, height: h, lane, lanes, color });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn marker_ticks_sit_at_their_rows() {
+        let rows = MarkerRows { head: vec![0], tags: vec![50], matches: vec![99], selection: vec![50], ..Default::default() };
+        let ticks = marker_ticks(&rows, 100, 500.0);
+        // Drawing order: tags, then matches, head, and the selection on top.
+        let kinds: Vec<(usize, usize)> = ticks.iter().map(|t| (t.lane, t.lanes)).collect();
+        assert_eq!(kinds, vec![(2, 1), (1, 1), (0, 2), (0, 3)]);
+        // Five points per row: blocks are 5 tall from the row's top, less half their height.
+        assert_eq!(ticks[0].top, 250.0 - 2.5);
+        assert_eq!(ticks[0].height, 5.0);
+        assert_eq!(ticks[1].top, 495.0 - 2.5);
+        // The selection is a thin line, centred in its row's slice.
+        assert_eq!(ticks[3].height, 2.5);
+        assert_eq!(ticks[3].top, 250.0 + 1.25 - 1.25);
+        assert!(marker_ticks(&rows, 0, 500.0).is_empty());
+    }
+
     use super::*;
 
     #[test]

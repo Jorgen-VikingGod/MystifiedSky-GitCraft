@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod actions;
 pub mod agents;
+pub mod avatars;
 pub mod ai_cli;
 pub mod ai_context;
 pub mod ai_models;

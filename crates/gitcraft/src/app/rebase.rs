@@ -1,6 +1,7 @@
 //! Planning history edits: interactive rebase and cherry pick, and the one-click versions the
 //! right-click menus offer (reword, drop, squash, move).
 
+use super::widgets::Tip;
 use super::App;
 use super::dialogs::{Body, Dialog, Field, FieldKind};
 use super::widgets::Kind;
@@ -381,7 +382,7 @@ impl App {
         let g = widgets::fit(ui, &detail, FontId::proportional(12.5), c.fg2, bar.right() - title.right() - 50.0);
         ui.painter().galley(pos2(title.right() + 8.0, bar.center().y - g.size().y / 2.0), g, c.fg2);
         let xr = Rect::from_min_size(pos2(bar.right() - 32.0, bar.center().y - 12.0), Vec2::splat(24.0));
-        let xresp = ui.interact(xr, ui.scope_id().with("rebase_close"), Sense::click()).on_hover_text("Cancel (Esc)");
+        let xresp = ui.interact(xr, ui.scope_id().with("rebase_close"), Sense::click()).tip("Cancel (Esc)");
         icons::paint(ui, xr, Icon::X, 16.0, if xresp.hovered() { c.white(1.0) } else { c.fg2 });
         if xresp.clicked() {
             close = true;
@@ -435,7 +436,7 @@ impl App {
                 for (k, (step, label, key, color)) in steps.iter().enumerate() {
                     let br = Rect::from_min_size(pos2(seg.left() + k as f32 * 22.0, seg.top()), vec2(22.0, 20.0));
                     let on = it.action == *step;
-                    let b = ui.interact(br, ui.scope_id().with(("step", i, k)), Sense::click()).on_hover_text(format!("{label} ({key})"));
+                    let b = ui.interact(br, ui.scope_id().with(("step", i, k)), Sense::click()).tip(format!("{label} ({key})"));
                     if on {
                         ui.painter().rect_filled(br.shrink(1.0), CornerRadius::ZERO, *color);
                     }
@@ -465,7 +466,7 @@ impl App {
                 ui.painter().galley(pos2(sha_x, top.center().y - shag.size().y / 2.0), shag, c.fg3);
                 for (k, (icon, dir, tip)) in [(Icon::ArrowUp, -1isize, "Move up (Ctrl+↑)"), (Icon::ArrowDown, 1, "Move down (Ctrl+↓)")].into_iter().enumerate() {
                     let ar = Rect::from_min_size(pos2(top.right() - 12.0 - arrows_w + k as f32 * 20.0, top.center().y - 8.0), Vec2::splat(16.0));
-                    let a = ui.interact(ar, ui.scope_id().with(("mv", i, k)), Sense::click()).on_hover_text(tip);
+                    let a = ui.interact(ar, ui.scope_id().with(("mv", i, k)), Sense::click()).tip(tip);
                     icons::paint(ui, ar, icon, 13.0, if a.hovered() { c.white(1.0) } else { c.fg3 });
                     if a.clicked() {
                         moves = Some((i, dir));

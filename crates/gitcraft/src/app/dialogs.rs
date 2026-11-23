@@ -3,6 +3,7 @@
 //! Most are forms; what a dialog does when confirmed is a closure run with the app and the
 //! values entered. Folder fields browse with the system's folder picker (craft-dialogs).
 
+use super::widgets::Tip;
 use super::icons::{self, Icon};
 use super::theme::{ACCENT, p};
 use super::widgets::{self, Kind, REMOVED};
@@ -13,6 +14,8 @@ use std::collections::HashMap;
 
 /// What a dialog does when confirmed.
 pub type OnSubmit = Box<dyn FnOnce(&mut App, &Values)>;
+/// An action that can run more than once (a choice tried again after a failure).
+pub type Retry = std::rc::Rc<dyn Fn(&mut App, &Values)>;
 
 /// The values of a dialog's fields, by key.
 #[derive(Default, Clone)]
@@ -88,7 +91,12 @@ pub struct Choice {
     pub label: String,
     pub kind: Kind,
     pub then: OnSubmit,
+    /// For a dialog that stays open: the action again, so the button works after a failed try.
+    pub again: Option<Retry>,
 }
+
+/// Tells dialogs apart, so work a dialog started only changes that same dialog.
+static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub enum Body {
     /// Text and buttons.
@@ -108,6 +116,8 @@ pub enum Body {
 }
 
 pub struct Dialog {
+    /// This dialog among all dialogs shown.
+    pub token: u64,
     pub title: String,
     pub width: f32,
     pub body: Body,
@@ -121,8 +131,6 @@ pub struct Dialog {
     pub busy: Option<String>,
     /// Checked each frame: a reason the confirm button is off.
     pub check: Option<Box<dyn Fn(&Values) -> Option<String>>>,
-    /// Closed without confirming.
-    pub on_cancel: Option<OnSubmit>,
     /// Keep the dialog open after a choice (it sets `busy` and closes itself).
     pub stay_open: bool,
     first_frame: bool,
@@ -132,6 +140,7 @@ pub struct Dialog {
 impl Dialog {
     pub fn new(title: &str, body: Body) -> Dialog {
         Dialog {
+            token: NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title: title.into(),
             width: 440.0,
             body,
@@ -142,7 +151,6 @@ impl Dialog {
             error: None,
             busy: None,
             check: None,
-            on_cancel: None,
             stay_open: false,
             first_frame: true,
             picked: None,
@@ -168,7 +176,15 @@ impl Dialog {
     }
 
     pub fn choice(mut self, label: &str, kind: Kind, then: impl FnOnce(&mut App, &Values) + 'static) -> Dialog {
-        self.choices.push(Choice { label: label.into(), kind, then: Box::new(then) });
+        self.choices.push(Choice { label: label.into(), kind, then: Box::new(then), again: None });
+        self
+    }
+
+    /// A choice for a dialog that stays open while the work runs and can be tried again.
+    pub fn retry_choice(mut self, label: &str, kind: Kind, then: impl Fn(&mut App, &Values) + 'static) -> Dialog {
+        let again: Retry = std::rc::Rc::new(then);
+        let run = again.clone();
+        self.choices.push(Choice { label: label.into(), kind, then: Box::new(move |app, v| run(app, v)), again: Some(again) });
         self
     }
 
@@ -184,11 +200,6 @@ impl Dialog {
 
     pub fn cancel_label(mut self, label: &str) -> Dialog {
         self.cancel = Some(label.into());
-        self
-    }
-
-    pub fn on_cancel(mut self, then: impl FnOnce(&mut App, &Values) + 'static) -> Dialog {
-        self.on_cancel = Some(Box::new(then));
         self
     }
 
@@ -211,7 +222,7 @@ impl Dialog {
 
     pub fn info(title: &str, text: &str) -> Dialog {
         let mut d = Dialog::new(title, Body::Info(text.into())).width(560.0).no_cancel();
-        d.choices.push(Choice { label: "Close".into(), kind: Kind::Primary, then: Box::new(|_, _| {}) });
+        d.choices.push(Choice { label: "Close".into(), kind: Kind::Primary, then: Box::new(|_, _| {}), again: None });
         d
     }
 
@@ -290,10 +301,11 @@ impl App {
             }
             Pick::OpenRepo => self.open_repo_checked(&path),
             Pick::NewWindow => self.repository_window(&path),
-            Pick::Locate(tab) => {
-                self.close_tab(tab);
-                self.open_repo_checked(&path);
-            }
+            // The tab stays, with its retry controls, until the folder turns out to be a repository.
+            Pick::Locate(tab) => self.spawn(move || match gitcraft_core::git::repo_root(std::path::Path::new(&path)) {
+                Some(root) => super::Msg::Located { tab, path: root.to_string_lossy().into_owned() },
+                None => super::Msg::Toast(false, format!("{path} is not a Git repository")),
+            }),
             Pick::ApplyPatch(tab) => self.act(tab, Action::ApplyPatchFile { file: path }),
             Pick::SavePatch(tab, shas) => self.save_patch_to(tab, shas, path),
             Pick::Pref(target) => {
@@ -365,7 +377,7 @@ impl App {
                 }
                 None
             })
-            .choice("Clone the repo!", Kind::Primary, |app, v| app.start_clone(v));
+            .retry_choice("Clone the repo!", Kind::Primary, |app, v| app.start_clone(v));
         d.sidebar = Some((sources, "url".into()));
         d.stay_open = true;
         self.dialog = Some(d);
@@ -387,27 +399,34 @@ impl App {
             initialize_submodules: Some(v.flag("submodules")),
         };
         let (url, dir) = (v.text("url"), v.text("dir"));
+        let mut token = 0;
         if let Some(d) = self.dialog.as_mut() {
             d.busy = Some("Cloning…".into());
             d.error = None;
+            token = d.token;
         }
         self.busy = Some("Cloning…".into());
         let engine = self.engine.clone();
-        self.spawn(move || super::Msg::Cloned { dir: dir.clone(), result: gitcraft_core::session::clone_repo(&engine, &url, &dir, Some(options)) });
+        self.spawn(move || super::Msg::Cloned { token, dir: dir.clone(), result: gitcraft_core::session::clone_repo(&engine, &url, &dir, Some(options)) });
     }
 
-    pub(crate) fn cloned(&mut self, dir: String, result: Result<String, String>) {
+    /// A clone finished. Only the Clone dialog that started it (`token`) closes or shows the
+    /// error; when it is gone, the new repository opens anyway and an error is a notice.
+    pub(crate) fn cloned(&mut self, token: u64, dir: String, result: Result<String, String>) {
         self.busy = None;
         self.job = None;
+        let ours = self.dialog.as_ref().is_some_and(|d| d.token == token);
         match result {
             Ok(path) => {
                 self.settings.set("defaultCloneFolder", dir);
-                self.dialog = None;
+                if ours {
+                    self.dialog = None;
+                }
                 self.open_repo(&path);
                 self.toast(true, "Clone finished");
             }
             Err(e) => {
-                if let Some(d) = self.dialog.as_mut() {
+                if let Some(d) = self.dialog.as_mut().filter(|_| ours) {
                     d.busy = None;
                     let note = match super::repo::ssh_host_key_problem(&e) {
                         Some(true) => "SSH host key changed. Verify the new fingerprint with the server administrator before updating your SSH known_hosts file.\n",
@@ -445,7 +464,7 @@ impl App {
             .text_value("dir", &folder)
             .text_value("branch", &branch)
             .checked(|v| (v.text("name").trim().is_empty() || v.text("dir").trim().is_empty()).then(String::new))
-            .choice("Create Repository", Kind::Primary, move |app, v| {
+            .retry_choice("Create Repository", Kind::Primary, move |app, v| {
                 let options = gitcraft_core::manage::InitOptions {
                     branch: Some(v.text("branch")).filter(|b| !b.trim().is_empty()).unwrap_or_else(|| branch.clone()),
                     gitignore: Some(v.text("ignore")).filter(|i| !i.is_empty()).into_iter().collect(),
@@ -455,30 +474,38 @@ impl App {
                 };
                 let engine = app.engine.clone();
                 let (dir, name) = (v.text("dir"), v.text("name"));
+                let mut token = 0;
                 if let Some(d) = app.dialog.as_mut() {
                     d.busy = Some("Creating…".into());
+                    d.error = None;
+                    token = d.token;
                 }
-                app.spawn(move || super::Msg::Initialized(gitcraft_core::session::init_repo(&engine, &dir, &name, Some(options))));
+                app.spawn(move || super::Msg::Initialized(token, gitcraft_core::session::init_repo(&engine, &dir, &name, Some(options))));
             });
         d.sidebar = Some((sources, "local".into()));
         d.stay_open = true;
         self.dialog = Some(d);
     }
 
-    pub(crate) fn initialized(&mut self, result: Result<gitcraft_core::manage::InitOutcome, String>) {
+    /// A repository was created. As with a clone, only the dialog that asked (`token`) changes.
+    pub(crate) fn initialized(&mut self, token: u64, result: Result<gitcraft_core::manage::InitOutcome, String>) {
+        let ours = self.dialog.as_ref().is_some_and(|d| d.token == token);
         match result {
             Ok(outcome) => {
-                self.dialog = None;
+                if ours {
+                    self.dialog = None;
+                }
                 self.open_repo(&outcome.path);
                 let ok = outcome.warning.is_none();
                 self.toast(ok, outcome.warning.unwrap_or_else(|| "Repository created".into()));
             }
-            Err(e) => {
-                if let Some(d) = self.dialog.as_mut() {
+            Err(e) => match self.dialog.as_mut().filter(|_| ours) {
+                Some(d) => {
                     d.busy = None;
                     d.error = Some(e);
                 }
-            }
+                None => self.toast(false, e),
+            },
         }
     }
 
@@ -547,7 +574,7 @@ impl App {
                             icons::paint(ui, Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 7.0), Vec2::splat(14.0)), icon, 14.0, c.white(0.8).gamma_multiply(fade));
                             ui.painter().text(pos2(row.left() + 36.0, row.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), if on { c.white(1.0) } else { c.fg.gamma_multiply(fade) });
                             if !*enabled {
-                                r.on_hover_text("Creating a repository on a service isn't available yet. Initialize it here, then add the remote.");
+                                r.tip("Creating a repository on a service isn't available yet. Initialize it here, then add the remote.");
                             } else if r.clicked() {
                                 *active = id.clone();
                             }
@@ -626,18 +653,18 @@ impl App {
             let choice = dialog.choices.remove(i);
             let values = dialog.values.clone();
             if stay {
-                // Put a no-op back so the button stays while the work runs.
-                dialog.choices.insert(i, Choice { label: choice.label.clone(), kind: choice.kind, then: Box::new(|_, _| {}) });
+                // Put the choice back: off while the work runs (`busy`), and ready again after a failure.
+                let then: OnSubmit = match choice.again.clone() {
+                    Some(again) => Box::new(move |app, v| again(app, v)),
+                    None => Box::new(|_, _| {}),
+                };
+                dialog.choices.insert(i, Choice { label: choice.label.clone(), kind: choice.kind, then, again: choice.again.clone() });
                 self.dialog = Some(dialog);
             }
             (choice.then)(self, &values);
             return;
         }
         if close {
-            if let Some(then) = dialog.on_cancel.take() {
-                let values = dialog.values.clone();
-                then(self, &values);
-            }
             return;
         }
         self.dialog = Some(dialog);

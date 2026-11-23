@@ -2,6 +2,7 @@
 //! requests, issues, teams (conflict check), tags and submodules; and the strip of icons it
 //! shrinks to while a file is open.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Entry, Later, item};
 use super::icons::{self, Icon};
@@ -76,7 +77,7 @@ impl App {
             let (b, resp) = ui.allocate_exact_size(Vec2::splat(17.0), Sense::click());
             ui.painter().circle_filled(b.center(), 8.5, if resp.hovered() { c.white(1.0) } else { c.white(0.85) });
             icons::paint(ui, b, Icon::ChevronLeft, 13.0, c.panel);
-            if resp.on_hover_text("Collapse Panel (Ctrl+J)").clicked() {
+            if resp.tip("Collapse Panel (Ctrl+J)").clicked() {
                 later.push(Box::new(|app| app.settings.set("showLeft", false)));
             }
             ui.add_space(9.0);
@@ -260,7 +261,7 @@ impl App {
                     let is_main = Some(&w.path) == main.as_ref();
                     let label = if w.branch.is_empty() { w.path.clone() } else { w.branch.clone() };
                     let note = if is_main { "main worktree".to_owned() } else { w.path.clone() };
-                    let rr = row(ui, 1, if is_main { Icon::Check } else { Icon::Folder }, &label, Some(&note), false, if is_main { Some(GOOD) } else { None }).on_hover_text(&w.path);
+                    let rr = row(ui, 1, if is_main { Icon::Check } else { Icon::Folder }, &label, Some(&note), false, if is_main { Some(GOOD) } else { None }).tip(&w.path);
                     if rr.double_clicked() {
                         let p2 = w.path.clone();
                         later.push(Box::new(move |app| app.open_repo(&p2)));
@@ -303,7 +304,7 @@ impl App {
                             continue;
                         }
                         for rr in v.data.refs.iter().filter(|r| r.kind == RefKind::Local && r.name.starts_with(&prefix)) {
-                            let resp = row(ui, 1, Icon::GitFork, &rr.name, None, false, None).on_hover_text(format!("Right-click to finish this {kind}"));
+                            let resp = row(ui, 1, Icon::GitFork, &rr.name, None, false, None).tip(format!("Right-click to finish this {kind}"));
                             let name = rr.name[prefix.len()..].to_owned();
                             let full = rr.name.clone();
                             ctxmenu::attach(&resp, later, || vec![item(format!("Finish {full}"), move |app| app.finish_gitflow(tab, kind, &name))]);
@@ -330,7 +331,7 @@ impl App {
                         Some(Ok(locks)) => {
                             for l in locks {
                                 let who = if l.ours { "You".to_owned() } else if l.owner.is_empty() { "Another user".into() } else { l.owner.clone() };
-                                let resp = row(ui, 1, Icon::Lock, &l.path, Some(&who), false, Some(WARN)).on_hover_text(format!("Locked by {}", l.owner));
+                                let resp = row(ui, 1, Icon::Lock, &l.path, Some(&who), false, Some(WARN)).tip(format!("Locked by {}", l.owner));
                                 let (lp, ours) = (l.path.clone(), l.ours);
                                 ctxmenu::attach(&resp, later, || {
                                     if ours {
@@ -358,7 +359,7 @@ impl App {
                 }
                 if is_open("stashes", &open) {
                     for st in &stashes {
-                        let resp = row(ui, 1, Icon::Archive, &st.message, None, false, None).on_hover_text(&st.message);
+                        let resp = row(ui, 1, Icon::Archive, &st.message, None, false, None).tip(&st.message);
                         if resp.clicked() {
                             select_sha = Some(st.sha.clone());
                         }
@@ -450,7 +451,7 @@ impl App {
                             _ => (super::theme::BAD, "This submodule has a conflict."),
                         };
                         let short: String = s.sha.chars().take(7).collect();
-                        let resp = row(ui, 1, Icon::Package, &s.path, (!short.is_empty()).then_some(short.as_str()), false, Some(color)).on_hover_text(format!("{}\n{tip}", s.url));
+                        let resp = row(ui, 1, Icon::Package, &s.path, (!short.is_empty()).then_some(short.as_str()), false, Some(color)).tip(format!("{}\n{tip}", s.url));
                         let sub_path = join_sub(&v.path, &s.path);
                         let uninit = s.state == "uninitialized";
                         if resp.double_clicked() && !uninit {
@@ -529,13 +530,19 @@ impl App {
         if is_hidden || resp.hovered() || eye_resp.hovered() {
             icons::paint(ui, eye, if is_hidden { Icon::EyeOff } else { Icon::Eye }, 13.0, if is_hidden { WARN } else if eye_resp.hovered() { c.white(1.0) } else { c.fg2 });
         }
-        if eye_resp.on_hover_text(if is_hidden { "Show in the graph" } else { "Hide in the graph" }).clicked() {
+        if eye_resp.tip(if is_hidden { "Show in the graph" } else { "Hide in the graph" }).clicked() {
             let full = r.full.clone();
             later.push(Box::new(move |app| app.toggle_ref_list(tab, "hidden", &full)));
         } else if resp.clicked() {
             *select = Some(r.sha.clone());
         }
-        let resp = resp.on_hover_text(if is_head { "Checked out" } else { "Double-click to checkout" });
+        let resp = resp.tip(if is_head {
+            "Checked out"
+        } else if r.kind == RefKind::Remote {
+            "Double-click to check out and fast-forward the local branch if it's behind"
+        } else {
+            "Double-click to checkout"
+        });
         if resp.double_clicked() && !is_head {
             let target = r.clone();
             later.push(Box::new(move |app| app.checkout_ref(tab, &target)));
@@ -593,7 +600,7 @@ impl App {
         let resp = ui.interact(b, ui.scope_id().with("strip_expand"), Sense::click());
         ui.painter().circle_filled(b.center(), 8.5, if resp.hovered() { c.white(1.0) } else { c.white(0.85) });
         icons::paint(ui, b, Icon::ChevronsRight, 12.0, c.panel);
-        let mut expand = resp.on_hover_text("Expand Panel (Ctrl+J)").clicked();
+        let mut expand = resp.tip("Expand Panel (Ctrl+J)").clicked();
         y += 17.0 + 8.0 + 3.0;
         for (icon, label, n) in items {
             let h = if n.is_some() { 32.0 } else { 23.0 };
@@ -604,7 +611,7 @@ impl App {
             if let Some(n) = n {
                 ui.painter().text(pos2(ir.center().x, y + 4.0 + 15.0 + 6.0), Align2::CENTER_CENTER, n.to_string(), FontId::proportional(9.5), c.fg2);
             }
-            if resp.on_hover_text(label).clicked() {
+            if resp.tip(label).clicked() {
                 expand = true;
             }
             y += h + 3.0;
@@ -696,7 +703,7 @@ fn section(ui: &mut Ui, title: &str, icon: Icon, count: Option<usize>, open: boo
             ui.painter().rect_filled(ar, CornerRadius::same(3), c.white(0.1));
         }
         icons::paint(ui, ar, icon, 13.0, if aresp.hovered() { c.white(1.0) } else { c.white(0.7) });
-        if aresp.on_hover_text(tip).clicked() {
+        if aresp.tip(tip).clicked() {
             action_clicked = true;
             on_action(ui);
         }

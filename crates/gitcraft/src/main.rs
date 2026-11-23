@@ -96,8 +96,9 @@ fn main() {
         gitcraft_core::diagnostics::install();
     }
     let mut opts = opts;
-    // A second launch hands its folders to the running window and quits.
-    if opts.screenshot.is_none() && !opts.new_window {
+    // A second launch hands its folders to the running window and quits, unless it asks for a
+    // theme of its own, which only a window of its own can show.
+    if opts.screenshot.is_none() && !opts.new_window && opts.theme.is_none() {
         match instance::claim(&opts.launch) {
             instance::Claim::Forwarded => return,
             instance::Claim::Primary(p) => opts.primary = Some(p),

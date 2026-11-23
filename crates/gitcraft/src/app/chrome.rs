@@ -1,6 +1,7 @@
 //! The status bar, the screen of the tab in front (start screen, repository, Launchpad) and
 //! the toasts.
 
+use super::widgets::Tip;
 use super::icons::{self, Icon};
 use super::menu::RELEASES_URL;
 use super::theme::{BAD, GOOD, p};
@@ -38,7 +39,7 @@ impl App {
                     let hint = if working { None } else { self.integration_hint() };
                     if let Some((hint, launchpad)) = &hint {
                         let launchpad = *launchpad;
-                        let resp = ui.add(egui::Label::new(RichText::new(hint.as_str()).size(13.0).color(c.white(0.9))).truncate().sense(Sense::click())).on_hover_text(if launchpad { "Open the Launchpad" } else { "Connect GitHub, GitLab, Bitbucket and more" });
+                        let resp = ui.add(egui::Label::new(RichText::new(hint.as_str()).size(13.0).color(c.white(0.9))).truncate().sense(Sense::click())).tip(if launchpad { "Open the Launchpad" } else { "Connect GitHub, GitLab, Bitbucket and more" });
                         if resp.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
@@ -68,21 +69,21 @@ impl App {
                     }
                     if let Some(job) = self.job.clone() {
                         ui.add_space(8.0);
-                        let resp = ui.add(egui::Label::new(RichText::new("Cancel").size(12.0).color(super::widgets::REMOVED)).sense(Sense::click())).on_hover_text("Stop this job");
+                        let resp = ui.add(egui::Label::new(RichText::new("Cancel").size(12.0).color(super::widgets::REMOVED)).sense(Sense::click())).tip("Stop this job");
                         if resp.clicked() {
                             self.engine.jobs.cancel(&job.id);
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Version badge.
-                        ui.add_space(8.0);
+                        // Version badge, kept clear of the window's resize edge.
+                        ui.add_space(18.0);
                         let font = FontId::monospace(12.0);
                         let galley = ui.painter().layout_no_wrap(VERSION.to_owned(), font, c.white(0.9));
                         let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 12.0, 20.0), Sense::hover());
                         ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, c.white(0.25)), StrokeKind::Inside);
                         ui.painter().galley(rect.center() - galley.size() / 2.0, galley, c.white(0.9));
                         ui.add_space(8.0);
-                        let support = ui.add(egui::Label::new(RichText::new("Support").color(c.link)).sense(Sense::click())).on_hover_text("Report a problem or ask for help");
+                        let support = ui.add(egui::Label::new(RichText::new("Support").color(c.link)).sense(Sense::click())).tip("Report a problem or ask for help");
                         if support.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
@@ -109,7 +110,7 @@ impl App {
                         match self.update.phase {
                             super::updater::Phase::Ready => {
                                 let version = self.update.update.as_ref().map(|u| u.version.clone()).unwrap_or_default();
-                                let resp = ui.add(egui::Label::new(RichText::new("Update Ready (Restart GitCraft)").font(super::fonts::semibold(12.5)).color(super::theme::GOOD)).sense(Sense::click())).on_hover_text(format!("Install GitCraft {version} and restart"));
+                                let resp = ui.add(egui::Label::new(RichText::new("Update Ready (Restart GitCraft)").font(super::fonts::semibold(12.5)).color(super::theme::GOOD)).sense(Sense::click())).tip(format!("Install GitCraft {version} and restart"));
                                 if resp.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
@@ -190,7 +191,13 @@ impl App {
         ui.add_space(8.0);
         let filter_id = ui.scope_id().with("start_filter");
         let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
-        search_field(ui, &mut filter);
+        // Ctrl+Alt+F (or its binding) goes to this field while the Start screen is in front.
+        let focus = self.focus_left_filter.replace(false);
+        let hint = match self.keys_of("ui:filterLeft") {
+            Some(keys) => format!("Search repositories ({})", super::keys::label(&keys)),
+            None => "Search repositories".to_owned(),
+        };
+        search_field(ui, &mut filter, &hint, focus);
         ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
         ui.add_space(10.0);
         let needle = filter.to_lowercase();
@@ -250,7 +257,7 @@ impl App {
         let ws: Vec<serde_json::Value> = self.settings.get("workspaces").unwrap_or_default();
         for (i, w) in ws.iter().enumerate() {
             let repos = w["repos"].as_array().map(|a| a.iter().filter_map(|r| r.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-            if link(ui, &format!("{} ({})", w["name"].as_str().unwrap_or("Workspace"), w["repos"].as_array().map_or(0, Vec::len)), 12.0).on_hover_text(repos).clicked() {
+            if link(ui, &format!("{} ({})", w["name"].as_str().unwrap_or("Workspace"), w["repos"].as_array().map_or(0, Vec::len)), 12.0).tip(repos).clicked() {
                 self.open_workspace(i);
             }
         }
@@ -272,10 +279,9 @@ impl App {
 
     /// Make the sample repository away from the window (it runs Git), then open it.
     fn open_sample(&mut self) {
-        let inbox = self.inbox.clone();
-        std::thread::spawn(move || match gitcraft_core::sample::ensure_sample() {
-            Ok(path) => inbox.post(Msg::OpenRepo(path.to_string_lossy().into_owned())),
-            Err(e) => inbox.send(false, e),
+        self.spawn(|| match gitcraft_core::sample::ensure_sample() {
+            Ok(path) => Msg::OpenRepo(path.to_string_lossy().into_owned()),
+            Err(e) => Msg::Toast(false, e),
         });
     }
 
@@ -317,7 +323,7 @@ fn status_button(ui: &mut Ui, icon: Icon, label: Option<&str>, tip: &str) -> egu
     if let Some(galley) = galley {
         ui.painter().galley(pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0), galley, ink);
     }
-    response.on_hover_text(tip)
+    response.tip(tip)
 }
 
 /// The start screen's Open, Clone and Create buttons.
@@ -335,7 +341,7 @@ fn big_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui::Resp
 }
 
 /// The 24 px search field over the repositories list.
-fn search_field(ui: &mut Ui, text: &mut String) {
+fn search_field(ui: &mut Ui, text: &mut String, hint: &str, focus: bool) {
     let c = p();
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 24.0), Sense::hover());
@@ -344,7 +350,6 @@ fn search_field(ui: &mut Ui, text: &mut String) {
     let focused = ui.memory(|m| m.has_focus(id));
     ui.painter().rect(rect, CornerRadius::same(2), c.field, Stroke::new(1.0, if focused { super::theme::ACCENT } else { c.white(0.1) }), StrokeKind::Inside);
     icons::paint(ui, Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 6.0), Vec2::splat(12.0)), Icon::Search, 12.0, c.fg3);
-    let hint = format!("Search repositories ({} + Alt + F)", if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" });
     let edit = egui::TextEdit::singleline(text)
         .id(id)
         .frame(egui::Frame::NONE)
@@ -352,7 +357,10 @@ fn search_field(ui: &mut Ui, text: &mut String) {
         .font(FontId::proportional(11.5))
         .align(egui::Align2::LEFT_CENTER)
         .desired_width(edit_rect.width());
-    ui.put(edit_rect, edit);
+    let response = ui.put(edit_rect, edit);
+    if focus {
+        response.request_focus();
+    }
 }
 
 /// Link-coloured text that opens something; underlined under the pointer.

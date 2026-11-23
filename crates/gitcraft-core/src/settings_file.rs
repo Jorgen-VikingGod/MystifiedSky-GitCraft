@@ -55,6 +55,74 @@ pub fn save(path: &Path, settings: &Value) -> Result<(), String> {
     write_atomic(path, &serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
 }
 
+/// What one window changed since it last saved: preferences by key, and whole top-level
+/// sections (`tabs`, `drafts`, `profiles`, or all of `settings` when a profile is switched).
+/// `None` removes the key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes {
+    pub settings: std::collections::BTreeMap<String, Option<Value>>,
+    pub sections: std::collections::BTreeMap<String, Option<Value>>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.settings.is_empty() && self.sections.is_empty()
+    }
+
+    /// `doc` with these changes made: sections first, then the preferences on top.
+    pub fn apply(&self, doc: &mut Value) {
+        if !doc.is_object() {
+            *doc = Value::Object(serde_json::Map::new());
+        }
+        let root = doc.as_object_mut().expect("just made an object");
+        for (key, value) in &self.sections {
+            match value {
+                Some(value) => root.insert(key.clone(), value.clone()),
+                None => root.remove(key),
+            };
+        }
+        if self.settings.is_empty() {
+            return;
+        }
+        let settings = root.entry("settings").or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !settings.is_object() {
+            *settings = Value::Object(serde_json::Map::new());
+        }
+        let settings = settings.as_object_mut().expect("just made an object");
+        for (key, value) in &self.settings {
+            match value {
+                Some(value) => settings.insert(key.clone(), value.clone()),
+                None => settings.remove(key),
+            };
+        }
+    }
+}
+
+/// Write `changes` into the preferences file as it is now on disk, so what another GitCraft
+/// window saved in the meantime is kept, and return the merged document. Other processes
+/// wait on the lock file beside it while this one reads and writes.
+pub fn save_changes(path: &Path, changes: &Changes) -> Result<Value, String> {
+    let _guard = ACCESS.lock().unwrap_or_else(|error| error.into_inner());
+    let parent = path.parent().ok_or("Settings path has no parent")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path.with_extension("json.lock")).map_err(|error| error.to_string())?;
+    lock.lock().map_err(|error| format!("Could not lock the preferences: {error}"))?;
+    let mut doc = match fs::read(path) {
+        Ok(bytes) => match parse(&bytes) {
+            Some(doc) => {
+                write_atomic(&path.with_extension("json.bak"), &bytes).map_err(|error| error.to_string())?;
+                doc
+            }
+            None => return Err("Preferences on disk are invalid. Restart to recover them before saving.".into()),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    changes.apply(&mut doc);
+    write_atomic(path, &serde_json::to_vec_pretty(&doc).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    Ok(doc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +143,30 @@ mod tests {
         let quarantined = fs::read_dir(temp.path()).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("settings.corrupt-")).unwrap();
         assert_eq!(fs::read(quarantined.path()).unwrap(), b"damaged preferences");
         assert_eq!(load(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        save(&path, &serde_json::json!({"settings": {"zoom": 1, "theme": "dark"}, "tabs": ["/a"], "drafts": {"x": 1}})).unwrap();
+        // One window changes the zoom and its tabs, the other the theme, a new key and removes one.
+        let mut first = Changes::default();
+        first.settings.insert("zoom".into(), Some(serde_json::json!(1.5)));
+        first.sections.insert("tabs".into(), Some(serde_json::json!(["/a", "/b"])));
+        save_changes(&path, &first).unwrap();
+        let mut second = Changes::default();
+        second.settings.insert("theme".into(), Some(serde_json::json!("light")));
+        second.settings.insert("showLeft".into(), Some(serde_json::json!(false)));
+        second.sections.insert("drafts".into(), None);
+        let merged = save_changes(&path, &second).unwrap();
+        let want = serde_json::json!({"settings": {"zoom": 1.5, "theme": "light", "showLeft": false}, "tabs": ["/a", "/b"]});
+        assert_eq!(merged, want);
+        assert_eq!(load(&path).unwrap(), want);
+        // A whole-settings replacement (a profile switch) wins over the file, and keys set after it on top.
+        let mut third = Changes::default();
+        third.sections.insert("settings".into(), Some(serde_json::json!({"theme": "dark"})));
+        third.settings.insert("zoom".into(), Some(serde_json::json!(2)));
+        assert_eq!(save_changes(&path, &third).unwrap()["settings"], serde_json::json!({"theme": "dark", "zoom": 2}));
     }
 }

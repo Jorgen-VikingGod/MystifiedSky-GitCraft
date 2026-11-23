@@ -2,6 +2,7 @@
 //! changes, and the details of a selected commit, a comparison of two commits, or what can be
 //! done with several picked commits.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Later};
 use super::icons::{self, Icon};
@@ -155,7 +156,7 @@ impl App {
             }
             let g = widgets::fit(ui, label, FontId::proportional(12.5), c.white(0.85), right - x - 20.0);
             ui.painter().galley(pos2(x + 20.0, rect.center().y - g.size().y / 2.0), g, c.fg);
-            let resp = resp.on_hover_text(&f.path);
+            let resp = resp.tip(&f.path);
             if resp.clicked() && !button_hit {
                 *event = Some(FileEvent::Open(f.clone()));
             }
@@ -303,7 +304,7 @@ impl App {
         let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::click());
         ui.painter().rect(rect, CornerRadius::same(3), AI.gamma_multiply(if resp.hovered() { 0.25 } else { 0.15 }), Stroke::new(1.0, AI.gamma_multiply(0.8)), StrokeKind::Inside);
         icons::paint(ui, rect, Icon::Sparkles, 13.0, c.white(0.8));
-        resp.on_hover_text(tip)
+        resp.tip(tip)
     }
 
     /// Path / Tree switch and the sort button.
@@ -315,7 +316,7 @@ impl App {
         let sort = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 8.0), Vec2::splat(16.0));
         let resp = ui.interact(sort, ui.scope_id().with("sort"), Sense::click());
         icons::paint(ui, sort, Icon::ArrowDownAZ, 16.0, if resp.hovered() { c.white(1.0) } else { c.white(0.75) });
-        if resp.on_hover_text(if by_status { "Sorted by status (click to sort by path)" } else { "Sorted by path (click to sort by status)" }).clicked() {
+        if resp.tip(if by_status { "Sorted by status (click to sort by path)" } else { "Sorted by path (click to sort by status)" }).clicked() {
             later.push(Box::new(move |app| app.settings.set("fileSort", if by_status { "path" } else { "status" })));
         }
         let tree = self.settings.string("fileView", "tree") == "tree";
@@ -377,7 +378,7 @@ impl App {
             let fade = if total == 0 { 0.3 } else { 1.0 };
             ui.painter().rect(rect, CornerRadius::same(3), if resp.hovered() { BAD.gamma_multiply(0.15) } else { egui::Color32::TRANSPARENT }, Stroke::new(1.0, BAD.gamma_multiply(fade)), StrokeKind::Inside);
             icons::paint(ui, rect, Icon::Trash2, 12.0, REMOVED.gamma_multiply(fade));
-            if resp.on_hover_text("Discard all changes").clicked() {
+            if resp.tip("Discard all changes").clicked() {
                 later.push(Box::new(move |app| app.confirm_act(tab, "Discard all changes?", "All uncommitted changes will be discarded. You can bring them back with Undo.", "Discard All", Action::DiscardAll)));
             }
             let right_w = 26.0;
@@ -455,7 +456,7 @@ impl App {
                                     let br = Rect::from_min_size(pos2(right - bw, rect.center().y - 10.0), vec2(bw, 20.0));
                                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(br));
                                     let tip = if side == "ours" { format!("Take current ({cur})") } else { format!("Take incoming ({inc})") };
-                                    if widgets::button(&mut child, Kind::Default, None, label, 20.0, true).on_hover_text(tip).clicked() {
+                                    if widgets::button(&mut child, Kind::Default, None, label, 20.0, true).tip(tip).clicked() {
                                         hit = true;
                                         let path = f.path.clone();
                                         later.push(Box::new(move |app| app.act(tab, Action::TakeSide { paths: vec![path], side: side.into() })));
@@ -465,7 +466,7 @@ impl App {
                             }
                             let g = widgets::fit(ui, &f.path, FontId::proportional(12.5), c.white(0.85), right - rect.left() - 34.0);
                             ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - g.size().y / 2.0), g, c.fg);
-                            let resp = resp.on_hover_text("Open in the merge tool");
+                            let resp = resp.tip("Open in the merge tool");
                             if resp.clicked() && !hit {
                                 r.ui.conflict = Some(f.path.clone());
                                 r.ui.diff = None;
@@ -492,7 +493,7 @@ impl App {
                 });
             }
             let resp = widgets::section_head(ui, !wu.unstaged_closed, 34.0, &format!("Unstaged Files ({})", unstaged.len()), |ui| {
-                if !unstaged.is_empty() && widgets::small(ui, Kind::Success, "Stage All Changes").on_hover_text(format!("{}+Shift+S", super::menu::MOD)).clicked() {
+                if !unstaged.is_empty() && widgets::small(ui, Kind::Success, "Stage All Changes").tip(format!("{}+Shift+S", super::menu::MOD)).clicked() {
                     later.push(Box::new(move |app| app.act_quiet(tab, Action::StageAll, true)));
                 }
             });
@@ -513,7 +514,7 @@ impl App {
                 }
             }
             let resp = widgets::section_head(ui, !wu.staged_closed, 34.0, &format!("Staged Files ({})", staged.len()), |ui| {
-                if !staged.is_empty() && widgets::small(ui, Kind::Danger, "Unstage All Changes").on_hover_text(format!("{}+Shift+U", super::menu::MOD)).clicked() {
+                if !staged.is_empty() && widgets::small(ui, Kind::Danger, "Unstage All Changes").tip(format!("{}+Shift+U", super::menu::MOD)).clicked() {
                     later.push(Box::new(move |app| app.act_quiet(tab, Action::UnstageAll, true)));
                 }
             });
@@ -568,7 +569,7 @@ impl App {
             if show_label {
                 ui.painter().text(pos2(tr.left() + 31.0, tr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), ink);
             }
-            if resp.on_hover_text(label).clicked() {
+            if resp.tip(label).clicked() {
                 wu.tab = t;
             }
             tx += tw + 2.0;
@@ -590,12 +591,16 @@ impl App {
                         draft_changed = true;
                     }
                     let left = m_counter() as i64 - draft.summary.chars().count() as i64;
-                    egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
+                    // The box takes the accent colour while either field has the focus.
+                    let (summary_id, description_id) = (egui::Id::NULL.with(("summary", tab)), egui::Id::NULL.with(("description", tab)));
+                    let focused = ui.memory(|m| m.has_focus(summary_id) || m.has_focus(description_id));
+                    let border = if focused { ACCENT.gamma_multiply(0.7) } else { c.white(0.1) };
+                    egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, border)).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         ui.horizontal(|ui| {
                             ui.add_space(10.0);
                             let w = ui.available_width() - 26.0 - 6.0 - 40.0;
-                            let sresp = ui.add_sized([w, 30.0], egui::TextEdit::singleline(&mut draft.summary).id(ui.scope_id().with(("summary", tab))).frame(egui::Frame::NONE).font(FontId::proportional(15.0)).hint_text(egui::RichText::new("Commit summary").color(c.white(0.7))).align(Align2::LEFT_CENTER));
+                            let sresp = ui.add_sized([w, 30.0], egui::TextEdit::singleline(&mut draft.summary).id(summary_id).frame(egui::Frame::NONE).font(FontId::proportional(15.0)).hint_text(egui::RichText::new("Commit summary").color(c.white(0.7))).align(Align2::LEFT_CENTER));
                             if sresp.changed() {
                                 draft_changed = true;
                             }
@@ -607,7 +612,7 @@ impl App {
                                 later.push(Box::new(move |app| app.ai_commit_message(tab)));
                             }
                         });
-                        let dresp = ui.add(egui::TextEdit::multiline(&mut draft.description).id(ui.scope_id().with(("description", tab))).frame(egui::Frame::NONE).font(FontId::proportional(13.5)).hint_text(egui::RichText::new("Description").color(c.white(0.7))).desired_rows(4).desired_width(f32::INFINITY).margin(egui::Margin::symmetric(10, 6)));
+                        let dresp = ui.add(egui::TextEdit::multiline(&mut draft.description).id(description_id).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6))).font(FontId::proportional(13.5)).hint_text(egui::RichText::new("Description").color(c.white(0.7))).desired_rows(4).desired_width(f32::INFINITY));
                         if dresp.changed() {
                             draft_changed = true;
                         }
@@ -623,7 +628,7 @@ impl App {
                             wu.options_open = !wu.options_open;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).on_hover_text("Split your changes into focused commits with AI").clicked() {
+                            if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
                                 later.push(Box::new(move |app| app.compose_commits(tab)));
                             }
                         });
@@ -640,7 +645,7 @@ impl App {
                             ui.add_space(20.0);
                             ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
                             let w = ui.available_width();
-                            widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).on_hover_text("Adds a Co-authored-by line for each person (separate several with commas)");
+                            widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
@@ -651,7 +656,7 @@ impl App {
                         });
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
-                            widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).on_hover_text("Add a Signed-off-by trailer using your Git identity");
+                            widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
                         });
                     }
                 }
@@ -808,7 +813,7 @@ impl App {
         let short: String = commit.sha.chars().take(6).collect();
         Self::panel_header(ui, |ui| {
             ui.label(egui::RichText::new("commit:").size(12.5).color(c.fg2));
-            let resp = ui.add(egui::Label::new(egui::RichText::new(&short).size(12.5).monospace().color(c.link)).sense(Sense::click())).on_hover_text("Copy commit sha");
+            let resp = ui.add(egui::Label::new(egui::RichText::new(&short).size(12.5).monospace().color(c.link)).sense(Sense::click())).tip("Copy commit sha");
             let copy = widgets::icon_button(ui, Icon::Copy, 12.0, "Copy commit sha");
             if resp.clicked() || copy.clicked() {
                 let s = commit.sha.clone();
@@ -875,7 +880,7 @@ impl App {
             let sw = sg.size().x;
             ui.painter().galley(pos2(pr.right() - sw, pr.center().y - sg.size().y / 2.0), sg, c.link);
             ui.painter().text(pos2(pr.right() - sw - 4.0, pr.center().y), Align2::RIGHT_CENTER, "parent:", FontId::proportional(11.5), ink);
-            if resp.on_hover_text("Jump to parent commit").clicked() {
+            if resp.tip("Jump to parent commit").clicked() {
                 r.ui.select(Selection::Commit(parent.clone()));
             }
             py += 16.0;

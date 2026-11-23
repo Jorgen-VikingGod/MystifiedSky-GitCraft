@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// What an AI request produced, and where it goes.
 pub enum AiOutput {
-    CommitMessage { tab: u64, path: String, before: super::repo::Draft, summary: String, description: String },
+    CommitMessage { path: String, before: super::repo::Draft, summary: String, description: String },
     StashTitle { tab: u64, text: String },
     Explain { title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
@@ -76,7 +76,7 @@ impl App {
             }
         };
         match out {
-            AiOutput::CommitMessage { tab: _, path, before, summary, description } => {
+            AiOutput::CommitMessage { path, before, summary, description } => {
                 let now = self.draft(&path);
                 if now != before {
                     let text = format!("{summary}\n\n{description}\n\nYour draft changed while this was generated.");
@@ -157,7 +157,7 @@ impl App {
                     let dir = Path::new(&path);
                     let files = ai_context::take_preview(dir, PreviewKind::Commit, preview)?;
                     let (summary, description) = ai::commit_message(dir, None, &files.text)?;
-                    Ok(AiOutput::CommitMessage { tab, path, before, summary, description })
+                    Ok(AiOutput::CommitMessage { path, before, summary, description })
                 });
             }
             Reviewed::Stash => self.ai_run("Naming the stash…", move || {

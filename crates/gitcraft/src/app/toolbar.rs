@@ -1,6 +1,7 @@
 //! The 50 px toolbar under the tabs: repository and branch pickers on the left, the main Git
 //! buttons centred in the window, Actions and Search at the right edge.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Entry, Later, item};
 use super::icons::{self, Icon};
@@ -47,7 +48,7 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
         ui.painter().rect_filled(br, CornerRadius::same(7), ACCENT);
         ui.painter().text(br.center(), Align2::CENTER_CENTER, text, super::fonts::bold(9.5), c.white(1.0));
     }
-    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+    if tip.is_empty() { resp } else { resp.tip(tip) }
 }
 
 impl App {
@@ -65,11 +66,16 @@ impl App {
         let head = v.and_then(|v| v.data.refs.iter().find(|r| r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref()));
         let has_changes = v.is_some_and(|v| !v.data.status.unstaged.is_empty() || !v.data.status.staged.is_empty());
         let spin = r.and_then(|r| r.spinning);
+        // The three parts never overlap. When the window is narrow the pickers give up room
+        // first, the branch picker before the repository picker; the button group never slides
+        // left over them and Actions and Search never slide left over the group.
+        let group_w = 52.0 * 7.0 + 16.0 + 14.0 + 1.0 + 8.0 + 52.0;
+        let right_w = 56.0 + 52.0;
+        let pickers = (rect.width() - group_w - right_w - 20.0 - 18.0).max(0.0);
+        let repo_w = (pickers - 130.0).clamp(80.0, 150.0);
+        let branch_w = (pickers - repo_w).clamp(60.0, 130.0);
         // Left: repository and branch pickers.
-        let center_w = gitcraft_core::metrics::TOOLBAR_CENTER_WIDTH as f32;
-        let left_max = gitcraft_core::metrics::TOOLBAR_LEFT_MAX as f32;
-        let left_w = (rect.width() - center_w - 108.0).clamp(300.0_f32.min(rect.width() * 0.45), left_max).min(rect.width() * 0.45);
-        let repo_rect = Rect::from_min_size(rect.min, vec2(150.0_f32.min(left_w - 150.0).max(80.0), rect.height()));
+        let repo_rect = Rect::from_min_size(rect.min, vec2(repo_w, rect.height()));
         let resp = ui.interact(repo_rect, ui.scope_id().with("repo_picker"), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(repo_rect, CornerRadius::ZERO, c.white(0.05));
@@ -97,7 +103,7 @@ impl App {
         });
         let chev = Rect::from_min_size(pos2(repo_rect.right() + 2.0, rect.center().y - 8.0), Vec2::splat(16.0));
         icons::paint(ui, chev, Icon::ChevronRight, 16.0, c.white(0.5));
-        let branch_rect = Rect::from_min_size(pos2(chev.right() + 2.0, rect.top()), vec2(130.0, rect.height()));
+        let branch_rect = Rect::from_min_size(pos2(chev.right() + 2.0, rect.top()), vec2(branch_w, rect.height()));
         let resp = ui.interact(branch_rect, ui.scope_id().with("branch_picker"), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(branch_rect, CornerRadius::ZERO, c.white(0.05));
@@ -126,8 +132,6 @@ impl App {
             });
         }
         // Centre: Undo, Redo, Pull, Push, Branch, Stash, Pop | Terminal.
-        let group_w = 52.0 * 7.0 + 16.0 + 14.0 + 1.0 + 8.0 + 52.0;
-        let right_w = 56.0 + 52.0;
         let ideal = rect.center().x - group_w / 2.0 + 20.0;
         let min_x = branch_rect.right() + 20.0;
         let max_x = rect.right() - right_w - group_w;
@@ -156,7 +160,7 @@ impl App {
             ui.painter().rect_filled(chev, CornerRadius::ZERO, c.white(0.05));
         }
         icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if pulling { 0.35 } else { 1.0 }));
-        let cresp = cresp.on_hover_text("Pull options");
+        let cresp = cresp.tip("Pull options");
         egui::Popup::menu(&cresp).show(|ui| {
             let entries = PULL_LABELS
                 .iter()
@@ -196,7 +200,7 @@ impl App {
             let sresp = ui.interact(chev, ui.scope_id().with("stash_options"), Sense::click());
             icons::paint(ui, chev, Icon::ChevronDown, 12.0, if sresp.hovered() { c.fg } else { c.fg3 });
             let untracked = v.is_some_and(|v| v.data.status.unstaged.iter().any(|f| f.status == '?'));
-            let sresp = sresp.on_hover_text("Stash options");
+            let sresp = sresp.tip("Stash options");
             egui::Popup::menu(&sresp).show(|ui| {
                 let entries = vec![
                     ctxmenu::off(item("Stash with a title", move |app| app.prompt_stash(tab, "stash")), has_changes),
@@ -217,9 +221,9 @@ impl App {
         if tb(ui, slot(x, 52.0), Icon::SquareTerminal, "Terminal", labels, "Toggle the terminal panel (Ctrl+`)", v.is_some(), 0, false).clicked() {
             later.push(Box::new(|app| app.settings.toggle("showTerminal", false)));
         }
-        // Right: Actions and Search.
-        let search = slot(rect.right() - 52.0, 52.0);
-        let actions = slot(search.left() - 56.0, 56.0);
+        // Right: Actions and Search, at the right edge but never over the group.
+        let actions = slot((rect.right() - right_w).max(x + 52.0), 56.0);
+        let search = slot(actions.right(), 52.0);
         let aresp = tb(ui, actions, Icon::Zap, "Actions", labels, "", v.is_some(), 0, false);
         if v.is_some() {
             egui::Popup::menu(&aresp).show(|ui| ctxmenu::show(ui, self.actions_menu(tab), later));

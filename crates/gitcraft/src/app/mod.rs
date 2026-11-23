@@ -4,6 +4,7 @@
 pub mod frame;
 mod agents;
 mod ai;
+mod avatars;
 mod chrome;
 mod commands;
 mod conflict;
@@ -102,6 +103,8 @@ pub enum Msg {
     Toast(bool, String),
     Copy(String),
     OpenRepo(String),
+    /// A missing repository's tab was pointed at this repository: replace the tab with it.
+    Located { tab: u64, path: String },
     Repo { tab: u64, generation: u64, result: Box<Result<RepoView, String>> },
     Page { tab: u64, generation: u64, result: Box<Result<HistoryPage, String>> },
     Status { tab: u64, generation: u64, result: Result<gitcraft_core::git::WorkStatus, String> },
@@ -116,11 +119,10 @@ pub enum Msg {
     Locks { tab: u64, result: Result<Vec<gitcraft_core::manage::LfsLock>, String> },
     Plan { tab: u64, result: Result<rebase::RebasePlan, String> },
     QuickEdit { tab: u64, result: Result<Option<Action>, String> },
-    Cloned { dir: String, result: Result<String, String> },
-    Initialized(Result<gitcraft_core::manage::InitOutcome, String>),
+    Cloned { token: u64, dir: String, result: Result<String, String> },
+    Initialized(u64, Result<gitcraft_core::manage::InitOutcome, String>),
     Mono { title: String, result: Result<String, String> },
     Job(Job),
-    JobDone(String),
     Tracked(Result<Vec<String>, String>),
     Diff { tab: u64, key: String, versions: Box<gitcraft_core::files::FileVersions>, lines: Option<Vec<gitcraft_core::git::DiffLine>> },
     Saved { tab: u64, file: String, result: Result<(), String> },
@@ -184,6 +186,8 @@ pub struct App {
     screenshot_sent: bool,
     frames: u64,
     movable: Option<bool>,
+    /// Where the tabs bar ends, so Preferences start below it.
+    below_tabs: f32,
     pub(crate) ctx: egui::Context,
     pub(crate) engine: Arc<Engine>,
     pub(crate) repos: HashMap<u64, repo::RepoTab>,
@@ -259,6 +263,7 @@ impl App {
             screenshot_sent: false,
             frames: 0,
             movable: None,
+            below_tabs: 0.0,
             ctx: ctx.clone(),
             engine: engine.clone(),
             repos: HashMap::new(),
@@ -312,6 +317,8 @@ impl App {
         let choice = opts.theme.unwrap_or_else(|| app.settings.theme());
         theme::choose(theme::Theme::from_id(&choice), &cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(app.settings.zoom());
+        // The zoom keys are commands of their own, so they step through the zoom levels and are saved.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if let Some(warning) = app.settings.warning.take() {
             app.toast(false, warning);
         }
@@ -629,6 +636,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.frames += 1;
         theme::follow_system(&ctx);
+        // UI Customization > Display author initials … instead of avatars.
+        avatars::enable(!self.settings.flag("authorInitials", false));
         for msg in self.inbox.take() {
             self.handle(msg);
         }
@@ -677,6 +686,11 @@ impl eframe::App for App {
         }
         if let Err(e) = self.settings.save_when_due(&ctx) {
             self.toast(false, format!("Could not save preferences: {e}"));
+        }
+        // Another window changed the preferences: follow its theme and zoom here too.
+        if self.settings.take_reloaded() {
+            theme::choose(theme::Theme::from_id(&self.settings.theme()), &ctx);
+            ctx.set_zoom_factor(self.settings.zoom());
         }
         self.drive_screenshot(&ctx);
         // Last, so a file dialog asked for anywhere this frame shows now, over this window.
@@ -753,6 +767,10 @@ impl App {
             }
             Msg::Copy(text) => self.copy(&text),
             Msg::OpenRepo(path) => self.open_repo(&path),
+            Msg::Located { tab, path } => {
+                self.close_tab(tab);
+                self.open_repo(&path);
+            }
             Msg::Repo { tab, generation, result } => self.repo_loaded(tab, generation, *result),
             Msg::Page { tab, generation, result } => self.page_loaded(tab, generation, *result),
             Msg::Status { tab, generation, result } => self.status_loaded(tab, generation, result),
@@ -802,8 +820,8 @@ impl App {
             }
             Msg::Plan { tab, result } => self.plan_ready(tab, result),
             Msg::QuickEdit { tab, result } => self.quick_ready(tab, result),
-            Msg::Cloned { dir, result } => self.cloned(dir, result),
-            Msg::Initialized(result) => self.initialized(result),
+            Msg::Cloned { token, dir, result } => self.cloned(token, dir, result),
+            Msg::Initialized(token, result) => self.initialized(token, result),
             Msg::Mono { title, result } => match result {
                 Ok(text) => self.dialog = Some(dialogs::Dialog::new(&title, dialogs::Body::Mono(text)).width(820.0).cancel_label("Close")),
                 Err(e) => self.toast(false, e),
@@ -832,11 +850,6 @@ impl App {
                         Ok(l) => repo::Loaded::Ready(l),
                         Err(e) => repo::Loaded::Failed(e),
                     });
-                }
-            }
-            Msg::JobDone(id) => {
-                if self.job.as_ref().is_some_and(|j| j.id == id) {
-                    self.job = None;
                 }
             }
         }

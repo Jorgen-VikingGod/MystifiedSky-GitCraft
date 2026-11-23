@@ -8,6 +8,7 @@
 //! The `systemTitleBar` preference gives the frame to the system everywhere (after a restart).
 //! `GITCRAFT_TITLEBAR=app` or `=system` (or `CRAFT_TITLEBAR`) wins over that preference.
 
+use super::widgets::Tip;
 use super::theme::{BAD, p};
 use craft_window::policy::{Backend, CaptionFamily, Captions, Frame, TitleBarPref};
 use craft_window::{Button, Layout, Prefix};
@@ -16,7 +17,8 @@ use std::sync::OnceLock;
 
 const HEIGHT: f32 = 36.0;
 pub const RADIUS: u8 = 10;
-const EDGE: f32 = 6.0;
+/// How far in from the window's border the resize handles reach (corners twice as far).
+const EDGE: f32 = 9.0;
 
 static FRAME: OnceLock<Frame> = OnceLock::new();
 
@@ -116,13 +118,28 @@ fn button_id(kind: Button) -> Id {
     Id::NULL.with(("window_button", kind as u8))
 }
 
-fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Button, is_max: bool) {
+/// Where a window button at `x` in the title `bar` takes clicks.
+fn button_rect(bar: Rect, x: f32, family: CaptionFamily) -> Rect {
     let w = slot(family);
-    let centre = Pos2::new(x + w / 2.0, bar.center().y);
-    let rect = match family {
+    match family {
         CaptionFamily::Windows => Rect::from_min_max(Pos2::new(x, bar.top()), Pos2::new(x + w, bar.bottom())),
-        _ => Rect::from_center_size(centre, vec2(26.0, 26.0)),
-    };
+        _ => Rect::from_center_size(Pos2::new(x + w / 2.0, bar.center().y), vec2(26.0, 26.0)),
+    }
+}
+
+/// The window buttons' left edges in the title `bar`, as `title_bar` lays them out.
+fn button_xs(c: &Captions, bar: Rect) -> Vec<(f32, Button)> {
+    let w = slot(c.family);
+    let pad = if c.family == CaptionFamily::Windows { 0.0 } else { 7.0 };
+    let n = c.layout.right.len() as f32;
+    let left = c.layout.left.iter().enumerate().map(|(i, k)| (bar.left() + pad + i as f32 * w, *k));
+    let right = c.layout.right.iter().enumerate().map(|(i, k)| (bar.right() - pad - (n - i as f32) * w, *k));
+    left.chain(right).collect()
+}
+
+fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Button, is_max: bool) {
+    let rect = button_rect(bar, x, family);
+    let centre = Pos2::new(x + slot(family) / 2.0, bar.center().y);
     let response = ui.interact(rect, button_id(kind), Sense::click());
     let hovered = response.hovered();
     let close = kind == Button::Close;
@@ -184,7 +201,7 @@ fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Bu
         Button::Maximize => "Maximize",
         Button::Close => "Close",
     };
-    let response = response.on_hover_text(tip);
+    let response = response.tip(tip);
     if response.clicked() {
         ui.ctx().send_viewport_cmd(match kind {
             Button::Minimize => ViewportCommand::Minimized(true),
@@ -192,11 +209,6 @@ fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Bu
             Button::Close => ViewportCommand::Close,
         });
     }
-}
-
-/// Whether the app draws its own title bar row (and so how far down its content starts).
-pub fn has_title_bar() -> bool {
-    !matches!(current(), Frame::Native)
 }
 
 /// The top row of the window, when the app draws it: the title in the middle and the window
@@ -226,14 +238,8 @@ pub fn title_bar(ui: &mut Ui, title: &str) {
             craft_window::title_bar::empty_area(ui, rect);
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(13.5), p().fg);
             if let Some(c) = captions() {
-                let w = slot(c.family);
-                let pad = if c.family == CaptionFamily::Windows { 0.0 } else { 7.0 };
-                for (i, kind) in c.layout.left.iter().enumerate() {
-                    window_button(ui, rect, rect.left() + pad + i as f32 * w, c.family, *kind, is_max);
-                }
-                let n = c.layout.right.len() as f32;
-                for (i, kind) in c.layout.right.iter().enumerate() {
-                    window_button(ui, rect, rect.right() - pad - (n - i as f32) * w, c.family, *kind, is_max);
+                for (x, kind) in button_xs(c, rect) {
+                    window_button(ui, rect, x, c.family, kind, is_max);
                 }
             }
         });
@@ -252,7 +258,8 @@ pub fn after_ui(ctx: &egui::Context, applied: &mut Option<bool>) {
 /// Invisible handles along the window's edges for resizing, and a thin outline, when the app
 /// draws the frame.
 pub fn window_edges(ctx: &egui::Context) {
-    if captions().is_none() || maximized(ctx) || fullscreen(ctx) {
+    let Some(captions) = captions() else { return };
+    if maximized(ctx) || fullscreen(ctx) {
         return;
     }
     let full = ctx.content_rect();
@@ -272,12 +279,23 @@ pub fn window_edges(ctx: &egui::Context) {
         (at(0.0, h - c, c, c), D::SouthWest, C::ResizeSouthWest),
         (at(w - c, h - c, c, c), D::SouthEast, C::ResizeSouthEast),
     ];
+    // Over a window button, the button takes the click: the handles that reach over it
+    // (a top corner, the top edge) step aside while the pointer is there.
+    let bar = Rect::from_min_size(full.min, vec2(w, HEIGHT));
+    let over_button = ctx.pointer_hover_pos().and_then(|at| button_xs(captions, bar).into_iter().map(|(x, _)| button_rect(bar, x, captions.family)).find(|b| b.contains(at)));
     let corners = window_corners(ctx);
-    egui::Area::new(Id::NULL.with("window_edges"))
-        .order(egui::Order::Foreground)
+    // Above everything, Preferences, dialogs and menus included: clicking into another layer
+    // raises it over the others of its order, which would otherwise cover the edges.
+    let id = Id::NULL.with("window_edges");
+    ctx.move_to_top(egui::LayerId::new(egui::Order::Tooltip, id));
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
         .fixed_pos(full.min)
         .show(ctx, |ui| {
             for (i, (rect, dir, cursor)) in zones.into_iter().enumerate() {
+                if over_button.is_some_and(|b| b.intersects(rect)) {
+                    continue;
+                }
                 let r = ui.interact(rect, Id::NULL.with(("window_edge", i)), Sense::drag());
                 if r.hovered() {
                     ctx.set_cursor_icon(cursor);

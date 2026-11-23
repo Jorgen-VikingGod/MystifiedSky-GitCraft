@@ -27,6 +27,9 @@ pub struct HistoryCursor {
     pub layout: graph::LayoutCursor,
     #[serde(default)]
     pub filter: git::HistoryFilter,
+    /// Stashes made on commits further down, placed when their page loads.
+    #[serde(default)]
+    pub stashes: Vec<git::Stash>,
 }
 
 #[derive(Serialize)]
@@ -51,11 +54,17 @@ pub fn open_repo(engine: &Engine, path: &str, max: Option<usize>, view: Option<g
         rewrite::cleanup_replay_files(&root);
     }
     let view = view.unwrap_or_default();
-    let data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view)?;
+    let mut data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view)?;
     let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
     let mut layout = graph::LayoutCursor::new(pinned_sha.as_deref());
+    // Stashes are rows of the graph too, unless the history is filtered.
+    let loaded = data.commits.len();
+    let pending = if view.filter.is_active() { Vec::new() } else { place_stashes(&mut data.commits, data.stashes.clone()) };
+    if data.commits.len() != loaded {
+        data.index_of = data.commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
+    }
     let graph = layout.append(&data.commits);
-    let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: data.commits.len(), layout, filter: view.filter.clone() });
+    let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: loaded, layout, filter: view.filter.clone(), stashes: pending });
     // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
     let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
     Ok(RepoView { name: git::repo_name(&root), undo: engine.undo_info(&root_s), path: root_s, data, graph, history_cursor })
@@ -63,10 +72,27 @@ pub fn open_repo(engine: &Engine, path: &str, max: Option<usize>, view: Option<g
 
 /// The next page of history after `cursor`.
 pub fn history_page(path: &str, mut cursor: HistoryCursor, max: Option<usize>) -> Result<HistoryPage, String> {
-    let (commits, has_more) = git::history_page(Path::new(path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000), &cursor.filter)?;
-    let graph = cursor.layout.append(&commits);
+    let (mut commits, has_more) = git::history_page(Path::new(path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000), &cursor.filter)?;
     cursor.offset += commits.len();
+    cursor.stashes = place_stashes(&mut commits, std::mem::take(&mut cursor.stashes));
+    let graph = cursor.layout.append(&commits);
     Ok(HistoryPage { commits, graph, has_more, history_cursor: has_more.then_some(cursor) })
+}
+
+/// Put each stash into `commits` as a row of its own, at its date but above the commit it was
+/// made on, with that commit as its only parent, so the graph draws it as a short branch.
+/// Returns the stashes whose commit isn't among `commits` (a later page has it).
+pub fn place_stashes(commits: &mut Vec<git::Commit>, stashes: Vec<git::Stash>) -> Vec<git::Stash> {
+    let mut later = Vec::new();
+    for s in stashes {
+        let Some(base) = commits.iter().position(|c| c.sha == s.base) else {
+            later.push(s);
+            continue;
+        };
+        let at = commits[..base].iter().position(|c| c.time <= s.time).unwrap_or(base);
+        commits.insert(at, git::Commit { sha: s.sha.clone(), parents: vec![s.base.clone()], author: s.author.clone(), email: s.email.clone(), time: s.time, summary: s.message.clone(), body: String::new() });
+    }
+    later
 }
 
 /// One commit's full message, author and parents.
@@ -243,7 +269,8 @@ pub fn clone_repo(engine: &Engine, url: &str, parent: &str, options: Option<Clon
     if url.is_empty() || url.starts_with('-') || url.contains(['\r', '\n', '\0']) {
         return Err("Enter a repository URL or path, without command options.".into());
     }
-    let parent = PathBuf::from(parent);
+    // Absolute, so Git (which runs in the parent folder) and the steps after it use one place.
+    let parent = std::path::absolute(parent).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
     let opts = options.unwrap_or_default();
     let base = clone_folder_base(&url);
@@ -430,6 +457,22 @@ mod tests {
         assert_eq!(clone_args(&CloneOptions::default()).unwrap(), ["--progress"]);
         let blank = CloneOptions { branch: Some("  ".into()), depth: Some(0), ..Default::default() };
         assert_eq!(clone_args(&blank).unwrap(), ["--progress"]);
+    }
+
+    #[test]
+    fn stashes_sit_at_their_date_above_the_commit_they_were_made_on() {
+        let commit = |sha: &str, time: i64, parents: &[&str]| git::Commit { sha: sha.into(), parents: parents.iter().map(|p| p.to_string()).collect(), author: String::new(), email: String::new(), time, summary: String::new(), body: String::new() };
+        let stash = |sha: &str, base: &str, time: i64| git::Stash { index: 0, sha: sha.into(), message: format!("On main: {sha}"), base: base.into(), author: "A".into(), email: "a@example.invalid".into(), time };
+        let mut commits = vec![commit("c3", 30, &["c2"]), commit("c2", 20, &["c1"]), commit("c1", 10, &[])];
+        // s1 is newer than everything but was made on c2; s0 was made on c1 between c1 and c2;
+        // s9's commit is on a later page.
+        let later = place_stashes(&mut commits, vec![stash("s1", "c2", 40), stash("s0", "c1", 15), stash("s9", "c0", 5)]);
+        let order: Vec<&str> = commits.iter().map(|c| c.sha.as_str()).collect();
+        assert_eq!(order, ["s1", "c3", "c2", "s0", "c1"]);
+        assert_eq!(commits[0].parents, ["c2"], "a stash row's only parent is its commit");
+        assert_eq!(commits[0].summary, "On main: s1");
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].sha, "s9");
     }
 
     #[test]

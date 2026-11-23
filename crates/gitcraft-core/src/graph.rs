@@ -104,18 +104,12 @@ impl LayoutCursor {
             let mut down = Vec::new();
             for (pi, p) in c.parents.iter().enumerate() {
                 if pi == 0 {
-                    // First parent: same lane, unless a lane to the left already waits for it.
-                    // A sibling's lane to the right keeps running and joins at the parent itself,
-                    // so a line never ends on a commit that is not its parent.
-                    match lanes.iter().position(|l| l.as_deref() == Some(p.as_str())) {
-                        Some(j) if j < col => {
-                            down.push(Seg { from: col as u16, to: j as u16, color: (col % GRAPH_COLORS) as u8 });
-                        }
-                        _ => {
-                            lanes[col] = Some(p.clone());
-                            down.push(Seg { from: col as u16, to: col as u16, color: (col % GRAPH_COLORS) as u8 });
-                        }
-                    }
+                    // First parent: the line stays in this lane down to the parent and turns into
+                    // it there, even when another lane already waits for it, so a branch's line
+                    // runs straight in its own lane and starts from the side of the commit it
+                    // grew from. It never ends on a commit that is not its parent.
+                    lanes[col] = Some(p.clone());
+                    down.push(Seg { from: col as u16, to: col as u16, color: (col % GRAPH_COLORS) as u8 });
                 } else if let Some(j) = lanes.iter().position(|l| l.as_deref() == Some(p.as_str())) {
                     down.push(Seg { from: col as u16, to: j as u16, color: (j % GRAPH_COLORS) as u8 });
                 } else {
@@ -251,6 +245,18 @@ mod tests {
         assert_eq!(c_row.down_runs, vec![[0, 1]], "c's line and d's line both continue to p");
         let p_row = &g.rows[3];
         assert!(p_row.up.iter().any(|s| s.from == 1 && s.to == 0), "d's line joins at p: {:?}", p_row.up);
+    }
+
+    #[test]
+    fn a_branch_runs_in_its_own_lane_and_joins_its_parent_from_the_side() {
+        // x and f both grow from p; x's lane (0) already waits for p when f comes. f's line stays
+        // in lane 1 down to p and turns into p there, instead of bending into lane 0 under f.
+        let commits = vec![c("x", &["p"]), c("f", &["p"]), c("p", &[])];
+        let g = layout(&commits);
+        assert_eq!((g.rows[0].col, g.rows[1].col, g.rows[2].col), (0, 1, 0));
+        assert!(g.rows[1].down.iter().all(|s| s.from == s.to), "no lane change under f: {:?}", g.rows[1].down);
+        assert_eq!(g.rows[1].down_runs, vec![[0, 1]]);
+        assert!(g.rows[2].up.iter().any(|s| s.from == 1 && s.to == 0), "f's line turns into p: {:?}", g.rows[2].up);
     }
 
     #[test]

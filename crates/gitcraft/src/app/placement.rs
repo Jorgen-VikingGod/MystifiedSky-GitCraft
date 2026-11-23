@@ -1,5 +1,5 @@
 //! Where the window opens: the size, position and maximized state of the last run, kept in
-//! `egui-window.json` beside `settings.json` by craft-window's restore store.
+//! `window.json` beside `settings.json` by craft-window's restore store.
 //!
 //! The monitors aren't known before the window exists, so the saved geometry is applied as it is
 //! (raised to the smallest size) and the system keeps the window on screen. Wayland doesn't tell
@@ -28,13 +28,25 @@ fn restore() -> &'static Mutex<Restore> {
         let store = if std::env::var_os("GITCRAFT_NO_WINDOW_RESTORE").is_some() {
             Store::in_memory()
         } else {
-            Store::at(&gitcraft_core::sample::data_dir().join("egui-window.json"))
+            Store::at(&window_file())
         };
         if let Some(moved) = store.moved_aside() {
             eprintln!("The window file was damaged and was moved to {}.", moved.display());
         }
         Mutex::new(Restore { store, no_position: Backend::from_env() == Backend::Wayland, changed: None })
     })
+}
+
+/// craft-window's `window.json` in the settings folder, beside `settings.json`. A file left by
+/// an earlier build under its old name is moved there once.
+fn window_file() -> std::path::PathBuf {
+    let dir = gitcraft_core::sample::data_dir();
+    let file = dir.join(craft_window::restore::FILE_NAME);
+    let old = dir.join("egui-window.json");
+    if !file.exists() && old.exists() {
+        let _ = std::fs::rename(&old, &file);
+    }
+    file
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Restore> {

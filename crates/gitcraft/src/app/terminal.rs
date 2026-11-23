@@ -1,6 +1,7 @@
 //! The in-app terminal under the graph: terminal tabs, each a shell in the repository folder,
 //! drawn from alacritty_terminal's character grid in GitCraft's terminal colours.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::Later;
 use super::icons::{self, Icon};
@@ -8,8 +9,10 @@ use super::repo::RepoTab;
 use super::theme::{ACCENT, p};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::RegexSearch;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
@@ -88,6 +91,63 @@ pub struct Panel {
     pub active: usize,
     next: usize,
     focused: bool,
+    /// The find bar over the screen (Ctrl+Shift+F), while it is open.
+    find: Option<Find>,
+}
+
+#[derive(Default)]
+struct Find {
+    needle: String,
+    /// Nothing matched the last search.
+    missing: bool,
+    /// Put the keyboard in the field on the next frame.
+    focus: bool,
+}
+
+/// A search for `needle` as plain text, ignoring case.
+fn search_for(needle: &str) -> Option<RegexSearch> {
+    let mut pattern = String::from("(?i)");
+    for ch in needle.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(ch) {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    RegexSearch::new(&pattern).ok()
+}
+
+/// Select and show the next match of `needle` after the current one (`back`: before it).
+/// Starts from the newest output; the search wraps around. Returns whether it found one.
+fn find_in<T: EventListener>(term: &mut Term<T>, needle: &str, back: bool, again: bool) -> bool {
+    let Some(mut regex) = search_for(needle).filter(|_| !needle.is_empty()) else {
+        term.selection = None;
+        return !needle.is_empty();
+    };
+    let current = term.selection.as_ref().and_then(|s| s.to_range(term));
+    let last = Point::new(Line(term.screen_lines() as i32 - 1), Column(term.columns() - 1));
+    // Typing more tries again from where the shown match starts; Next and Previous step from the
+    // cell after or before it. Without a match shown, the search goes up from the newest line.
+    let (origin, direction) = match (&current, again, back) {
+        (Some(r), false, _) => (r.start, Direction::Right),
+        (Some(r), true, false) => (r.end.add(term, Boundary::None, 1), Direction::Right),
+        (Some(r), true, true) => (r.start.sub(term, Boundary::None, 1), Direction::Left),
+        (None, _, _) => (last, Direction::Left),
+    };
+    let side = if direction == Direction::Left { Side::Right } else { Side::Left };
+    let found = term.search_next(&mut regex, origin, direction, side, None);
+    match found {
+        Some(m) => {
+            let mut sel = Selection::new(SelectionType::Simple, *m.start(), Side::Left);
+            sel.update(*m.end(), Side::Right);
+            term.selection = Some(sel);
+            term.scroll_to_point(*m.start());
+            true
+        }
+        None => {
+            term.selection = None;
+            false
+        }
+    }
 }
 
 fn rgb(v: u32) -> Color32 {
@@ -306,13 +366,19 @@ impl App {
             x += w;
         }
         let plus = Rect::from_min_size(pos2(x + 2.0, bar.top() + 2.0), Vec2::splat(22.0));
-        let presp = ui.interact(plus, ui.scope_id().with("term_add"), Sense::click()).on_hover_text("New terminal");
+        let presp = ui.interact(plus, ui.scope_id().with("term_add"), Sense::click()).tip("New terminal");
         icons::paint(ui, plus, Icon::Plus, 13.0, if presp.hovered() { c.white(1.0) } else { c.fg2 });
         if presp.clicked() {
             add = true;
         }
+        let find = Rect::from_min_size(pos2(bar.right() - 50.0, bar.top() + 2.0), Vec2::splat(22.0));
+        let fresp = ui.interact(find, ui.scope_id().with("term_find"), Sense::click()).tip("Find in terminal (Ctrl+Shift+F)");
+        icons::paint(ui, find, Icon::Search, 13.0, if fresp.hovered() || panel.find.is_some() { c.white(1.0) } else { c.fg2 });
+        if fresp.clicked() {
+            panel.find.get_or_insert_with(Find::default).focus = true;
+        }
         let hide = Rect::from_min_size(pos2(bar.right() - 26.0, bar.top() + 2.0), Vec2::splat(22.0));
-        let hresp = ui.interact(hide, ui.scope_id().with("term_hide"), Sense::click()).on_hover_text("Hide the terminal (Ctrl+`)");
+        let hresp = ui.interact(hide, ui.scope_id().with("term_hide"), Sense::click()).tip("Hide the terminal (Ctrl+`)");
         icons::paint(ui, hide, Icon::ChevronDown, 14.0, if hresp.hovered() { c.white(1.0) } else { c.fg2 });
         if hresp.clicked() {
             later.push(Box::new(|app| app.settings.set("showTerminal", false)));
@@ -390,6 +456,10 @@ impl App {
                     egui::Event::Copy => {}
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
                         if modifiers.ctrl && modifiers.shift && key == egui::Key::C {
+                            continue;
+                        }
+                        if modifiers.command && modifiers.shift && key == egui::Key::F {
+                            panel.find.get_or_insert_with(Find::default).focus = true;
                             continue;
                         }
                         if let Some(b) = key_bytes(key, modifiers, app_cursor) {
@@ -521,6 +591,7 @@ impl App {
         }
         // Context menu: copy and paste.
         let tid = s.id;
+        let mut open_find = false;
         resp.context_menu(|ui| {
             if ui.button("Copy").clicked() {
                 if let Some(text) = s.term.selection_to_string() {
@@ -538,7 +609,70 @@ impl App {
                 s.term.grid_mut().clear_history();
                 ui.close();
             }
+            if ui.button("Find in terminal").clicked() {
+                open_find = true;
+                ui.close();
+            }
         });
+        if open_find {
+            panel.find.get_or_insert_with(Find::default).focus = true;
+        }
+        // The find bar, top right over the screen.
+        let mut close_find = false;
+        if let Some(f) = panel.find.as_mut() {
+            let bar_rect = Rect::from_min_size(pos2(screen.right() - 300.0, screen.top() + 2.0), vec2(296.0, 28.0));
+            ui.painter().rect(bar_rect, CornerRadius::same(4), c.panel, Stroke::new(1.0, c.line), egui::StrokeKind::Inside);
+            let field = Rect::from_min_size(bar_rect.min + vec2(6.0, 4.0), vec2(if f.missing { 120.0 } else { 186.0 }, 20.0));
+            ui.painter().rect_filled(field, CornerRadius::same(2), c.field);
+            let edit = ui.put(
+                field.shrink2(vec2(4.0, 0.0)),
+                egui::TextEdit::singleline(&mut f.needle).id(ui.scope_id().with(("term_find_edit", tab))).frame(egui::Frame::NONE).font(FontId::proportional(12.0)).hint_text("Find in terminal").align(Align2::LEFT_CENTER),
+            );
+            if std::mem::take(&mut f.focus) {
+                edit.request_focus();
+            }
+            let (enter, shift, escape) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.modifiers.shift, i.key_pressed(egui::Key::Escape)));
+            let mut step: Option<bool> = None;
+            if edit.changed() {
+                f.missing = !find_in(&mut s.term, &f.needle, false, false);
+            }
+            if edit.lost_focus() && enter {
+                step = Some(shift);
+                edit.request_focus();
+            }
+            if (edit.has_focus() || edit.lost_focus()) && escape {
+                close_find = true;
+            }
+            if f.missing {
+                ui.painter().text(pos2(field.right() + 8.0, bar_rect.center().y), Align2::LEFT_CENTER, "No match", FontId::proportional(12.0), c.fg3);
+            }
+            let button = |i: f32, icon: Icon, tip: &str| {
+                let r = Rect::from_min_size(pos2(bar_rect.right() - 6.0 - (3.0 - i) * 24.0, bar_rect.top() + 3.0), Vec2::splat(22.0));
+                let resp = ui.interact(r, ui.scope_id().with(("term_find_button", i as u8)), Sense::click()).tip(tip);
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, CornerRadius::same(3), c.white(0.08));
+                }
+                icons::paint(ui, r, icon, 14.0, if resp.hovered() { c.white(1.0) } else { c.fg2 });
+                resp.clicked()
+            };
+            if button(0.0, Icon::ChevronUp, "Previous match (Shift+Enter)") {
+                step = Some(true);
+            }
+            if button(1.0, Icon::ChevronDown, "Next match (Enter)") {
+                step = Some(false);
+            }
+            if button(2.0, Icon::X, "Close terminal search (Esc)") {
+                close_find = true;
+            }
+            if let Some(back) = step {
+                f.missing = !find_in(&mut s.term, &f.needle, back, true);
+            }
+        }
+        if close_find {
+            panel.find = None;
+            s.term.selection = None;
+            resp.request_focus();
+        }
         if focused {
             ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::ZERO, Stroke::new(1.0, ACCENT.gamma_multiply(0.0)), egui::StrokeKind::Inside);
         }
@@ -548,6 +682,48 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn term_with(text: &str) -> Term<Listener> {
+        let listener = Listener { replies: Default::default(), title: Default::default() };
+        let mut term = Term::new(Config { scrolling_history: 100, ..Config::default() }, &Size { cols: 40, rows: 5 }, listener);
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut term, text.as_bytes());
+        term
+    }
+
+    fn shown(term: &Term<Listener>) -> Option<(i32, usize)> {
+        term.selection.as_ref().and_then(|s| s.to_range(term)).map(|r| (r.start.line.0, r.start.column.0))
+    }
+
+    #[test]
+    fn find_starts_at_the_newest_match_and_steps_both_ways() {
+        // Eight lines on a five-line screen: the first three are in the scrollback.
+        let mut term = term_with("alpha one\r\nbeta\r\nALPHA two\r\nc\r\nd\r\ne\r\nalpha three\r\nf");
+        assert!(find_in(&mut term, "alpha", false, false));
+        let newest = shown(&term).unwrap();
+        assert_eq!(newest.1, 0);
+        // Previous goes up to the case-insensitive "ALPHA two", then "alpha one".
+        assert!(find_in(&mut term, "alpha", true, true));
+        let middle = shown(&term).unwrap();
+        assert!(middle.0 < newest.0);
+        assert!(find_in(&mut term, "alpha", true, true));
+        assert!(shown(&term).unwrap().0 < middle.0);
+        // Next comes back down.
+        assert!(find_in(&mut term, "alpha", false, true));
+        assert_eq!(shown(&term).unwrap(), middle);
+        // Typing on keeps the shown match while it still matches.
+        assert!(find_in(&mut term, "alpha t", false, false));
+        assert_eq!(shown(&term).unwrap(), middle);
+        assert!(!find_in(&mut term, "zeta", false, false));
+        assert!(term.selection.is_none());
+        // Regular expression characters are plain text.
+        let mut term = term_with("a.b axb");
+        assert!(find_in(&mut term, "a.b", false, false));
+        assert_eq!(shown(&term), Some((0, 0)));
+        assert!(find_in(&mut term, "a.b", false, true));
+        assert_eq!(shown(&term), Some((0, 0)));
+    }
+
     #[test]
     fn links_are_found_under_the_pointer() {
         let line = "see https://example.invalid/a, then";

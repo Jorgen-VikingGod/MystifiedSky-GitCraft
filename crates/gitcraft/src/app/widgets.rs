@@ -55,9 +55,13 @@ pub fn initials(name: &str) -> String {
     }
 }
 
-/// An author's round mark: their initials on their colour.
+/// An author's round mark: their Gravatar picture, or their initials on their colour.
 pub fn paint_avatar(ui: &Ui, center: egui::Pos2, size: f32, name: &str, email: &str) {
     let painter = ui.painter();
+    if let Some(picture) = super::avatars::texture(ui.ctx(), email) {
+        super::avatars::paint(painter, &picture, center, size, 1.0);
+        return;
+    }
     painter.circle_filled(center, size / 2.0, author_color(&email.trim().to_lowercase()));
     painter.text(center, Align2::CENTER_CENTER, initials(name), FontId::proportional((size * 0.42).max(7.0)), Color32::WHITE);
 }
@@ -76,7 +80,6 @@ pub enum Kind {
     Success,
     Danger,
     Ai,
-    Ghost,
 }
 
 /// A button `height` tall with `text` (and an icon), in one of the app's kinds.
@@ -86,7 +89,7 @@ pub fn button(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, height: f
     let pad = if height <= 24.5 { 8.0 } else { 12.0 };
     let text_color = match kind {
         Kind::Danger => REMOVED,
-        Kind::Default | Kind::Ghost => c.fg,
+        Kind::Default => c.fg,
         _ => c.white(1.0),
     };
     let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(size), text_color);
@@ -100,7 +103,6 @@ pub fn button(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, height: f
         Kind::Success => (GOOD.gamma_multiply(if hover { 0.25 } else { 0.15 }), GOOD),
         Kind::Danger => (if hover { BAD.gamma_multiply(0.1) } else { Color32::TRANSPARENT }, BAD),
         Kind::Ai => (AI.gamma_multiply(if hover { 0.25 } else { 0.15 }), AI),
-        Kind::Ghost => (if hover { c.white(0.08) } else { Color32::TRANSPARENT }, Color32::TRANSPARENT),
     };
     let fade = if enabled { 1.0 } else { 0.4 };
     ui.painter().rect(rect, CornerRadius::same(4), fill.gamma_multiply(fade), Stroke::new(1.0, stroke.gamma_multiply(fade)), StrokeKind::Inside);
@@ -124,7 +126,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, tip: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size + 6.0), Sense::click());
     let ink = if response.hovered() { c.white(1.0) } else { c.fg2 };
     icons::paint(ui, rect, icon, size, ink);
-    if !tip.is_empty() { response.on_hover_text(tip) } else { response }
+    if !tip.is_empty() { response.tip(tip) } else { response }
 }
 
 /// "✎ 3  + 1  − 2": counts of modified, added and deleted files from `x`, centred on `y`.
@@ -393,5 +395,49 @@ mod tests {
         let marks = timeline(&rows, now);
         assert_eq!(marks.get(&1).map(String::as_str), Some("2 days ago"));
         assert!(!marks.contains_key(&0));
+    }
+}
+
+/// The tooltip's look: white text on a black, rounded box, the same in every theme.
+pub fn tooltip_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(0, 0, 0))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .shadow(egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(90) })
+}
+
+/// Tooltips in GitCraft's style: `.tip(text)` in place of egui's `.on_hover_text(text)`.
+pub trait Tip {
+    fn tip(self, text: impl Into<egui::WidgetText>) -> Self;
+}
+
+impl Tip for Response {
+    fn tip(self, text: impl Into<egui::WidgetText>) -> Response {
+        let text: egui::WidgetText = text.into();
+        describe(&self, text.text());
+        let mut tooltip = egui::Tooltip::for_enabled(&self);
+        tooltip.popup = tooltip.popup.frame(tooltip_frame());
+        tooltip.show(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.style_mut().visuals.override_text_color = Some(Color32::WHITE);
+            ui.add(egui::Label::new(text));
+        });
+        self
+    }
+}
+
+/// The tooltip text as the widget's accessible description, and its name when it has none (an
+/// icon-only button), as egui does for its own tooltips.
+fn describe(response: &Response, text: &str) {
+    if response.ctx.has_accesskit_node(response.id) {
+        response.ctx.accesskit_node_builder(response.id, |node| {
+            if node.description().is_none() {
+                node.set_description(text);
+            }
+            if node.role() != egui::accesskit::Role::Label && node.labelled_by().is_empty() && node.label().is_none_or(str::is_empty) {
+                node.set_label(text);
+            }
+        });
     }
 }

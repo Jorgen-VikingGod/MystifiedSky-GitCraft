@@ -4,15 +4,25 @@
 //! The document is held as JSON and only the keys this interface knows are read or changed:
 //! everything else (drafts, profiles, preferences from other versions) is written back
 //! exactly as it was read.
+//!
+//! A repository window runs as a process of its own, with its own copy. Each window saves only
+//! what it changed, merged into the file as it is on disk, and reads the file again when
+//! another window wrote it, so changes made in both windows are all kept.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use gitcraft_core::settings_file::Changes;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Wait this long after the last change before writing, so typing doesn't write on every key.
 const SAVE_AFTER: Duration = Duration::from_millis(400);
+/// After a failed write, wait this long before trying again, so a full or read-only disk
+/// doesn't bring a write and a notice every frame.
+const RETRY_AFTER: Duration = Duration::from_secs(10);
+/// How often to look whether another window changed the file.
+const CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// The zoom steps offered by View > Increase and Decrease Zoom (metrics `zoom_factors`).
 pub const ZOOM_FACTORS: [f32; 12] = [3.0, 2.5, 2.0, 1.75, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8];
@@ -21,13 +31,26 @@ pub struct Store {
     /// `None` for picture-taking runs, which must neither read nor change the user's file.
     path: Option<PathBuf>,
     doc: Value,
-    changed: Option<Instant>,
+    /// When the unwritten changes are due to be written; `None` when everything is written.
+    due: Option<Instant>,
     /// Bumped by every change, so others can tell the preferences moved.
     pub revision: u64,
     /// Shown once at start-up: what was recovered or could not be read.
     pub warning: Option<String>,
     /// False in a repository window of its own, whose tabs aren't the ones to reopen.
     pub shares_tabs: bool,
+    /// What this window changed and has not written yet.
+    changes: Changes,
+    /// When the file was last written, as this window last read or wrote it.
+    seen: Option<SystemTime>,
+    /// When the file was last looked at for changes from another window.
+    checked: Option<Instant>,
+    /// Set when another window's changes were read in; see [`Store::take_reloaded`].
+    reloaded: bool,
+}
+
+fn modified(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 pub fn file() -> PathBuf {
@@ -47,12 +70,13 @@ impl Store {
         };
         // A file that could not be read is left alone rather than overwritten with defaults.
         let path = if warning.as_deref().is_some_and(|w| w.starts_with("Could not read")) { None } else { Some(path) };
-        Store { path, doc, changed: None, revision: 1, warning, shares_tabs: true }
+        let seen = path.as_deref().and_then(modified);
+        Store { path, doc, due: None, revision: 1, warning, shares_tabs: true, changes: Changes::default(), seen, checked: None, reloaded: false }
     }
 
     /// Defaults only, saved nowhere.
     pub fn in_memory() -> Store {
-        Store { path: None, doc: Value::Object(Map::new()), changed: None, revision: 1, warning: None, shares_tabs: true }
+        Store { path: None, doc: Value::Object(Map::new()), due: None, revision: 1, warning: None, shares_tabs: true, changes: Changes::default(), seen: None, checked: None, reloaded: false }
     }
 
     fn settings(&self) -> Option<&Map<String, Value>> {
@@ -69,7 +93,8 @@ impl Store {
         let root = object(&mut self.doc);
         let settings = object(root.entry("settings").or_insert_with(|| Value::Object(Map::new())));
         if settings.get(key) != Some(&value) {
-            settings.insert(key.to_owned(), value);
+            settings.insert(key.to_owned(), value.clone());
+            self.changes.settings.insert(key.to_owned(), Some(value));
             self.touch();
         }
     }
@@ -93,7 +118,8 @@ impl Store {
         let Ok(value) = serde_json::to_value(value) else { return };
         let root = object(&mut self.doc);
         if root.get(key) != Some(&value) {
-            root.insert(key.to_owned(), value);
+            root.insert(key.to_owned(), value.clone());
+            self.changes.sections.insert(key.to_owned(), Some(value));
             self.touch();
         }
     }
@@ -170,14 +196,16 @@ impl Store {
         let tabs = Value::from(paths);
         let active = Value::from(active);
         if root.get("tabs") != Some(&tabs) || root.get("active") != Some(&active) {
-            root.insert("tabs".into(), tabs);
-            root.insert("active".into(), active);
+            root.insert("tabs".into(), tabs.clone());
+            root.insert("active".into(), active.clone());
+            self.changes.sections.insert("tabs".into(), Some(tabs));
+            self.changes.sections.insert("active".into(), Some(active));
             self.touch();
         }
     }
 
     fn touch(&mut self) {
-        self.changed = Some(Instant::now());
+        self.due = Some(Instant::now() + SAVE_AFTER);
         self.revision += 1;
     }
 
@@ -186,29 +214,86 @@ impl Store {
         self.doc.get("settings").cloned().unwrap_or_else(|| Value::Object(Map::new()))
     }
 
+    /// Replace all preferences (a profile switch): the whole object is written as it is.
     pub fn replace_settings(&mut self, value: Value) {
-        object(&mut self.doc).insert("settings".into(), value);
+        object(&mut self.doc).insert("settings".into(), value.clone());
+        self.changes.settings.clear();
+        self.changes.sections.insert("settings".into(), Some(value));
         self.touch();
+    }
+
+    /// Whether another window's changes were read in since the last call, so what is applied
+    /// once (the theme, the zoom) can follow.
+    pub fn take_reloaded(&mut self) -> bool {
+        std::mem::take(&mut self.reloaded)
+    }
+
+    /// With nothing waiting to be written: read the file again if another window wrote it.
+    fn reload_if_changed(&mut self) {
+        let Some(path) = self.path.clone() else { return };
+        if self.checked.is_some_and(|t| t.elapsed() < CHECK_EVERY) {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        let now = modified(&path);
+        if now == self.seen {
+            return;
+        }
+        if let Ok(mut doc) = gitcraft_core::settings_file::load(&path)
+            && let Some(root) = doc.as_object_mut()
+        {
+            root.remove("recoveryWarning");
+            self.seen = now;
+            if doc != self.doc {
+                self.doc = doc;
+                self.revision += 1;
+                self.reloaded = true;
+            }
+        }
     }
 
     /// Once per frame: write a moment after the last change.
     pub fn save_when_due(&mut self, ctx: &egui::Context) -> Result<(), String> {
-        let Some(changed) = self.changed else { return Ok(()) };
-        if changed.elapsed() < SAVE_AFTER {
-            ctx.request_repaint_after(SAVE_AFTER - changed.elapsed());
+        let Some(due) = self.due else {
+            self.reload_if_changed();
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now < due {
+            ctx.request_repaint_after(due - now);
             return Ok(());
         }
         self.flush()
     }
 
-    /// Write what has not been written yet.
+    /// Write what has not been written yet. A failed write stays pending and is tried again
+    /// a little later.
     pub fn flush(&mut self) -> Result<(), String> {
-        if self.changed.take().is_none() {
+        if self.due.is_none() {
             return Ok(());
         }
-        match &self.path {
-            Some(path) => gitcraft_core::settings_file::save(path, &self.doc),
-            None => Ok(()),
+        let Some(path) = self.path.clone() else {
+            self.changes = Changes::default();
+            self.due = None;
+            return Ok(());
+        };
+        match gitcraft_core::settings_file::save_changes(&path, &self.changes) {
+            Ok(merged) => {
+                self.changes = Changes::default();
+                self.due = None;
+                self.seen = modified(&path);
+                // What other windows saved meanwhile is now part of this copy too.
+                if merged != self.doc {
+                    self.doc = merged;
+                    self.revision += 1;
+                    self.reloaded = true;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.due = Some(Instant::now() + RETRY_AFTER);
+                Err(e)
+            }
         }
     }
 }
@@ -252,8 +337,61 @@ mod tests {
     fn setting_the_same_value_is_not_a_change() {
         let mut store = Store::in_memory();
         store.set("theme", "dark");
-        store.changed = None;
+        store.due = None;
         store.set("theme", "dark");
-        assert!(store.changed.is_none());
+        assert!(store.due.is_none());
+    }
+
+    #[test]
+    fn a_failed_write_stays_pending_and_waits_before_retrying() {
+        let dir = std::env::temp_dir().join(format!("gitcraft-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A folder where the file should be: the write fails.
+        let path = dir.join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+        let mut store = Store::in_memory();
+        store.path = Some(path.clone());
+        store.set("theme", "dark");
+        assert!(store.flush().is_err());
+        let due = store.due.expect("still pending");
+        assert!(due >= Instant::now() + RETRY_AFTER - Duration::from_secs(1));
+        std::fs::remove_dir(&path).unwrap();
+        assert!(store.flush().is_ok());
+        assert!(store.due.is_none());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("dark"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_windows_keep_and_see_each_others_changes() {
+        let dir = std::env::temp_dir().join(format!("gitcraft-two-windows-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let window = || {
+            let mut store = Store::in_memory();
+            store.path = Some(path.clone());
+            store
+        };
+        let (mut main, mut repo) = (window(), window());
+        repo.shares_tabs = false;
+        main.set("zoom", 1.5);
+        main.set_tabs(vec!["/a".into()], 0);
+        repo.set("theme", "light");
+        repo.set_tabs(vec!["/b".into()], 0);
+        main.flush().unwrap();
+        repo.flush().unwrap();
+        // The repository window wrote last and kept the main window's zoom and tabs.
+        let disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(disk["settings"]["zoom"], 1.5);
+        assert_eq!(disk["settings"]["theme"], "light");
+        assert_eq!(disk["tabs"], serde_json::json!(["/a"]));
+        assert_eq!(repo.zoom(), 1.5);
+        // The main window reads the theme in when it next looks.
+        main.checked = None;
+        main.seen = None;
+        main.reload_if_changed();
+        assert_eq!(main.theme(), "light");
+        assert!(main.take_reloaded());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

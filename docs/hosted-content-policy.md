@@ -5,6 +5,7 @@ Pull request and issue descriptions, comments and reviews come from hosting serv
 - Raw HTML in Markdown is left out, not rendered.
 - Links open only `http` and `https` addresses without a user name or password, resolved against the page they came from, and only through the system browser when clicked.
 - Pictures are shown as their alternative text. GitCraft does not download images named in hosted content.
+- Author pictures come only from Gravatar (`gravatar.com`, over HTTPS), looked up by the SHA-256 hash of the commit author's address ([avatars.rs](../crates/gitcraft-core/src/avatars.rs)). Turning on **Display author initials and generic remote icons instead of avatars** in Preferences → UI Customization stops those requests.
 - Check links from CI services open only over HTTPS.
 - Hosting, AI and update requests are made by the back end; hosted content can't start requests of its own.
 

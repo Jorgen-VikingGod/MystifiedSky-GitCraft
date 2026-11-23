@@ -2,6 +2,7 @@
 //! handler runs them, and the Keyboard Shortcuts dialog changes their keys. Keys are saved as
 //! text ("Ctrl+Shift+S"; Ctrl means ⌘ on a Mac for the defaults).
 
+use super::widgets::Tip;
 use super::App;
 use super::icons::{self, Icon};
 use super::repo::Selection;
@@ -189,6 +190,7 @@ pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
         egui::Key::Escape => "Esc".to_owned(),
         egui::Key::Space => "Space".to_owned(),
         egui::Key::Plus | egui::Key::Equals => "=".to_owned(),
+        egui::Key::Minus => "-".to_owned(),
         egui::Key::Backtick => "`".to_owned(),
         egui::Key::OpenBracket => "[".to_owned(),
         egui::Key::CloseBracket => "]".to_owned(),
@@ -198,6 +200,8 @@ pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
             if n.chars().count() == 1 { n.to_uppercase() } else { n }
         }
     };
+    // "+" is Shift+= on many layouts and its own key on others: both are the "=" key.
+    let mods = if key == egui::Key::Plus { egui::Modifiers { shift: false, ..mods } } else { mods };
     let mut parts = Vec::new();
     if mods.ctrl {
         parts.push("Ctrl".to_owned());
@@ -713,7 +717,7 @@ impl App {
                                 let text = if rec { "Press keys…".to_owned() } else if keys.is_empty() { "—".into() } else { label(&keys) };
                                 let tw = ui.painter().layout_no_wrap(text.clone(), FontId::monospace(11.5), c.fg).size().x.max(78.0) + 12.0;
                                 let kr = Rect::from_min_size(pos2(reset_r.left() - 8.0 - tw, row.center().y - 10.0), vec2(tw, 20.0));
-                                let kresp = ui.interact(kr, ui.scope_id().with(("keys", cmd.id)), Sense::click()).on_hover_text("Click, then press the new keys (Esc cancels, Backspace removes)");
+                                let kresp = ui.interact(kr, ui.scope_id().with(("keys", cmd.id)), Sense::click()).tip("Click, then press the new keys (Esc cancels, Backspace removes)");
                                 ui.painter().rect(kr, CornerRadius::same(3), if rec { ACCENT.gamma_multiply(0.2) } else { c.white(0.08) }, Stroke::new(1.0, if rec { ACCENT } else if kresp.hovered() { c.white(0.3) } else { c.white(0.1) }), StrokeKind::Inside);
                                 ui.painter().text(kr.center(), Align2::CENTER_CENTER, text, FontId::monospace(11.5), if rec { c.white(1.0) } else { c.fg });
                                 if kresp.clicked() {
@@ -722,14 +726,14 @@ impl App {
                                 let mut nx = kr.left() - 8.0;
                                 if let Some(other) = clash {
                                     let r = ui.painter().text(pos2(nx, row.center().y), Align2::RIGHT_CENTER, "clash", FontId::proportional(11.0), WARN);
-                                    ui.interact(r, ui.scope_id().with(("clash", cmd.id)), Sense::hover()).on_hover_text(format!("Also used by {}", other.label));
+                                    ui.interact(r, ui.scope_id().with(("clash", cmd.id)), Sense::hover()).tip(format!("Also used by {}", other.label));
                                     nx = r.left() - 8.0;
                                 }
                                 let uses = cmd.id != "ui:terminalPanel" && cmd.id != "palette:toggle";
                                 if is_custom && !keys.is_empty() && uses {
                                     let tip = if !cmd.in_inputs { "The editor and terminal keep their own shortcuts." } else { "The terminal keeps its own shortcuts." };
                                     let r = ui.painter().text(pos2(nx, row.center().y), Align2::RIGHT_CENTER, "scope", FontId::proportional(11.0), c.fg3);
-                                    ui.interact(r, ui.scope_id().with(("scope", cmd.id)), Sense::hover()).on_hover_text(tip);
+                                    ui.interact(r, ui.scope_id().with(("scope", cmd.id)), Sense::hover()).tip(tip);
                                 }
                             }
                             ui.add_space(12.0);
@@ -849,5 +853,8 @@ mod tests {
         let mods = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
         assert_eq!(combo_of(egui::Key::S, mods).as_deref(), Some("Ctrl+Shift+S"));
         assert_eq!(combo_of(egui::Key::Num1, egui::Modifiers { ctrl: true, ..Default::default() }).as_deref(), Some("Ctrl+1"));
+        let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
+        assert_eq!(combo_of(egui::Key::Minus, ctrl).as_deref(), Some("Ctrl+-"));
+        assert_eq!(combo_of(egui::Key::Plus, egui::Modifiers { shift: true, ..ctrl }).as_deref(), Some("Ctrl+="));
     }
 }

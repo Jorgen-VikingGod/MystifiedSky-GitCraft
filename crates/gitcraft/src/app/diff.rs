@@ -2,6 +2,7 @@
 //! the Inline and Split comparisons of the whole file, the File view and the editor that saves
 //! the working-folder copy, and before / after pictures.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::Later;
 use super::highlight::{self, Runs};
@@ -193,7 +194,7 @@ impl App {
         widgets::status_mark(ui, Rect::from_min_size(pos2(bar.left() + 12.0, bar.center().y - 7.0), Vec2::splat(14.0)), status);
         let mut right = bar.right() - 8.0;
         let close = Rect::from_min_size(pos2(right - 24.0, bar.center().y - 12.0), Vec2::splat(24.0));
-        let xr = ui.interact(close, ui.scope_id().with("diff_close"), Sense::click()).on_hover_text("Close (Esc)");
+        let xr = ui.interact(close, ui.scope_id().with("diff_close"), Sense::click()).tip("Close (Esc)");
         icons::paint(ui, close, Icon::X, 16.0, if xr.hovered() { c.white(1.0) } else { c.fg2 });
         if xr.clicked() {
             r.ui.diff = None;
@@ -210,7 +211,14 @@ impl App {
             later.push(Box::new(move |app| app.act_quiet(tab, Action::Stage { paths: vec![f] }, true)));
         }
         bar_ui.label(egui::RichText::new(v.map_or("UTF-8", |v| v.encoding.as_str())).size(11.0).color(c.fg3));
-        if mode == "hunk" && !r.diff_ui.file_view && lines.is_some() {
+        // Lines removed and added: from the hunks, or from the whole-file comparison in the
+        // Inline and Split views.
+        let counts = if mode == "hunk" {
+            lines.map(|_| (removed, added))
+        } else {
+            cache.and_then(|c| c.comparison.as_ref()).filter(|(ws, _)| *ws == ignore_ws).map(|(_, cmp)| (cmp.removed, cmp.added))
+        };
+        if let Some((removed, added)) = counts.filter(|_| !r.diff_ui.file_view) {
             bar_ui.label(egui::RichText::new(format!("−{removed}")).size(11.5).color(REMOVED));
             bar_ui.label(egui::RichText::new(format!("+{added}")).size(11.5).color(GOOD));
         }
@@ -242,14 +250,14 @@ impl App {
         }
         if editable && !r.diff_ui.editing {
             let label = if target.source == DiffSource::Staged { "Edit in Working Directory" } else { "Edit This File" };
-            if widgets::button(&mut left_ui, Kind::Primary, Some(Icon::Pencil), label, 22.0, true).on_hover_text("Edit the working-folder copy of this file").clicked() {
+            if widgets::button(&mut left_ui, Kind::Primary, Some(Icon::Pencil), label, 22.0, true).tip("Edit the working-folder copy of this file").clicked() {
                 r.diff_ui.token = v.and_then(|v| v.new_token.clone());
                 r.diff_ui.editing = true;
                 r.diff_ui.file_view = true;
             }
         }
         if r.diff_ui.editing {
-            if widgets::button(&mut left_ui, Kind::Success, Some(Icon::Save), "Save Changes", 22.0, r.diff_ui.draft.is_some()).on_hover_text("Save (Ctrl+S)").clicked() {
+            if widgets::button(&mut left_ui, Kind::Success, Some(Icon::Save), "Save Changes", 22.0, r.diff_ui.draft.is_some()).tip("Save (Ctrl+S)").clicked() {
                 later.push(Box::new(move |app| app.save_draft(tab, false)));
             }
             if widgets::button(&mut left_ui, Kind::Default, None, "Cancel", 22.0, true).clicked() {
@@ -290,7 +298,7 @@ impl App {
                 ui.painter().rect_filled(rect, CornerRadius::same(3), c.white(0.1));
             }
             icons::paint(ui, rect, icon, 14.0, if on || resp.hovered() { c.white(1.0) } else { c.fg2 });
-            resp.on_hover_text(tip).clicked()
+            resp.tip(tip).clicked()
         };
         if toggle(&mut tools_right, Icon::WrapText, "Word Wrap", wrap) {
             later.push(Box::new(move |app| app.settings.set("wordWrap", !wrap)));
@@ -390,7 +398,7 @@ impl App {
             };
             let empty = (dark, Vec::new(), Vec::new());
             let hl = cache.hl.as_ref().filter(|h| h.0 == dark).unwrap_or(&empty);
-            return compare_view(ui, ui.scope_id().with(("cmp", &key)), comparison, &target.file, mode == "split", hl, next, prev, &mut r.diff_ui.jump);
+            return compare_view(ui, ui.scope_id().with(("cmp", &key)), comparison, &target.file, mode == "split", wrap, hl, next, prev, &mut r.diff_ui.jump);
         }
         let Some(lines) = lines else { return note(ui, "Loading diff…", false) };
         if lines.is_empty() {
@@ -534,7 +542,7 @@ impl App {
                             }
                             DiffSource::Commit(_) => {
                                 let label = if n > 0 { format!("Revert {n} Line{}", plural(n)) } else { "Revert Hunk".into() };
-                                if widgets::button(&mut bar, Kind::Default, None, &label, 20.0, true).on_hover_text("Apply the inverse of this hunk to your working directory").clicked() {
+                                if widgets::button(&mut bar, Kind::Default, None, &label, 20.0, true).tip("Apply the inverse of this hunk to your working directory").clicked() {
                                     revert = Some((hi, lines_arg.clone()));
                                 }
                             }
@@ -621,13 +629,76 @@ fn hunk_highlights(file: &str, lines: &[DiffLine], dark: bool) -> HashMap<(usize
     out
 }
 
-/// The whole file compared, inline (one column) or split (old left, new right).
+/// How many screen lines `text` takes when lines break after `columns` characters (tabs count
+/// as four).
+fn wrapped_lines(text: &str, columns: usize) -> usize {
+    let width: usize = text.chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum();
+    width.div_ceil(columns.max(1)).max(1)
+}
+
+/// Where each row starts, and the total height at the end, for rows of `lines(row)` screen lines.
+fn row_tops(rows: usize, lines: impl Fn(usize) -> usize) -> Vec<f32> {
+    let mut tops = Vec::with_capacity(rows + 1);
+    let mut y = 0.0;
+    tops.push(y);
+    for row in 0..rows {
+        y += lines(row) as f32 * LINE;
+        tops.push(y);
+    }
+    tops
+}
+
+/// The rows between `top` and `bottom`, from the row tops.
+fn visible_rows(tops: &[f32], top: f32, bottom: f32) -> std::ops::Range<usize> {
+    let rows = tops.len().saturating_sub(1);
+    let first = tops.partition_point(|t| *t <= top).saturating_sub(1).min(rows);
+    let last = (tops.partition_point(|t| *t < bottom)).min(rows);
+    first..last.max(first)
+}
+
+/// The monospace character width, for wrapping.
+fn char_width(ui: &Ui, font: &FontId) -> f32 {
+    ui.fonts_mut(|f| f.glyph_width(font, 'M')).max(1.0)
+}
+
+/// The whole file compared, inline (one column) or split (old left, new right). With `wrap`,
+/// long lines continue on the next screen lines instead of scrolling sideways.
 #[allow(clippy::too_many_arguments)]
-pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, split: bool, hl: &(bool, Vec<Runs>, Vec<Runs>), next: bool, prev: bool, jump: &mut Option<f32>) {
+pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, split: bool, wrap: bool, hl: &(bool, Vec<Runs>, Vec<Runs>), next: bool, prev: bool, jump: &mut Option<f32>) {
     let c = p();
     let font = FontId::monospace(12.0);
     let rows = if split { cmp.split.len() } else { cmp.rows.len() };
-    let changes: Vec<f32> = if split { &cmp.split_changes } else { &cmp.changes }.iter().map(|r| *r as f32 * LINE).collect();
+    let line_text = |old: bool, i: usize| if old { cmp.old.get(i).map(String::as_str).unwrap_or("") } else { cmp.new.get(i).map(String::as_str).unwrap_or("") };
+    // Row tops, worked out again only when the width or the comparison changes.
+    let cw = char_width(ui, &font);
+    let full = ui.available_width();
+    let text_w = |w: f32| (w - GUTTER - 8.0 - 6.0).max(cw * 10.0);
+    let columns = (text_w(if split { full / 2.0 } else { full }) / cw).floor() as usize;
+    let size: usize = cmp.old.iter().chain(cmp.new.iter()).map(String::len).sum();
+    let tops_id = ui.scope_id().with(id).with(("cmp_tops", split, wrap, columns, rows, size));
+    let tops: std::sync::Arc<Vec<f32>> = ui.data_mut(|d| d.get_temp(tops_id)).unwrap_or_else(|| {
+        let tops = if !wrap {
+            row_tops(rows, |_| 1)
+        } else if split {
+            row_tops(rows, |r| {
+                let s = &cmp.split[r];
+                let l = s.left.map_or(1, |i| wrapped_lines(line_text(true, i), columns));
+                let rt = s.right.map_or(1, |i| wrapped_lines(line_text(false, i), columns));
+                l.max(rt)
+            })
+        } else {
+            row_tops(rows, |r| {
+                let rw = &cmp.rows[r];
+                let (no, old) = if rw.kind == RowKind::Removed { (rw.old, true) } else { (rw.new, false) };
+                no.map_or(1, |i| wrapped_lines(line_text(old, i), columns))
+            })
+        };
+        let tops = std::sync::Arc::new(tops);
+        ui.data_mut(|d| d.insert_temp(tops_id, tops.clone()));
+        tops
+    });
+    let total = tops.last().copied().unwrap_or(0.0);
+    let changes: Vec<f32> = if split { &cmp.split_changes } else { &cmp.changes }.iter().map(|r| tops.get(*r).copied().unwrap_or(0.0)).collect();
     let state = egui::scroll_area::State::load(ui.ctx(), ui.scope_id().with(id).with(egui::Id::NULL.with("cmp_scroll")));
     let cur = state.map_or(0.0, |s| s.clamped_offset().y);
     let mut scroll = egui::ScrollArea::both().id_salt("cmp_scroll").auto_shrink([false, false]).content_margin(0);
@@ -642,13 +713,10 @@ pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, sp
     ui.push_id(id, |ui| {
         scroll.show_viewport(ui, |ui, viewport| {
             let full = ui.available_width();
-            let width = if split { full } else { longest.max(full) };
-            let (_, _) = ui.allocate_exact_size(vec2(width, (rows as f32 * LINE).max(viewport.height())), Sense::hover());
+            let width = if split || wrap { full } else { longest.max(full) };
+            let (_, _) = ui.allocate_exact_size(vec2(width, total.max(viewport.height())), Sense::hover());
             let origin = ui.min_rect().min;
             let painter = ui.painter().clone();
-            let first = (viewport.top() / LINE).floor().max(0.0) as usize;
-            let last = ((viewport.bottom() / LINE).ceil() as usize + 1).min(rows);
-            let line_text = |old: bool, i: usize| if old { cmp.old.get(i).map(String::as_str).unwrap_or("") } else { cmp.new.get(i).map(String::as_str).unwrap_or("") };
             let draw = |painter: &egui::Painter, rect: Rect, no: Option<usize>, old: bool, kind: RowKind, pair: Option<(usize, usize)>| {
                 let bg = match kind {
                     RowKind::Added => GOOD.gamma_multiply(0.2),
@@ -660,31 +728,40 @@ pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, sp
                     painter.rect_filled(rect, CornerRadius::ZERO, c.white(0.02));
                     return;
                 };
-                painter.text(pos2(rect.left() + GUTTER - 8.0, rect.center().y), Align2::RIGHT_CENTER, (i + 1).to_string(), font.clone(), c.fg3);
+                painter.text(pos2(rect.left() + GUTTER - 8.0, rect.top() + LINE / 2.0), Align2::RIGHT_CENTER, (i + 1).to_string(), font.clone(), c.fg3);
                 let text = line_text(old, i);
                 let marks: Vec<(std::ops::Range<usize>, Color32)> = pair
                     .and_then(|(o, n)| if old { textdiff::changed_words(text, line_text(false, n)) } else { textdiff::changed_words(text, line_text(true, o)) })
                     .map(|m| m.into_iter().map(|r| (r, if old { BAD.gamma_multiply(0.45) } else { GOOD.gamma_multiply(0.45) })).collect())
                     .unwrap_or_default();
                 let runs = if old { old_hl.get(i) } else { new_hl.get(i) };
-                let job = highlight::job(text, runs, c.white(0.85), font.clone(), &marks);
+                let mut job = highlight::job(text, runs, c.white(0.85), font.clone(), &marks);
+                if wrap {
+                    job.wrap = egui::text::TextWrapping { max_width: columns as f32 * cw + 0.5, break_anywhere: true, ..Default::default() };
+                    job.first_row_min_height = LINE;
+                    for section in &mut job.sections {
+                        section.format.line_height = Some(LINE);
+                    }
+                }
                 let g = ui.painter().layout_job(job);
-                painter.with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos2(rect.left() + GUTTER + 8.0, rect.center().y - g.size().y / 2.0), g, c.fg);
+                let y = if wrap { rect.top() } else { rect.center().y - g.size().y / 2.0 };
+                painter.with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos2(rect.left() + GUTTER + 8.0, y), g, c.fg);
             };
-            for row in first..last {
-                let y = origin.y + row as f32 * LINE;
+            for row in visible_rows(&tops, viewport.top(), viewport.bottom()) {
+                let y = origin.y + tops[row];
+                let h = tops[row + 1] - tops[row];
                 if split {
                     let s = &cmp.split[row];
                     let half = width / 2.0;
-                    let lrect = Rect::from_min_size(pos2(origin.x, y), vec2(half - 1.0, LINE));
-                    let rrect = Rect::from_min_size(pos2(origin.x + half, y), vec2(half, LINE));
+                    let lrect = Rect::from_min_size(pos2(origin.x, y), vec2(half - 1.0, h));
+                    let rrect = Rect::from_min_size(pos2(origin.x + half, y), vec2(half, h));
                     let pair = (s.changed && s.left.is_some() && s.right.is_some()).then(|| (s.left.unwrap_or(0), s.right.unwrap_or(0)));
                     draw(&painter, lrect, s.left, true, if s.changed && s.left.is_some() { RowKind::Removed } else { RowKind::Same }, pair);
                     draw(&painter, rrect, s.right, false, if s.changed && s.right.is_some() { RowKind::Added } else { RowKind::Same }, pair);
-                    painter.line_segment([pos2(origin.x + half - 0.5, y), pos2(origin.x + half - 0.5, y + LINE)], Stroke::new(1.0, c.line));
+                    painter.line_segment([pos2(origin.x + half - 0.5, y), pos2(origin.x + half - 0.5, y + h)], Stroke::new(1.0, c.line));
                 } else {
                     let rw = &cmp.rows[row];
-                    let rect = Rect::from_min_size(pos2(origin.x, y), vec2(width, LINE));
+                    let rect = Rect::from_min_size(pos2(origin.x, y), vec2(width, h));
                     let (no, old) = match rw.kind {
                         RowKind::Removed => (rw.old, true),
                         _ => (rw.new, false),
@@ -708,17 +785,34 @@ fn file_lines(ui: &mut Ui, file: &str, text: &str, wrap: bool, dark: bool) {
     });
     let lines: Vec<&str> = text.lines().collect();
     let longest = lines.iter().map(|l| l.len()).max().unwrap_or(0) as f32 * 7.3 + 80.0;
+    let cw = char_width(ui, &font);
+    let columns = ((ui.available_width() - GUTTER - 8.0 - 6.0).max(cw * 10.0) / cw).floor() as usize;
+    let tops_id = id.with(("file_tops", wrap, columns));
+    let tops: std::sync::Arc<Vec<f32>> = ui.data_mut(|d| d.get_temp(tops_id)).unwrap_or_else(|| {
+        let tops = std::sync::Arc::new(row_tops(lines.len(), |i| if wrap { wrapped_lines(lines[i], columns) } else { 1 }));
+        ui.data_mut(|d| d.insert_temp(tops_id, tops.clone()));
+        tops
+    });
+    let total = tops.last().copied().unwrap_or(0.0);
     egui::ScrollArea::both().id_salt(("file", file)).auto_shrink([false, false]).content_margin(0).show_viewport(ui, |ui, viewport| {
         let width = if wrap { ui.available_width() } else { longest.max(ui.available_width()) };
-        let (_, _) = ui.allocate_exact_size(vec2(width, (lines.len() as f32 * LINE).max(viewport.height())), Sense::hover());
+        let (_, _) = ui.allocate_exact_size(vec2(width, total.max(viewport.height())), Sense::hover());
         let origin = ui.min_rect().min;
-        let first = (viewport.top() / LINE).floor().max(0.0) as usize;
-        let last = ((viewport.bottom() / LINE).ceil() as usize + 1).min(lines.len());
-        for i in first..last {
-            let y = origin.y + i as f32 * LINE;
+        for i in visible_rows(&tops, viewport.top(), viewport.bottom()) {
+            let y = origin.y + tops[i];
             ui.painter().text(pos2(origin.x + GUTTER - 8.0, y + LINE / 2.0), Align2::RIGHT_CENTER, (i + 1).to_string(), font.clone(), c.white(0.33));
-            let g = ui.painter().layout_job(highlight::job(lines[i], runs.get(i), c.white(0.85), font.clone(), &[]));
-            ui.painter().galley(pos2(origin.x + GUTTER + 8.0, y + LINE / 2.0 - g.size().y / 2.0), g, c.fg);
+            let mut job = highlight::job(lines[i], runs.get(i), c.white(0.85), font.clone(), &[]);
+            if wrap {
+                job.wrap = egui::text::TextWrapping { max_width: columns as f32 * cw + 0.5, break_anywhere: true, ..Default::default() };
+                for section in &mut job.sections {
+                    section.format.line_height = Some(LINE);
+                }
+                let g = ui.painter().layout_job(job);
+                ui.painter().galley(pos2(origin.x + GUTTER + 8.0, y), g, c.fg);
+            } else {
+                let g = ui.painter().layout_job(job);
+                ui.painter().galley(pos2(origin.x + GUTTER + 8.0, y + LINE / 2.0 - g.size().y / 2.0), g, c.fg);
+            }
         }
     });
 }
@@ -816,4 +910,22 @@ fn image_diff(ui: &mut Ui, key: &str, before: Option<&[u8]>, after: Option<&[u8]
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wrapped_rows_take_their_screen_lines() {
+        use super::{row_tops, visible_rows, wrapped_lines, LINE};
+        assert_eq!(wrapped_lines("", 10), 1);
+        assert_eq!(wrapped_lines("0123456789", 10), 1);
+        assert_eq!(wrapped_lines("0123456789a", 10), 2);
+        assert_eq!(wrapped_lines("\tab", 4), 2);
+        let tops = row_tops(3, |r| [1, 3, 1][r]);
+        assert_eq!(tops, vec![0.0, LINE, LINE * 4.0, LINE * 5.0]);
+        // The tall second row is shown while any of its lines are in view.
+        assert_eq!(visible_rows(&tops, LINE * 2.0, LINE * 3.0), 1..2);
+        assert_eq!(visible_rows(&tops, 0.0, LINE * 10.0), 0..3);
+        assert_eq!(visible_rows(&tops, LINE * 4.5, LINE * 10.0), 2..3);
+    }
 }

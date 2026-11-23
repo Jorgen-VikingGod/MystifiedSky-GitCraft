@@ -1,6 +1,7 @@
 //! Repository-wide dialogs: clean up local branches, sparse checkout, Repository Management,
 //! the activity log and the feature plan.
 
+use super::widgets::Tip;
 use super::App;
 use super::dialogs::{Body, Dialog, Field, FieldKind};
 use super::icons::{self, Icon};
@@ -14,25 +15,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 impl App {
-    /// Run an action in a repository whether or not it has a tab; the answer comes as a toast.
-    pub(crate) fn act_path(&mut self, path: &str, action: Action, done: impl FnOnce(&mut App, bool) + Send + 'static) {
-        if let Some(tab) = self.tab_of(path) {
-            self.act_quiet(tab, action, true);
-            done(self, true);
-            return;
-        }
-        let (engine, path) = (self.engine.clone(), path.to_owned());
-        self.spawn(move || {
-            let r = engine.perform(&path, action);
-            super::Msg::Apply(Box::new(move |app: &mut App| {
-                if !r.ok {
-                    app.toast(false, format!("{}: {}", super::folder_name(&path), r.message));
-                }
-                done(app, r.ok);
-            }))
-        });
-    }
-
     /// Clean Up Local Branches: filter by age, merge and upstream state, then delete the picked ones.
     pub(crate) fn cleanup_dialog(&mut self, tab: u64) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
@@ -86,7 +68,7 @@ impl App {
                 });
             });
             ui.add_space(8.0);
-            if widgets::checkbox(ui, &mut patches, "Include squash- and rebase-merged changes", 12.0).on_hover_text("Compare patches against the default branch. Equivalent patches may have different commits.").clicked() {
+            if widgets::checkbox(ui, &mut patches, "Include squash- and rebase-merged changes", 12.0).tip("Compare patches against the default branch. Equivalent patches may have different commits.").clicked() {
                 picked.clear();
                 remotes.clear();
                 load(&list, app, &path2, patches);
@@ -135,7 +117,7 @@ impl App {
                             ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new(upstream).size(11.0).color(c.fg2)).truncate());
                             if !b.upstream.is_empty() && !b.upstream_gone {
                                 let mut r = remotes.contains(&b.name);
-                                if widgets::checkbox(ui, &mut r, "remote", 11.0).on_hover_text(format!("Also delete remote branch {}", b.upstream)).clicked() {
+                                if widgets::checkbox(ui, &mut r, "remote", 11.0).tip(format!("Also delete remote branch {}", b.upstream)).clicked() {
                                     if r { remotes.insert(b.name.clone()) } else { remotes.remove(&b.name) };
                                 }
                             }
@@ -189,7 +171,7 @@ impl App {
             *intro = String::new();
         }
         if info.enabled {
-            d.choices.insert(0, super::dialogs::Choice { label: "Turn Off".into(), kind: Kind::Danger, then: Box::new(move |app, _| app.act(tab, Action::SparseDisable)) });
+            d.choices.insert(0, super::dialogs::Choice { label: "Turn Off".into(), kind: Kind::Danger, then: Box::new(move |app, _| app.act(tab, Action::SparseDisable)), again: None });
         }
         // The explanation above the box.
         let fields_note = "Only files matching these patterns stay in the working folder (one per line, .gitignore style). Everything else is still in the repository.";
@@ -232,10 +214,10 @@ impl App {
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 200.0;
                 widgets::field(ui, &mut query, "Search repositories", w, 26.0, 12.5);
-                if widgets::button(ui, Kind::Default, Some(Icon::CloudDownload), "Fetch all", 26.0, true).on_hover_text("Fetch all repositories").clicked() {
+                if widgets::button(ui, Kind::Default, Some(Icon::CloudDownload), "Fetch all", 26.0, true).tip("Fetch all repositories").clicked() {
                     run = Some((all.clone(), false));
                 }
-                if widgets::button(ui, Kind::Default, Some(Icon::Download), "Pull all", 26.0, true).on_hover_text("Pull all repositories").clicked() {
+                if widgets::button(ui, Kind::Default, Some(Icon::Download), "Pull all", 26.0, true).tip("Pull all repositories").clicked() {
                     run = Some((all.clone(), true));
                 }
             });
@@ -301,7 +283,7 @@ impl App {
                         }
                         let fav = favorites.iter().any(|f| super::same_folder(f, path));
                         let star = Rect::from_min_size(pos2(row.left() + 20.0, row.center().y - 7.0), Vec2::splat(14.0));
-                        let sresp = ui.interact(star, ui.scope_id().with(("fav", title, path)), Sense::click()).on_hover_text(if fav { "Remove repository from favorites" } else { "Add repository to favorites" });
+                        let sresp = ui.interact(star, ui.scope_id().with(("fav", title, path)), Sense::click()).tip(if fav { "Remove repository from favorites" } else { "Add repository to favorites" });
                         icons::paint(ui, star, Icon::Star, 14.0, if fav { egui::Color32::from_rgb(0xe5, 0xc0, 0x7b) } else if sresp.hovered() { c.white(1.0) } else { c.fg3 });
                         if sresp.clicked() {
                             toggle_fav = Some(path.clone());
@@ -310,7 +292,7 @@ impl App {
                         let ng = ui.painter().layout_no_wrap(name, super::fonts::semibold(12.5), c.link);
                         let nr = Rect::from_min_size(pos2(star.right() + 8.0, row.center().y - ng.size().y / 2.0), ng.size());
                         ui.painter().galley(nr.min, ng, c.link);
-                        if ui.interact(nr, ui.scope_id().with(("open", title, path)), Sense::click()).on_hover_text("Open").clicked() {
+                        if ui.interact(nr, ui.scope_id().with(("open", title, path)), Sense::click()).tip("Open").clicked() {
                             open_paths.push(path.clone());
                             close = true;
                         }
@@ -325,7 +307,7 @@ impl App {
                             }
                             for (icon, tip, what) in buttons {
                                 let br = Rect::from_min_size(pos2(x - 22.0, row.center().y - 11.0), Vec2::splat(22.0));
-                                let b = ui.interact(br, ui.scope_id().with(("btn", title, path, what)), Sense::click()).on_hover_text(tip);
+                                let b = ui.interact(br, ui.scope_id().with(("btn", title, path, what)), Sense::click()).tip(tip);
                                 icons::paint(ui, br, icon, 13.0, if b.hovered() { c.white(1.0) } else { c.fg2 });
                                 if b.clicked() {
                                     match what {

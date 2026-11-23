@@ -2,6 +2,7 @@
 //! drag the right edge to resize a repository tab), New Tab, the tabs list, notifications,
 //! preferences and the profile menu.
 
+use super::widgets::Tip;
 use super::icons::{self, Icon};
 use super::theme::{ACCENT, p};
 use super::{App, TabKind};
@@ -57,7 +58,7 @@ fn icon_tab(ui: &mut Ui, icon: Icon, tip: &str, active: bool) -> egui::Response 
     let ink = if active || response.hovered() { c.white(1.0) } else { c.white(0.8) };
     icons::paint(ui, rect, icon, 15.0, ink);
     divider(ui, rect.right(), rect);
-    response.on_hover_text(tip)
+    response.tip(tip)
 }
 
 /// The profile mark: a small pixel figure in the profile's colour.
@@ -76,7 +77,7 @@ pub(crate) fn profile_mark(ui: &Ui, rect: Rect, color: Color32) {
 impl App {
     pub(super) fn tabs_bar(&mut self, ui: &mut Ui) {
         let c = p();
-        egui::Panel::top("tabs_bar")
+        let shown = egui::Panel::top("tabs_bar")
             .exact_size(HEIGHT)
             .frame(egui::Frame::new().fill(c.tabs))
             .show_separator_line(false)
@@ -101,8 +102,8 @@ impl App {
                         if icon_tab(ui, Icon::Settings, "Preferences", false).clicked() {
                             self.open_prefs(None);
                         }
-                        let unread = self.notices.iter().filter(|n| !n.read).count();
-                        let bell = icons::slot(ui, ICON_TAB, Icon::Bell, 15.0, c.white(0.8), c.white(1.0)).on_hover_text("Notifications");
+                        let unread = self.notices.iter().filter(|n| !n.read).count() + usize::from(self.update_row());
+                        let bell = icons::slot(ui, ICON_TAB, Icon::Bell, 15.0, c.white(0.8), c.white(1.0)).tip("Notifications");
                         if unread > 0 {
                             let text = if unread >= 50 { "50+".to_owned() } else { unread.to_string() };
                             let w = (text.len() as f32 * 6.0 + 6.0).max(14.0);
@@ -110,16 +111,18 @@ impl App {
                             ui.painter().rect_filled(br, egui::CornerRadius::same(7), egui::Color32::from_rgb(0x2f, 0x81, 0xf7));
                             ui.painter().text(br.center(), egui::Align2::CENTER_CENTER, text, super::fonts::bold(9.0), egui::Color32::WHITE);
                         }
-                        egui::Popup::menu(&bell).show(|ui| self.notification_menu(ui));
+                        self.notifications(ui, &bell);
                         let list = icons::slot(ui, 33.0, Icon::ChevronDown, 16.0, c.white(0.8), c.white(1.0));
                         let list_tip = format!("Tabs list ({})", key_text(ui.ctx(), "Mod+Shift+A"));
-                        let list = list.on_hover_text(list_tip);
+                        let list = list.tip(list_tip);
                         egui::Popup::menu(&list).show(|ui| self.tabs_list(ui));
                     });
                 });
                 // The bar's lower edge.
                 ui.painter().line_segment([bar.left_bottom() - vec2(0.0, 0.5), bar.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, c.black(0.3)));
             });
+        // Preferences cover the window from here down, as the tabs stay in view.
+        self.below_tabs = shown.response.rect.bottom();
     }
 
     /// The open tabs, scrolled sideways by the mouse wheel when they do not fit.
@@ -182,7 +185,7 @@ impl App {
             icons::paint(ui, close, Icon::X, 13.0, ink);
         }
         divider(ui, rect.right(), rect);
-        let response = response.on_hover_text(tab.path().unwrap_or(&tab.title).to_owned());
+        let response = response.tip(tab.path().unwrap_or(&tab.title).to_owned());
 
         if close_response.clicked() || response.middle_clicked() {
             self.close_tab(id);
@@ -240,7 +243,7 @@ impl App {
     fn resize_handle(&mut self, ui: &mut Ui, rect: Rect, path: String, title: &str) {
         let handle = Rect::from_min_max(pos2(rect.right() - 5.0, rect.top()), rect.right_bottom());
         let id = Id::NULL.with(("tab_resize", &path));
-        let response = ui.interact(handle, id, Sense::click_and_drag()).on_hover_text(format!("Drag to resize the {title} tab. Escape cancels. Double-click to reset."));
+        let response = ui.interact(handle, id, Sense::click_and_drag()).tip(format!("Drag to resize the {title} tab. Escape cancels. Double-click to reset."));
         let memory: Option<Resize> = ui.data(|d| d.get_temp(id));
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);

@@ -1,6 +1,7 @@
 //! The Agents view of the left panel: each worktree with its working changes and the coding
 //! sessions saved for it, and starting or resuming a session in the in-app terminal.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Later, item};
 use super::dialogs::Dialog;
@@ -272,7 +273,7 @@ impl App {
                         let (pr, plug) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
                         ui.painter().rect(pr, CornerRadius::same(3), ACCENT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT.gamma_multiply(0.7)), StrokeKind::Inside);
                         icons::paint(ui, Rect::from_center_size(pr.center(), Vec2::splat(15.0)), Icon::Plug, 15.0, c.white(1.0));
-                        let plug = plug.on_hover_text("Choose coding agent");
+                        let plug = plug.tip("Choose coding agent");
                         egui::Popup::menu(&plug).show(|ui| {
                             let mut entries = agent_items();
                             entries.push(ctxmenu::Entry::Separator);
@@ -292,8 +293,8 @@ impl App {
                 ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, c.white(0.35)), StrokeKind::Inside);
                 let main = Rect::from_min_max(rect.min, pos2(rect.right() - 30.0, rect.bottom()));
                 let more = Rect::from_min_max(pos2(rect.right() - 30.0, rect.top()), rect.max);
-                let mr = ui.interact(main, ui.scope_id().with(("agent_start", tab)), Sense::click()).on_hover_text("Start in this repository's terminal");
-                let mo = ui.interact(more, ui.scope_id().with(("agent_more", tab)), Sense::click()).on_hover_text("More agent options");
+                let mr = ui.interact(main, ui.scope_id().with(("agent_start", tab)), Sense::click()).tip("Start in this repository's terminal");
+                let mo = ui.interact(more, ui.scope_id().with(("agent_more", tab)), Sense::click()).tip("More agent options");
                 for (r, resp) in [(main, &mr), (more, &mo)] {
                     if resp.hovered() {
                         ui.painter().rect_filled(r.shrink(1.0), CornerRadius::same(2), c.white(0.1));
@@ -400,7 +401,7 @@ impl App {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
                     icons::paint(ui, r, Icon::GitBranch, 13.0, c.fg2);
                     let name = if wt.branch.is_empty() { "(detached HEAD)" } else { wt.branch.as_str() };
-                    let resp = ui.add(egui::Label::new(RichText::new(name).font(super::fonts::semibold(14.0)).color(c.white(0.9))).truncate().sense(Sense::click())).on_hover_text(if current { "View working changes" } else { "Open worktree" });
+                    let resp = ui.add(egui::Label::new(RichText::new(name).font(super::fonts::semibold(14.0)).color(c.white(0.9))).truncate().sense(Sense::click())).tip(if current { "View working changes" } else { "Open worktree" });
                     if resp.clicked() {
                         later.push(Box::new(open.clone()));
                     }
@@ -416,7 +417,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
                     icons::paint(ui, r, Icon::Folder, 13.0, c.fg2);
-                    ui.add(egui::Label::new(RichText::new(super::folder_name(&wt.path)).size(12.0).color(c.fg2)).truncate()).on_hover_text(&wt.path);
+                    ui.add(egui::Label::new(RichText::new(super::folder_name(&wt.path)).size(12.0).color(c.fg2)).truncate()).tip(&wt.path);
                     if wt.locked {
                         ui.label(RichText::new("Locked").size(10.0).color(c.fg2));
                     }
@@ -447,7 +448,7 @@ impl App {
                     })
                     .response
                     .interact(Sense::click())
-                    .on_hover_text("View working changes");
+                    .tip("View working changes");
                 if resp.clicked() {
                     later.push(Box::new(open.clone()));
                 }
@@ -460,7 +461,7 @@ impl App {
             ui.painter().text(pos2(row.left() + 24.0, row.center().y), egui::Align2::LEFT_CENTER, session_status(sessions.first()), egui::FontId::proportional(12.0), c.fg2);
             let n = sessions.len();
             ui.painter().text(pos2(row.right() - 10.0, row.center().y), egui::Align2::RIGHT_CENTER, format!("{n} session{}", if n == 1 { "" } else { "s" }), egui::FontId::proportional(11.0), c.fg3);
-            resp.on_hover_text("Status reflects saved activity, not a live process check.");
+            resp.tip("Status reflects saved activity, not a live process check.");
             let now = chrono::Local::now().timestamp();
             for a in &shown {
                 let (row, resp) = ui.allocate_exact_size(vec2(w, 48.0), Sense::click());
@@ -489,7 +490,7 @@ impl App {
                     let (path, agent_id, id) = (path.clone(), agent_id.clone(), id.clone());
                     later.push(Box::new(move |app| app.launch_agent(tab, &path, &agent_id, Some(&id), &[])));
                 }
-                let resp = resp.on_hover_text(&a.title);
+                let resp = resp.tip(&a.title);
                 ctxmenu::attach(&resp, later, || {
                     let cmd = format!("{}{id}", if agent_id == "claude" { "claude --resume " } else { "codex resume " });
                     let id2 = id.clone();

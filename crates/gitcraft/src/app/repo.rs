@@ -183,10 +183,6 @@ impl RepoTab {
     fn reindex(&mut self) {
         self.index = self.view.as_ref().map(|v| v.data.commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect()).unwrap_or_default();
     }
-
-    pub fn has_wip(&self) -> bool {
-        self.view.as_ref().is_some_and(|v| !v.data.status.staged.is_empty() || !v.data.status.unstaged.is_empty())
-    }
 }
 
 /// History equal when HEAD and every ref are where they were.
@@ -248,6 +244,7 @@ fn busy_label(a: &Action) -> &'static str {
         Action::DeleteRemoteTag { .. } => "Deleting remote tag…",
         Action::Commit { .. } => "Committing…",
         Action::Checkout { .. } => "Checking out…",
+        Action::CheckoutRemote { .. } => "Checking out remote branch…",
         Action::Merge { .. } => "Merging…",
         Action::Rebase { .. } => "Rebasing…",
         Action::Stash { .. } => "Stashing…",
@@ -610,7 +607,9 @@ impl App {
     pub(crate) fn acted(&mut self, tab: u64, action: Action, quiet: bool, result: ActionResult) {
         let notify = self.settings.flag("notifySuccess", true);
         let handled = self.after_action(tab, &action, &result, quiet);
-        if !handled && (!result.ok || (!quiet && notify)) {
+        // A checkout that stashed local changes always says so, and where they went.
+        let stashed = matches!(action, Action::CheckoutRemote { stash_if_needed: true, .. }) && result.message.contains("Your local changes are saved in the stash");
+        if !handled && (!result.ok || (!quiet && (notify || stashed))) {
             self.toast(result.ok, result.message.clone());
             if !result.ok {
                 self.notify(&result.message);
@@ -643,6 +642,16 @@ impl App {
         }
         let msg = result.message.as_str();
         match action {
+            Action::CheckoutRemote { remote_branch, stash_if_needed: false } if !quiet && msg.starts_with("Local changes block this checkout.") => {
+                self.dialog = Some(Dialog::confirm(
+                    "Stash changes and continue?",
+                    &format!("Git needs to replace files that have local changes. Save your staged, unstaged, and untracked changes in a named stash, then retry checking out {remote_branch}. You can restore the stash when you're ready.\n\n{msg}"),
+                    "Stash and continue",
+                    false,
+                    super::dialogs::Then::Act(tab, Action::CheckoutRemote { remote_branch: remote_branch.clone(), stash_if_needed: true }),
+                ));
+                true
+            }
             Action::Push { force: false, .. } if msg == "This repository has no remote to push to. Add one first." => {
                 self.dialog = Some(Dialog::confirm(
                     "No remote to push to",

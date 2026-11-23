@@ -65,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, entries: Vec<Entry>, later: &mut Vec<Later>) {
             Entry::Item { label, enabled, danger, run } => {
                 let text = egui::RichText::new(label).size(13.0);
                 let text = if danger { text.color(REMOVED) } else { text };
-                if ui.add_enabled(enabled, egui::Button::new(text).frame(false)).clicked() {
+                if ui.add_enabled(enabled, egui::Button::new(text).frame_when_inactive(false)).clicked() {
                     later.push(run);
                     ui.close();
                 }
@@ -555,14 +555,7 @@ impl App {
         if let Some(sep) = file.rfind('/').filter(|i| *i > 0) {
             let folder = file[..sep].to_owned();
             items.push(item("Containing folder history", move |app| {
-                if let Some(r) = app.repo_mut(tab) {
-                    r.ui.history_filter = Some(gitcraft_core::git::HistoryFilter { path: Some(folder), ..Default::default() });
-                    r.ui.history = None;
-                    r.ui.diff = None;
-                    r.ui.selection = Some(super::repo::Selection::Wip);
-                    r.ui.multi.clear();
-                }
-                app.load_repo(tab);
+                app.set_history_filter(tab, Some(gitcraft_core::git::HistoryFilter { path: Some(folder), ..Default::default() }));
             }));
         }
         let f2 = f.clone();

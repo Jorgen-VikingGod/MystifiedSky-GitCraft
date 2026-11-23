@@ -2,6 +2,7 @@
 //! sections of the left panel, the pull request and issue views, CI checks, starting a pull
 //! request, and the Launchpad across every connected service.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Later, item};
 use super::dialogs::{Dialog, Field, FieldKind};
@@ -270,7 +271,7 @@ impl App {
                 let number = pr["number"].as_u64().unwrap_or(0);
                 let draft = pr["draft"].as_bool().unwrap_or(false);
                 let label = s(pr, "title");
-                let resp = super::left::section_row(ui, 1, Icon::GitPullRequest, &label, Some(&format!("#{number}")), Some(if draft { c.fg3 } else { GOOD })).on_hover_text(format!("{} → {}\nby {}", s(pr, "source"), s(pr, "target"), s(pr, "author")));
+                let resp = super::left::section_row(ui, 1, Icon::GitPullRequest, &label, Some(&format!("#{number}")), Some(if draft { c.fg3 } else { GOOD })).tip(format!("{} → {}\nby {}", s(pr, "source"), s(pr, "target"), s(pr, "author")));
                 if resp.clicked() {
                     later.push(Box::new(move |app| app.open_pr(tab, number)));
                 }
@@ -303,7 +304,7 @@ impl App {
             for i in &issues.items {
                 let key = s(i, "key");
                 let label = if key.is_empty() { format!("#{}", i["number"].as_u64().unwrap_or(0)) } else { key };
-                let resp = super::left::section_row(ui, 1, Icon::CircleDot, &s(i, "title"), Some(&label), Some(GOOD)).on_hover_text(i["labels"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default());
+                let resp = super::left::section_row(ui, 1, Icon::CircleDot, &s(i, "title"), Some(&label), Some(GOOD)).tip(i["labels"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default());
                 let id = issue_identity(i);
                 if resp.clicked() {
                     let id = id.clone();
@@ -635,7 +636,7 @@ impl App {
                 });
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
-                    if widgets::small(ui, Kind::Default, &format!("Checkout {source}")).on_hover_text("Check out this pull request’s exact source commit in detached HEAD mode").clicked() && !pu.busy {
+                    if widgets::small(ui, Kind::Default, &format!("Checkout {source}")).tip("Check out this pull request’s exact source commit in detached HEAD mode").clicked() && !pu.busy {
                         later.push(Box::new(move |app| app.checkout_pr(tab, number)));
                     }
                     if merged_source.is_none() && !methods.is_empty() {
@@ -649,7 +650,7 @@ impl App {
                     }
                     if merged_source.is_none() {
                         let enabled = !pu.busy && merge_status.is_none() && !selected.is_empty();
-                        if widgets::button(ui, Kind::Success, None, "Merge Pull Request", 24.0, enabled).on_hover_text(merge_status.clone().unwrap_or_default()).clicked() {
+                        if widgets::button(ui, Kind::Success, None, "Merge Pull Request", 24.0, enabled).tip(merge_status.clone().unwrap_or_default()).clicked() {
                             let (m, sha, squash, src, tgt) = (selected.clone(), source_sha.clone(), pu.squash.trim().to_owned(), source.clone(), target.clone());
                             let label = if m == "default" { "server default strategy".to_owned() } else { method_label(&m).to_owned() };
                             later.push(Box::new(move |app| {

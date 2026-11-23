@@ -8,6 +8,9 @@ pub const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
 pub const RELEASES_URL: &str = "https://github.com/MystifiedSky/GitCraft/releases";
 const DISCORD_URL: &str = "https://discord.gg/BsUgBu65YG";
 
+/// The app icon, shown in About.
+const APP_MARK: &[u8] = include_bytes!("../../../../icons/128x128.png");
+
 impl App {
     /// A menu item running `command`, with its key when it has one.
     fn item(&self, command: &str, label: &str) -> Item {
@@ -87,7 +90,7 @@ impl App {
     pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let c = super::theme::p();
         let ctx = ui.ctx().clone();
-        let chosen = egui::Panel::top("menu_bar")
+        let shown = egui::Panel::top("menu_bar")
             .exact_size(26.0)
             .frame(egui::Frame::new().fill(c.menubar).inner_margin(egui::Margin::symmetric(2, 0)))
             .show_separator_line(false)
@@ -97,19 +100,11 @@ impl App {
                     let target = if cfg!(windows) { Target::Windows } else { Target::Linux };
                     let bar = craft_menu::desktop_layout(&self.menus(), target, &LayoutOptions::new("GitCraft")).bar;
                     let gate = Gate { modal: self.dialog.is_some(), recording_shortcut: self.recording.is_some(), text_editing: ctx.egui_wants_keyboard_input() };
-                    let style = craft_menu::BarStyle {
-                        title_padding: egui::vec2(7.0, 3.0),
-                        title_color: c.fg,
-                        check_mark: "✓".into(),
-                        radio_mark: "●".into(),
-                        ..craft_menu::BarStyle::from_style(ui.style())
-                    };
-                    MenuBarUi::new(&bar).style(style).gate(gate).shrink_to_fit(f32::INFINITY).show(ui)
+                    MenuBarUi::new(&bar).style(craft_menu::BarStyle::from_style(ui.style())).gate(gate).shrink_to_fit(f32::INFINITY).show(ui)
                 })
                 .inner
-            })
-            .inner;
-        for command in chosen {
+            });
+        for command in shown.inner {
             self.run(&ctx, &command.id);
         }
     }
@@ -156,8 +151,23 @@ impl App {
         });
     }
 
+    /// The app's mark, name and version, centred.
     fn about_dialog(&mut self) {
-        let text = format!("GitCraft\nVersion {}\n\nA graphical Git client. Every action runs the real Git command line.", super::VERSION);
-        self.dialog = Some(super::dialogs::Dialog::info("About GitCraft", &text).width(380.0));
+        let draw = |_: &mut super::App, ui: &mut egui::Ui| {
+            let c = super::theme::p();
+            ui.vertical_centered(|ui| {
+                ui.add_space(8.0);
+                ui.add(egui::Image::from_bytes("bytes://gitcraft-mark.png", APP_MARK).fit_to_exact_size(egui::vec2(48.0, 48.0)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("GitCraft").font(super::fonts::bold(18.0)).color(c.white(1.0)));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("Version {} · Stage 6", super::VERSION)).size(12.5).color(c.fg2));
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new("A graphical Git client built with Rust. Every action runs the real Git command line.").size(12.0).color(c.fg3));
+                ui.add_space(8.0);
+            });
+            false
+        };
+        self.dialog = Some(super::dialogs::Dialog::new("About GitCraft", super::dialogs::Body::Custom(Box::new(draw))).width(380.0).no_cancel());
     }
 }

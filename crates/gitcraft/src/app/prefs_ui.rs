@@ -2,6 +2,7 @@
 //! section on the right, each setting a row with its label, control and help, as in the desktop
 //! app. Repo-Specific Preferences follow for the repository in front.
 
+use super::widgets::Tip;
 use super::App;
 use super::icons::{self, Icon};
 use super::repo::Loaded;
@@ -346,21 +347,24 @@ impl App {
         });
     }
 
-    /// The Preferences screen, over everything below the menu bar.
+    /// The Preferences screen, over everything below the tabs bar.
     pub(super) fn draw_prefs(&mut self, ctx: &egui::Context) {
         let Some(mut pui) = self.prefs.take() else { return };
         let c = p();
         let screen = ctx.content_rect();
-        let top = screen.top() + if super::frame::has_title_bar() { 30.0 } else { 0.0 } + 26.0;
-        let rect = Rect::from_min_max(pos2(screen.left(), top), screen.max);
+        let rect = Rect::from_min_max(pos2(screen.left(), self.below_tabs.clamp(screen.top(), screen.bottom())), screen.max);
         let tab_path = self.active_tab().and_then(|t| t.path().map(str::to_owned));
         let tab_title = self.active_tab().map(|t| t.title.clone()).unwrap_or_default();
         let mut close = false;
-        egui::Area::new(egui::Id::NULL.with("prefs")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+        // Not constrained to the screen: egui would move an area that ends up taller than the room
+        // below the menu bar up over the menus.
+        egui::Area::new(egui::Id::NULL.with("prefs")).order(egui::Order::Foreground).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
+            ui.set_clip_rect(rect);
             let (area, _) = ui.allocate_exact_size(rect.size(), Sense::click_and_drag());
-            ui.painter().rect_filled(area, CornerRadius::ZERO, c.app);
+            let corners = super::frame::bottom_corners(ctx);
+            ui.painter().rect_filled(area, corners, c.app);
             let nav = Rect::from_min_size(area.min, vec2(250.0, area.height()));
-            ui.painter().rect_filled(nav, CornerRadius::ZERO, c.panel);
+            ui.painter().rect_filled(nav, CornerRadius { sw: corners.sw, ..CornerRadius::ZERO }, c.panel);
             ui.painter().line_segment([nav.right_top(), nav.right_bottom()], Stroke::new(1.0, c.black(0.3)));
             let mut nui = ui.new_child(egui::UiBuilder::new().max_rect(nav).layout(egui::Layout::top_down(egui::Align::Min)));
             egui::ScrollArea::vertical().id_salt("prefs_nav").auto_shrink([false, false]).show(&mut nui, |ui| {
@@ -371,7 +375,7 @@ impl App {
                 }
                 icons::paint(ui, Rect::from_min_size(pos2(exit.left() + 12.0, exit.center().y - 8.0), Vec2::splat(16.0)), Icon::ArrowLeft, 16.0, c.white(1.0));
                 ui.painter().text(pos2(exit.left() + 36.0, exit.center().y), Align2::LEFT_CENTER, "Exit Preferences", FontId::proportional(15.0), c.white(1.0));
-                if resp.on_hover_text("Exit Preferences (Esc)").clicked() {
+                if resp.tip("Exit Preferences (Esc)").clicked() {
                     close = true;
                 }
                 let heading = |ui: &mut Ui, t: &str, top: f32| {
@@ -450,7 +454,7 @@ impl App {
             let body = Rect::from_min_max(pos2(nav.right() + 1.0, area.top()), area.max);
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
             bui.set_clip_rect(body);
-            egui::ScrollArea::vertical().id_salt(("prefs_body", pui.section.clone())).auto_shrink([false, false]).show(&mut bui, |ui| {
+            egui::ScrollArea::both().id_salt(("prefs_body", pui.section.clone())).auto_shrink([false, false]).show(&mut bui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin { left: 32, right: 32, top: 24, bottom: 32 }).show(ui, |ui| {
                     ui.set_max_width(1000.0_f32.min(body.width() - 64.0));
                     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -490,21 +494,39 @@ fn note(ui: &mut Ui, text: &str) {
 }
 
 /// One setting row: label on the left (260 px), the control on the right, help under it.
+/// Rows narrower than this put the label above the controls.
+const STACK_BELOW: f32 = 480.0;
+
+fn label_width(w: f32) -> f32 {
+    (w * 0.36).clamp(140.0, 260.0)
+}
+
+/// Where a row's controls start, for lines that line up under them.
+fn controls_indent(w: f32) -> f32 {
+    if w < STACK_BELOW { 0.0 } else { label_width(w) + 16.0 }
+}
+
 fn row(ui: &mut Ui, label: &str, help: &str, warning: Option<&str>, error: Option<&str>, wide: bool, add: impl FnOnce(&mut Ui)) {
     let c = p();
     let w = ui.available_width();
-    ui.horizontal_top(|ui| {
-        ui.add_space(0.0);
-        let (lr, _) = ui.allocate_exact_size(vec2(260.0, 28.0), Sense::hover());
-        let g = ui.painter().layout(label.to_owned(), FontId::proportional(13.0), c.fg, 250.0);
-        ui.painter().galley(pos2(lr.left(), lr.top() + 5.0), g, c.fg);
-        ui.add_space(16.0);
-        let cw = if wide { (w - 300.0).max(200.0) } else { (w - 300.0).clamp(200.0, 460.0) };
+    // In a narrow pane the label goes above its controls; otherwise beside them, its column
+    // narrowing with the pane. The controls wrap onto more lines rather than run past the edge.
+    let stacked = w < STACK_BELOW;
+    let label_w = if stacked { w } else { label_width(w) };
+    let cw = if stacked {
+        w
+    } else {
+        let room = w - label_w - 16.0;
+        if wide { room } else { room.min(460.0) }
+    }
+    .max(60.0);
+    let controls = |ui: &mut Ui| {
         ui.vertical(|ui| {
             ui.set_width(cw);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.set_min_height(28.0);
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.set_max_width(cw);
+                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
                 add(ui);
             });
             let tiny = |ui: &mut Ui, t: &str, color: Color32| {
@@ -521,7 +543,24 @@ fn row(ui: &mut Ui, label: &str, help: &str, warning: Option<&str>, error: Optio
                 tiny(ui, t, REMOVED);
             }
         });
-    });
+    };
+    let label_galley = ui.painter().layout(label.to_owned(), FontId::proportional(13.0), c.fg, label_w - 10.0);
+    let label_h = if stacked { label_galley.size().y + 6.0 } else { (label_galley.size().y + 10.0).max(28.0) };
+    if stacked {
+        let (lr, _) = ui.allocate_exact_size(vec2(w, label_h), Sense::hover());
+        ui.painter().galley(lr.left_top(), label_galley, c.fg);
+        controls(ui);
+    } else {
+        ui.horizontal_top(|ui| {
+            // Label, gap and controls add up to the row's width exactly, so rows don't widen
+            // the page (which would push every following row further right).
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (lr, _) = ui.allocate_exact_size(vec2(label_w, label_h), Sense::hover());
+            ui.painter().galley(pos2(lr.left(), lr.top() + 5.0), label_galley, c.fg);
+            ui.add_space(16.0);
+            controls(ui);
+        });
+    }
     ui.add_space(8.0);
     let (line, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
     ui.painter().rect_filled(line, CornerRadius::ZERO, c.white(0.04));
@@ -1084,7 +1123,9 @@ impl App {
                 }
             }
             ui.add_space(16.0);
+            let detail_w = ui.available_width();
             ui.vertical(|ui| {
+                ui.set_width(detail_w);
                 let svc = SERVICES.iter().find(|s| s.id == pui.service).unwrap_or(&SERVICES[0]);
                 let st = statuses.iter().find(|x| x.id == svc.id).cloned();
                 let integrations: Value = self.settings.get("integrations").unwrap_or_default();
@@ -1136,7 +1177,7 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.add_space(276.0);
+                    ui.add_space(controls_indent(ui.available_width()));
                     if ui.add_enabled(ready, egui::Label::new(egui::RichText::new("Generate a token here. ↗").size(12.0).color(c.link)).sense(Sense::click())).clicked() {
                         self.open_url(&url);
                     }
@@ -1417,7 +1458,7 @@ impl App {
             });
             if let Some(page) = key_page {
                 ui.horizontal(|ui| {
-                    ui.add_space(276.0);
+                    ui.add_space(controls_indent(ui.available_width()));
                     if widgets::link(ui, &format!("Get an API key for {label}."), 12.0).clicked() {
                         self.open_url(page);
                     }

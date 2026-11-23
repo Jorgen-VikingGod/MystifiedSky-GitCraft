@@ -22,6 +22,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// No installer is anywhere near this size.
 const MAX_DOWNLOAD: u64 = 600 * 1024 * 1024;
+/// The feed is a few kilobytes.
+const MAX_FEED: usize = 1024 * 1024;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Manifest {
@@ -128,16 +130,23 @@ pub fn can_install() -> Result<(), String> {
 /// Read the feed and return a newer update for this platform, if there is one.
 pub fn check(current: &str) -> Result<Option<Update>, String> {
     crate::runtime().block_on(async {
-        let response = client(CHECK_TIMEOUT)?.get(ENDPOINT).send().await.map_err(crate::hosting::transport_error)?;
+        let mut response = client(CHECK_TIMEOUT)?.get(ENDPOINT).send().await.map_err(crate::hosting::transport_error)?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !response.status().is_success() {
             return Err(format!("The update feed answered {}.", response.status()));
         }
-        let bytes = response.bytes().await.map_err(crate::hosting::transport_error)?;
-        if bytes.len() > 1024 * 1024 {
+        // Read piece by piece and stop at the limit, whether or not the size was announced.
+        if response.content_length().is_some_and(|n| n > MAX_FEED as u64) {
             return Err("The update feed is too large.".into());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(crate::hosting::transport_error)? {
+            if bytes.len() + chunk.len() > MAX_FEED {
+                return Err("The update feed is too large.".into());
+            }
+            bytes.extend_from_slice(&chunk);
         }
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| "The update feed is not valid.")?;
         pick(&manifest, current, &platform_keys())

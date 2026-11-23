@@ -1,6 +1,7 @@
 //! The merge conflict tool: A (current) and B (incoming) side by side with a check box per line,
 //! the Output below, which can also be edited by hand, and saving the result as resolved.
 
+use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::Later;
 use super::icons::{self, Icon};
@@ -395,7 +396,7 @@ impl App {
                                     ui.painter().rect_stroke(bx, CornerRadius::same(2), Stroke::new(1.0, c.white(0.4)), egui::StrokeKind::Inside);
                                 }
                                 ui.painter().text(pos2(row.left() + 28.0, row.center().y), Align2::LEFT_CENTER, l, font.clone(), c.white(0.9));
-                                if resp.on_hover_text("Take this line").clicked() {
+                                if resp.tip("Take this line").clicked() {
                                     let mut np = p.clone();
                                     let list = if side { &mut np.b } else { &mut np.a };
                                     if let Some(x) = list.get_mut(k) {
@@ -476,7 +477,7 @@ impl App {
             cu.current = 0;
             cu.revision += 1;
         }
-        if cu.manual.is_none() && widgets::button(&mut orow, Kind::Default, Some(Icon::Pencil), "Edit", 22.0, !saving).on_hover_text("Type in the output directly").clicked() {
+        if cu.manual.is_none() && widgets::button(&mut orow, Kind::Default, Some(Icon::Pencil), "Edit", 22.0, !saving).tip("Type in the output directly").clicked() {
             if cu.base.is_none() {
                 cu.base = Some(info.clone());
             }
@@ -484,7 +485,7 @@ impl App {
             cu.revision += 1;
         }
         let ai_label = if cu.ai_busy { "Resolving…" } else { "Auto-resolve with AI" };
-        if widgets::button(&mut orow, Kind::Ai, Some(Icon::Sparkles), ai_label, 22.0, !cu.ai_busy).on_hover_text("Ask the AI (Preferences > AI) to merge both sides; check the result before saving").clicked() {
+        if widgets::button(&mut orow, Kind::Ai, Some(Icon::Sparkles), ai_label, 22.0, !cu.ai_busy).tip("Ask the AI (Preferences > AI) to merge both sides; check the result before saving").clicked() {
             cu.ai_busy = true;
             let (base, ours, theirs, f, revision) = (info.base.clone().unwrap_or_default(), info.ours.clone().unwrap_or_default(), info.theirs.clone().unwrap_or_default(), file.to_owned(), cu.revision);
             later.push(Box::new(move |app| app.ai_resolve_conflict(tab, base, ours, theirs, f, revision)));
@@ -492,7 +493,7 @@ impl App {
         match cu.manual.as_mut() {
             Some(text) => {
                 egui::ScrollArea::vertical().id_salt("conflict_manual").auto_shrink([false, false]).show(&mut oui, |ui| {
-                    if ui.add(egui::TextEdit::multiline(text).code_editor().frame(egui::Frame::NONE).desired_width(f32::INFINITY).margin(egui::Margin::same(8))).changed() {
+                    if ui.add(egui::TextEdit::multiline(text).code_editor().frame(egui::Frame::NONE.inner_margin(egui::Margin::same(8))).desired_width(f32::INFINITY)).changed() {
                         cu.revision += 1;
                     }
                 });

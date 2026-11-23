@@ -37,11 +37,20 @@ pub struct GitRef {
     pub behind: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Stash {
     pub index: usize,
     pub sha: String,
     pub message: String,
+    /// The commit the stash was made on (its first parent).
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub time: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -392,6 +401,11 @@ pub struct HistoryFilter {
 }
 
 impl HistoryFilter {
+    /// Whether the history is narrowed by author, path or text.
+    pub fn is_active(&self) -> bool {
+        [&self.author, &self.path, &self.text].iter().any(|v| v.as_deref().is_some_and(|v| !v.is_empty()))
+    }
+
     fn arguments(&self) -> Result<(Vec<String>, Option<&str>), String> {
         let mut options = Vec::new();
         if let Some(author) = self.author.as_deref().filter(|value| !value.is_empty()) {
@@ -564,7 +578,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         let head = s.spawn(crate::read_jobs::inherit(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])));
         let head_sha = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "HEAD"])));
         let log = s.spawn(crate::read_jobs::inherit(|| if resolved.ok { history_log(dir, &revs, 0, max_commits, &filters, path) } else { run(dir, &log_args) }));
-        let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs"])));
+        let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs%x1f%P%x1f%aN%x1f%aE%x1f%at"])));
         let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain"])));
         let sm = s.spawn(crate::read_jobs::inherit(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"])));
         let remotes = s.spawn(crate::read_jobs::inherit(|| run(dir, &["remote"])));
@@ -649,8 +663,9 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
 
     for (i, line) in st.stdout.lines().enumerate() {
         let f: Vec<&str> = line.split('\x1f').collect();
-        if f.len() == 2 {
-            d.stashes.push(Stash { index: i, sha: f[0].to_string(), message: f[1].to_string() });
+        if f.len() == 6 {
+            let base = f[2].split_whitespace().next().unwrap_or_default().to_owned();
+            d.stashes.push(Stash { index: i, sha: f[0].to_string(), message: f[1].to_string(), base, author: f[3].to_owned(), email: f[4].to_owned(), time: f[5].parse().unwrap_or(0) });
         }
     }
 

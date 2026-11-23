@@ -1,7 +1,9 @@
 //! Preferences, profiles and workspaces, and the bell's notifications.
 
 use super::App;
-use super::theme::p;
+use super::icons::{self, Icon};
+use super::theme::{WARN, p};
+use super::widgets::Tip;
 use super::widgets;
 
 impl App {
@@ -266,8 +268,41 @@ impl App {
         });
     }
 
-    /// The bell's menu: notifications newest first, a filter, and mark all read or unread.
-    pub(crate) fn notification_menu(&mut self, ui: &mut egui::Ui) {
+    /// Whether the bell lists the update: while it downloads and once it is ready to install.
+    pub(crate) fn update_row(&self) -> bool {
+        matches!(self.update.phase, super::updater::Phase::Downloading | super::updater::Phase::Ready)
+    }
+
+    /// The bell's menu. It keeps its own open state, as egui holds one open popup at a time and
+    /// its filter and options drop-downs open on top of it. It closes on the bell, Escape, or a
+    /// click outside it and its drop-downs.
+    pub(crate) fn notifications(&mut self, ui: &mut egui::Ui, bell: &egui::Response) {
+        let open_id = egui::Id::NULL.with("notifications_open");
+        let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        if bell.clicked() {
+            open = !open;
+        }
+        if open {
+            let mut drops = Vec::new();
+            let mut close = false;
+            let shown = egui::Popup::menu(bell)
+                .open(true)
+                .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                .show(|ui| self.notification_menu(ui, &mut drops, &mut close));
+            let menu = shown.map(|s| s.response.rect);
+            let (clicked, at, escape) = ui.input(|i| (i.pointer.any_click(), i.pointer.interact_pos(), i.key_pressed(egui::Key::Escape)));
+            let inside = |p: egui::Pos2| bell.rect.contains(p) || menu.is_some_and(|r| r.contains(p)) || drops.iter().any(|r: &egui::Rect| r.contains(p));
+            let outside = clicked && at.is_some_and(|p| !inside(p));
+            if close || outside || (escape && drops.is_empty()) {
+                open = false;
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(open_id, open));
+    }
+
+    /// The bell menu's content: notifications newest first, a filter, and mark all read or unread.
+    /// `drops` gets the rectangles of its open drop-downs; `close` is set to close the menu.
+    fn notification_menu(&mut self, ui: &mut egui::Ui, drops: &mut Vec<egui::Rect>, close: &mut bool) {
         let c = p();
         ui.set_width(340.0);
         let filter_id = egui::Id::NULL.with("notice_filter");
@@ -276,13 +311,18 @@ impl App {
             ui.label(egui::RichText::new("Notifications").font(super::fonts::semibold(13.0)).color(c.fg));
             ui.add_space(8.0);
             let names = ["All", "Read", "Unread"];
-            egui::ComboBox::from_id_salt("notice_filter_combo").selected_text(names[filter as usize]).width(80.0).show_ui(ui, |ui| {
+            let pick = ui.add(egui::Button::new(egui::RichText::new(format!("{} ▾", names[filter as usize])).size(12.5).color(c.white(0.8))).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, c.white(0.15))).min_size(egui::vec2(0.0, 22.0))).tip("Filter notifications");
+            let drop = egui::Popup::menu(&pick).show(|ui| {
                 for (i, n) in names.iter().enumerate() {
-                    ui.selectable_value(&mut filter, i as u8, *n);
+                    if ui.button(egui::RichText::new(format!("{}{n}", if filter as usize == i { "✓ " } else { "   " })).size(13.0)).clicked() {
+                        filter = i as u8;
+                    }
                 }
             });
+            drops.extend(drop.map(|d| d.response.rect));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("⋮", |ui| {
+                let more = ui.add(egui::Button::new(egui::RichText::new("⋮").size(15.0).color(c.white(0.7))).frame_when_inactive(false).min_size(egui::vec2(22.0, 22.0))).tip("Notification options");
+                let drop = egui::Popup::menu(&more).align(egui::RectAlign::BOTTOM_END).show(|ui| {
                     if ui.add_enabled(self.notices.iter().any(|n| !n.read), egui::Button::new("Mark all as read")).clicked() {
                         self.notices.iter_mut().for_each(|n| n.read = true);
                     }
@@ -291,18 +331,43 @@ impl App {
                     }
                     if ui.button("Notification Settings").clicked() {
                         self.open_prefs(Some("notifications"));
+                        *close = true;
                     }
                 });
+                drops.extend(drop.map(|d| d.response.rect));
             });
         });
         ui.data_mut(|d| d.insert_temp(filter_id, filter));
         ui.separator();
+        // The update, above the notifications while one is downloading or ready to install.
+        let update_row = self.update_row() && filter != 1;
+        if update_row {
+            let ready = self.update.phase == super::updater::Phase::Ready;
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+                icons::paint(ui, r, Icon::TriangleAlert, 14.0, WARN);
+                ui.label(egui::RichText::new(if ready { "Restart and Install Update" } else { "Downloading Update..." }).size(12.5).color(c.white(1.0)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if ready { "Restart" } else { "Update now" };
+                    let link = ui.add_enabled(ready, egui::Label::new(egui::RichText::new(label).size(12.5).color(c.link).underline()).sense(egui::Sense::click()));
+                    if link.clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.install_update(&ctx);
+                        *close = true;
+                    }
+                });
+            });
+            ui.separator();
+        }
         let shown: Vec<usize> = (0..self.notices.len()).rev().filter(|i| match filter {
             1 => self.notices[*i].read,
             2 => !self.notices[*i].read,
             _ => true,
         }).collect();
         if shown.is_empty() {
+            if update_row {
+                return;
+            }
             let text = ["You have no notifications", "You have no read notifications", "You have no unread notifications"][filter as usize];
             ui.label(egui::RichText::new(text).size(12.5).color(c.fg3));
             return;

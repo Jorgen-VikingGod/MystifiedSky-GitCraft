@@ -8,6 +8,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 - Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
 
+- Show stashes in the commit graph, each as a dashed box just above the commit it was made on and joined to it by a dashed line. Select one to see its changes, or right-click it for the stash actions.
 - Double-clicking a remote branch whose local branch is behind it now fast-forwards that local branch after switching to it. Diverged branches are switched to but never merged, and local edits are never overwritten.
 - When switching branches with uncommitted changes, choose to bring them along, stash them, commit first, or discard them after confirmation.
 - Join the GitCraft community from the Help menu.
@@ -35,6 +36,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
 - GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts and profiles, and installed copies update to it as usual. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`.
 - Document source setup with dependency installation scripts disabled.
 - Build the desktop interface with a faster bundler.

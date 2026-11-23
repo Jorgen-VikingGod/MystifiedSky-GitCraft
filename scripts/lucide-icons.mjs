@@ -19,7 +19,9 @@ for (const name of names) {
   if (alias) text = readFileSync(join(source, `${alias[1]}.js`), "utf8");
   const match = /createLucideIcon\("[^"]+",\s*(\[[\s\S]*\])\s*\);/.exec(text);
   if (!match) throw new Error(`No icon data in ${name}.js`);
-  const nodes = Function(`return ${match[1]}`)();
+  // The data is plain object literals: quote the keys and read it as JSON, without running it.
+  const json = match[1].replace(/([{,]\s*)([A-Za-z_][\w-]*)\s*:/g, '$1"$2":').replace(/,(\s*[\]}])/g, "$1");
+  const nodes = JSON.parse(json);
   const body = nodes.map(([tag, attrs]) => {
     const list = Object.entries(attrs).filter(([key]) => key !== "key").map(([key, value]) => `${key}="${value}"`).join(" ");
     return `  <${tag} ${list}/>`;
