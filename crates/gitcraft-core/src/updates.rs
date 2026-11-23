@@ -2,8 +2,8 @@
 //! installer for this platform, check its minisign signature against the public key built into
 //! GitCraft, then install it and start the new version.
 //!
-//! The feed, the signatures and the installers have the same format the desktop app's updater
-//! reads, so either build can update to the other.
+//! The feed, the signatures and the installers keep the format earlier GitCraft releases read, so
+//! those installed copies update to this one.
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,8 @@ use std::time::Duration;
 /// Where installed copies look for the newest release.
 pub const ENDPOINT: &str = "https://github.com/MystifiedSky/GitCraft/releases/latest/download/latest.json";
 
-/// The minisign public key the release workflow signs with (base64 of the key file), the same one
-/// `tauri.conf.json` holds.
+/// The minisign public key the release workflow signs with (base64 of the key file). Installed
+/// copies only accept updates signed with its private key; see RELEASING.md before changing it.
 pub const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1REM1OUYyQzlEQTg1NTkKUldSWmhkcko4bG5jOVcrNUlmaTdYdURnOHlFMkMxYTdGK2h3TnphbWpQMitXU3dDMWNtYjFPS00K";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -333,10 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_key_matches_the_desktop_app() {
-        let conf: serde_json::Value = serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
-        assert_eq!(conf["plugins"]["updater"]["pubkey"].as_str(), Some(PUBLIC_KEY));
-        assert_eq!(conf["plugins"]["updater"]["endpoints"][0].as_str(), Some(ENDPOINT));
+    fn the_built_in_key_is_a_minisign_key() {
         assert!(minisign_verify::PublicKey::decode(&decode_text(PUBLIC_KEY).unwrap()).is_ok());
     }
 

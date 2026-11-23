@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Write the Open Sans fonts the egui interface embeds (regular, semibold, bold) as TrueType files.
 
-Reads the WOFF files of ui/node_modules/@fontsource/open-sans (run `npm --prefix ui ci` first) and
-unpacks them; egui reads TrueType and OpenType, not WOFF. Open Sans is under the SIL Open Font
+Usage: python3 scripts/open-sans-fonts.py <@fontsource/open-sans folder>. Get the package with
+`npm install --prefix /tmp/fonts @fontsource/open-sans@5.1.0`. Reads its WOFF files and unpacks them; egui reads TrueType and OpenType, not WOFF. Open Sans is under the SIL Open Font
 License 1.1, copied next to the fonts.
 """
 import shutil
@@ -12,8 +12,8 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "ui/node_modules/@fontsource/open-sans"
-TARGET = ROOT / "crates/gitcraft-egui/assets/fonts"
+SOURCE = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "node_modules/@fontsource/open-sans"
+TARGET = ROOT / "crates/gitcraft/assets/fonts"
 
 
 def woff_to_sfnt(data: bytes) -> bytes:

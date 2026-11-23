@@ -16,13 +16,10 @@ Choose a [good first issue](https://github.com/MystifiedSky/GitCraft/labels/good
 
 ## Build and check a change
 
-Install Git, stable Rust, and Node.js 22.12 or later. On Windows, also install Visual Studio Build Tools with the **Desktop development with C++** workload, a Windows SDK, and the Microsoft Edge WebView2 Runtime. See [TESTING.md](TESTING.md) for Linux and macOS prerequisites. From the directory containing `Cargo.toml`:
+Install Git and stable Rust, and Node.js 22.12 or later for the release-script tests. On Windows, also install Visual Studio Build Tools with the **Desktop development with C++** workload and a Windows SDK. See [TESTING.md](TESTING.md) for Linux and macOS prerequisites. From the directory containing `Cargo.toml`:
 
 ```powershell
-npm --prefix ui ci --ignore-scripts
-npm --prefix ui run build
-npm --prefix ui test
-cargo test --locked -- --test-threads=1
+cargo test --locked --workspace -- --test-threads=1
 node --test scripts/changelog-release.test.mjs
 ```
 
@@ -34,7 +31,7 @@ See [TESTING.md](TESTING.md) for Ubuntu/WSL and macOS setup and the desktop smok
 
 1. Fork GitCraft and create a new feature branch from the current `main` in your fork.
 2. Push the branch to your fork and open a pull request into `MystifiedSky/GitCraft:main`. Use a draft while you want early feedback or are still testing.
-3. Link the issue, complete the PR template, and mark it ready for review. Maintainers check that Windows, macOS, Linux, and browser CI passed before merging.
+3. Link the issue, complete the PR template, and mark it ready for review. Maintainers check that Windows, macOS, and Linux CI passed before merging.
 
 - Keep the PR focused so reviewers can verify the change independently. Include the results of the checks you ran and flag any checks you could not run.
 - Include before and after screenshots for visible changes, using sample data.
@@ -48,27 +45,25 @@ See the [maintainer guide](docs/MAINTAINING.md) for triage and review expectatio
 
 ## Build from source and package
 
-From the directory containing `Cargo.toml`, install the frontend dependencies and launch the desktop app:
+From the directory containing `Cargo.toml`, launch GitCraft:
 
 ```powershell
-npm --prefix ui ci --ignore-scripts
 cargo run --locked
 ```
 
-Use **Open a repository** for an existing checkout, or open the sample repository to explore the graph and file panel. The Rust build runs the frontend build after the npm dependencies are available. Restart `cargo run` to pick up UI changes.
+Use **Open a repository** for an existing checkout, or open the sample repository to explore the graph and file panel.
 
 To compile a release executable:
 
 ```powershell
-npm --prefix ui run build
 cargo build --release --locked
 ```
 
-On Windows, the executable is `target/release/gitcraft.exe`. To package an installer (NSIS and MSI on Windows; deb, rpm, AppImage, or dmg on those systems):
+On Windows, the executable is `target/release/gitcraft.exe`. To package installers, install the packager once and run it for your platform (NSIS and MSI on Windows; DEB and AppImage on Linux; the app and a DMG on macOS):
 
 ```powershell
-npm --prefix ui run installer
+cargo install cargo-packager --locked --version 0.11.8
+cargo packager --release -p gitcraft --formats nsis,wix
 ```
 
-Installers are written to `target/release/bundle/`. Maintainers publish preview installers and signed stable updates through GitHub Actions. See [RELEASING.md](RELEASING.md).
-
+For an RPM on Linux, run `cargo install cargo-generate-rpm --locked --version 0.21.1` and then `cargo generate-rpm -p crates/gitcraft`. Installers are written to `target/release/`, and RPMs to `target/generate-rpm/`. Maintainers publish preview installers and signed stable updates through GitHub Actions. See [RELEASING.md](RELEASING.md).

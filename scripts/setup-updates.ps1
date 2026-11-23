@@ -2,7 +2,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\setup-updates.ps1
 #
 # 1. Creates the update signing key pair in your user folder (never inside the project).
-# 2. Writes the public key into tauri.conf.json, so installed copies only accept updates you signed.
+# 2. Writes the public key into crates/gitcraft-core/src/updates.rs, so installed copies only accept
+#    updates you signed.
 # 3. Stores the private key and its password as GitHub Actions secrets (needs the GitHub CLI, `gh`),
 #    or tells you exactly what to paste into GitHub if `gh` isn't installed.
 param(
@@ -11,8 +12,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $app = Split-Path -Parent $PSScriptRoot
-$cli = Join-Path $app "ui\node_modules\@tauri-apps\cli\tauri.js"
-if (-not (Test-Path $cli)) { throw "Run 'npm --prefix ui ci' in $app first." }
+if (-not (Get-Command cargo-packager -ErrorAction SilentlyContinue)) { throw "Install the packager first: cargo install cargo-packager --locked --version 0.11.8" }
 
 $password = ""
 if (Test-Path $KeyPath) {
@@ -24,15 +24,17 @@ if (Test-Path $KeyPath) {
 }
 $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
 if (-not (Test-Path $KeyPath)) {
-    & node $cli signer generate --ci -p $password -w $KeyPath
+    & cargo packager signer generate --ci --password $password --path $KeyPath
     if ($LASTEXITCODE -ne 0) { throw "Could not create the key." }
 }
 $pub = (Get-Content "$KeyPath.pub" -Raw).Trim()
 
-# Put the public key in tauri.conf.json (node keeps the file's formatting).
-$conf = Join-Path $app "tauri.conf.json"
-& node -e "const fs=require('fs');const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,'utf8'));c.plugins.updater.pubkey=process.argv[2];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')" $conf $pub
-Write-Host "Public key written to tauri.conf.json. Commit that change."
+# Put the public key in updates.rs.
+$updates = Join-Path $app "crates\gitcraft-core\src\updates.rs"
+$text = Get-Content $updates -Raw
+$text = $text -replace 'pub const PUBLIC_KEY: &str = "[^"]*";', "pub const PUBLIC_KEY: &str = `"$pub`";"
+Set-Content -Path $updates -Value $text -NoNewline
+Write-Host "Public key written to crates\gitcraft-core\src\updates.rs. Commit that change."
 
 $gh = Get-Command gh -ErrorAction SilentlyContinue
 if ($gh) {

@@ -1,15 +1,18 @@
 // Write the Lucide icons the egui interface uses as SVG files, drawn in white so egui can tint them.
-// Usage: node scripts/lucide-icons.mjs <icon-name>...   (names as in lucide, e.g. git-branch)
-// Reads ui/node_modules/lucide-react, so run `npm --prefix ui ci` first.
+// Usage: node scripts/lucide-icons.mjs <lucide-react folder> <icon-name>...   (names as in lucide, e.g. git-branch)
+// Get the package with `npm install --prefix /tmp/lucide lucide-react@0.468.0` and pass
+// /tmp/lucide/node_modules/lucide-react.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const source = join(root, "ui/node_modules/lucide-react/dist/esm/icons");
-const target = join(root, "crates/gitcraft-egui/assets/icons");
+const [pkg, ...names] = process.argv.slice(2);
+if (!pkg) throw new Error("Usage: node scripts/lucide-icons.mjs <lucide-react folder> <icon-name>...");
+const source = join(pkg, "dist/esm/icons");
+const target = join(root, "crates/gitcraft/assets/icons");
 
-for (const name of process.argv.slice(2)) {
+for (const name of names) {
   let text = readFileSync(join(source, `${name}.js`), "utf8");
   // Older names re-export the icon under its current name.
   const alias = /export \{ default \} from '\.\/([^']+)\.js';/.exec(text);

@@ -2,19 +2,13 @@
 
 Run **Release** from Actions on `main` and select **preview** or **stable**. The workflow builds the selected commit and adds the workflow run number to the patch component of the base version in `Cargo.toml` (`[workspace.package]`). For example, base `0.1.0` plus run 1 yields `0.1.1`. The workflow updates the version in its checkout only. It creates a version tag at the source commit when it publishes, so no version bump commits or manually pushed tags are needed.
 
-The workflow builds Windows x64 (NSIS and MSI) and ARM64 (NSIS), macOS (universal DMG), and Linux x64 and ARM64 (AppImage, DEB, and RPM). It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
+The workflow builds Windows x64 (NSIS and MSI) and ARM64 (NSIS), macOS (a universal app made with `lipo`, as a DMG and an update archive), and Linux x64 and ARM64 (AppImage, DEB, and RPM). [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) makes every package except the RPM, from the `[package.metadata.packager]` settings in [crates/gitcraft/Cargo.toml](crates/gitcraft/Cargo.toml); [cargo-generate-rpm](https://github.com/cat-in-136/cargo-generate-rpm) makes the RPM from `[package.metadata.generate-rpm]`. It signs the updater bundles, checks that all expected assets are present, and publishes them together to [GitHub Releases](https://github.com/MystifiedSky/GitCraft/releases/latest). Until that succeeds, installed copies continue to see the previous release.
 
 Use **preview** for changes that benefit from testing on installed builds. Share the prerelease URL with volunteers and ask them to exercise the changed workflows on disposable repositories. Preview releases omit the updater manifest and the stable updater stays on the latest stable release. Preview users can reinstall the current stable version manually. The updater offers stable again once its version is newer than the installed preview.
 
 When a preview is ready for everyone, dispatch **stable** on `main` after verifying that its tip is the commit you tested. The stable run builds a new version and publishes its updater manifest. Treat a different tip as a new candidate.
 
-Use **Re-run failed jobs** in Actions to retry a failed release with the same version. If a higher version has already published, the retry skips publication. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `node ui/scripts/set-version.mjs <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
-
-## Native interface builds
-
-The **interface** choice selects what the run ships. **desktop** (the default) builds the Tauri app as before. **native** builds the egui interface in [crates/gitcraft-egui](crates/gitcraft-egui) with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager), using the `[package.metadata.packager]` settings in its `Cargo.toml`. It signs the update bundles with the same key, and publishes the same `latest.json` format, so installed copies of either interface update to it.
-
-Native runs build Windows x64 (NSIS and MSI) and ARM64 (NSIS), macOS (a universal app made with `lipo`, as a DMG and an update archive), and Linux x64 and ARM64 (AppImage and DEB). They make no RPM packages. Publish native builds as **preview** until they replace the desktop app. Before the first stable native release, install the last desktop release, point it at a native preview's `latest.json`, and confirm that it updates, starts again, and keeps its tabs and preferences. The native program is still named `gitcraft-egui`; it takes over the `gitcraft` name when the desktop app is removed.
+Use **Re-run failed jobs** in Actions to retry a failed release with the same version. If a higher version has already published, the retry skips publication. Use **Run workflow** on `main` if you need a fresh build. To change the base version, set it with `node scripts/set-version.mjs <version>` and commit the changed manifests and lockfiles. Keep the next calculated version higher than the current release.
 
 ## Changelog
 
@@ -24,14 +18,14 @@ Archive dated sections in a changelog pull request, oldest release first. Save `
 
 ## Updating installed copies
 
-GitCraft checks GitHub Releases at startup and every 10 hours while it’s open. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** in the bottom right to install it. Turn off **Automatically download GitCraft updates** in **Preferences → General** to stop background checks and downloads. **File → Check for Update** still works with the setting off.
+GitCraft checks GitHub Releases at startup and every hour while it’s open. When it finds a newer version, it downloads the update and verifies the signature using the public key built into the app. Choose **Update Ready (Restart GitCraft)** in the bottom right to install it. Turn off **Automatically download GitCraft updates** in **Preferences → General** to stop background checks and downloads. **File → Check for Update** still works with the setting off.
 
-Install a published release once if your current build predates the signing key. Linux AppImage builds can update in place; DEB and RPM installations should be upgraded using the matching package from GitHub.
+Install a published release once if your current build predates the signing key. The update feed (`latest.json`), the signatures and the installer names keep the format earlier releases read, so copies installed before GitCraft became a native app update to it too. Linux AppImage builds can update in place; DEB and RPM installations should be upgraded using the matching package from GitHub.
 
 Update signing is separate from Windows Authenticode signing and Apple notarization. First-time installations may still show platform security prompts.
 
 ## Signing key
 
-The repository already has the public key in `tauri.conf.json` (the native interface carries the same key in [crates/gitcraft-core/src/updates.rs](crates/gitcraft-core/src/updates.rs), and a test keeps them equal) and the corresponding `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` Actions secrets. Keep a backup of that same private key and its password in a secure location. Replacing the key would require users to install a new build manually before receiving more updates.
+The repository already has the public key in [crates/gitcraft-core/src/updates.rs](crates/gitcraft-core/src/updates.rs) and the corresponding `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` Actions secrets (named for the tool that first made them; the release workflow passes them to cargo-packager). Keep a backup of that same private key and its password in a secure location. Replacing the key would require users to install a new build manually before receiving more updates.
 
-For a new repository or restoration, run `npm --prefix ui ci` followed by `powershell -ExecutionPolicy Bypass -File scripts/setup-updates.ps1` from the app checkout. Use the existing key and its password when restoring this repository.
+For a new repository or restoration, install cargo-packager (`cargo install cargo-packager --locked --version 0.11.8`) and run `powershell -ExecutionPolicy Bypass -File scripts/setup-updates.ps1` from the app checkout. Use the existing key and its password when restoring this repository.
