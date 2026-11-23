@@ -673,7 +673,7 @@ pub fn issues(r: &RemoteRepo) -> Result<Vec<Issue>, String> {
         },
         "azure" | "azure-server" => {
             let (project_url, _) = azure_project(r);
-            let project = tauri::Url::parse(&project_url).ok()
+            let project = url::Url::parse(&project_url).ok()
                 .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
                 .ok_or("The Azure repository has no project.")?;
             let project = percent_decode_path(&project);
@@ -685,7 +685,7 @@ pub fn issues(r: &RemoteRepo) -> Result<Vec<Issue>, String> {
 
 /// Issues from a separate tracker (Jira, Trello, Azure Boards): for a project / board, or the ones assigned to you.
 fn percent_decode_path(value: &str) -> String {
-    let mut encoded = tauri::Url::parse("https://fixture.invalid").expect("static URL");
+    let mut encoded = url::Url::parse("https://fixture.invalid").expect("static URL");
     encoded.set_query(Some(&format!("path={}", value.replace('+', "%2B").replace('&', "%26"))));
     encoded.query_pairs().next().map(|(_, value)| value.into_owned()).unwrap_or_default()
 }
@@ -1224,7 +1224,7 @@ pub fn merged_source(r: &RemoteRepo, number: u64, expected: &str) -> Result<Pull
         return Err("The merged source is different from the reviewed commit. Review the branch before deleting it.".into());
     }
     if pr.source.is_empty() || pr.source == pr.target { return Err("The source branch cannot be safely identified.".into()); }
-    if !pr.source_url.is_empty() && !tauri::Url::parse(&pr.source_url).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none()) {
+    if !pr.source_url.is_empty() && !url::Url::parse(&pr.source_url).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none()) {
         pr.source_url.clear();
     }
     Ok(pr)

@@ -153,15 +153,15 @@ fn clean_host(h: &str) -> String {
     h.trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string()
 }
 
-fn configured_https(value: &str) -> Option<tauri::Url> {
+fn configured_https(value: &str) -> Option<url::Url> {
     let value = value.trim().trim_end_matches('/');
     if value.is_empty() { return None; }
     let url = if value.contains("://") { value.to_owned() } else { format!("https://{value}") };
-    tauri::Url::parse(&url).ok().filter(|url| url.scheme() == "https" && url.host_str().is_some() &&
+    url::Url::parse(&url).ok().filter(|url| url.scheme() == "https" && url.host_str().is_some() &&
         url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none())
 }
 
-fn url_authority(url: &tauri::Url) -> &str {
+fn url_authority(url: &url::Url) -> &str {
     url.as_str().strip_prefix("https://").unwrap_or_default().split('/').next().unwrap_or_default()
 }
 
@@ -315,7 +315,7 @@ fn http_page_request(method: &str, url: &str, auth: &Auth, body: Option<Value>) 
     } else { request.header("Accept", "application/json") };
     if let Some(body) = body { request = request.json(&body); }
     // Dropping the request interrupts connect, header, body and DNS waits.
-    tauri::async_runtime::block_on(async {
+    crate::runtime().block_on(async {
         let operation = async {
             let _slot = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(8)).acquire().await.map_err(|_| "HTTP scheduler closed".to_string())?;
             let now = chrono::Utc::now().timestamp();
@@ -648,7 +648,7 @@ pub fn parse_remote(url: &str, gitlab_host: &str) -> Option<RemoteRepo> {
         }
     }
     if let Some(base) = azure_server_base() {
-        let configured = tauri::Url::parse(&base).ok()?;
+        let configured = url::Url::parse(&base).ok()?;
         let prefix = configured.path().trim_matches('/');
         if url.starts_with("https://") && host.eq_ignore_ascii_case(url_authority(&configured)) {
             if let Some((project, repo)) = path.strip_prefix(prefix).and_then(|path| path.strip_prefix('/')).and_then(|path| path.split_once("/_git/")) {
@@ -886,7 +886,7 @@ mod http_safety_tests {
 
     #[test]
     fn cancelled_dns_wait_does_not_free_a_running_lookup_slot() {
-        tauri::async_runtime::block_on(async {
+        crate::runtime().block_on(async {
             let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
             let (started, ready) = tokio::sync::oneshot::channel();
             let (finish, release) = std::sync::mpsc::channel();

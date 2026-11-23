@@ -177,10 +177,10 @@ fn created_url(service: &str, v: &Value) -> Result<String, String> {
         "azure" | "azure-server" => v["remoteUrl"].as_str(),
         _ => None,
     }.ok_or("The service created the repository but returned no clone URL. Check your account before trying again.")?;
-    let mut parsed = tauri::Url::parse(url).map_err(|_| {
+    let mut parsed = url::Url::parse(url).map_err(|_| {
         "The created repository returned an invalid URL. Check your account before trying again."
     })?;
-    let authority = tauri::Url::parse(&format!("https://{}", hosting::host_of(service))).ok();
+    let authority = url::Url::parse(&format!("https://{}", hosting::host_of(service))).ok();
     if parsed.scheme() != "https" || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() ||
         authority.is_none_or(|expected| expected.origin() != parsed.origin()) {
         return Err("The created repository returned an unexpected URL. Check your account before trying again.".into());

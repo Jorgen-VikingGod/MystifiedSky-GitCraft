@@ -54,7 +54,7 @@ pub fn show_item_in_folder(p: &Path) -> Result<(), String> {
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         if let Ok(path) = std::path::absolute(p) {
-            if let Ok(uri) = tauri::Url::from_file_path(path) {
+            if let Ok(uri) = url::Url::from_file_path(path) {
                 // GVariant string escaping is handled by JSON quoting for a percent-encoded file URI.
                 let list = format!("[{}]", serde_json::Value::String(uri.to_string()));
                 let status = std::process::Command::new("gdbus").args([

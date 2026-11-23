@@ -1,42 +1,13 @@
 ﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod accounts;
-mod actions;
-mod discard_backups;
-mod diagnostics;
-mod jobs;
-mod files;
-mod git;
-mod graph;
-mod ai;
-mod ai_context;
-mod operation;
-mod pagination;
-mod process_tree;
-mod read_jobs;
-mod agents;
-mod ai_cli;
-mod ai_models;
-mod extras;
-mod external;
 #[cfg(target_os = "macos")]
 mod finder_services;
-mod prefs;
-mod hosting;
-mod hosting_api;
-mod publishing;
-mod manage;
-mod rewrite;
-mod metrics;
-mod sample;
-mod settings_file;
-mod shell;
 mod shot;
-mod terminal;
-mod watch;
-mod watch_plan;
+use gitcraft_core::{
+    accounts, actions, discard_backups, diagnostics, files, git, graph, ai, ai_context, operation, pagination, process_tree, read_jobs, agents, ai_cli, ai_models, extras, external, prefs, hosting, hosting_api, publishing, manage, rewrite, metrics, sample, settings_file, shell, terminal, watch,
+};
 #[cfg(test)]
-mod regressions;
+mod glib_regressions;
 
 use actions::{Action, ActionResult, Engine, UndoInfo};
 use serde::{Deserialize, Serialize};
@@ -1352,7 +1323,7 @@ fn acknowledge_job(id: String, state: State<'_, AppState>) { state.engine.jobs.a
 #[tauri::command]
 fn cancel_read(id: String) { read_jobs::cancel(&id); }
 
-/// Watch a repository and tell the window when something changed (rules in src/watch.rs).
+/// Watch a repository and tell the window when something changed (rules in crates/gitcraft-core/src/watch.rs).
 #[tauri::command]
 async fn watch_repo(path: String, window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     let generation = Arc::new(());
@@ -1432,6 +1403,8 @@ fn main() {
     });
 
     if screenshot.is_none() { diagnostics::install(); }
+    // Tauri and the back end share one runtime, as they did when the back end lived here.
+    tauri::async_runtime::set(gitcraft_core::runtime().handle().clone());
     let builder = tauri::Builder::default();
     let builder = if screenshot.is_none() {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {

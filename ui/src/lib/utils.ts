@@ -57,7 +57,7 @@ export function authorColor(email: string) {
 const TIME_COLORS: Record<string, string> = { red: "#ef7a76", orange: "#de9b43", green: "#5cb85c" };
 
 /** timeSince: first unit that fits, e.g. "3d", coloured red / orange / green by age.
- *  Units come from src/metrics.rs (year 31556736 s, month 2630016, week 604800, day 86400, hour 3600, minute 60). */
+ *  Units come from crates/gitcraft-core/src/metrics.rs (year 31556736 s, month 2630016, week 604800, day 86400, hour 3600, minute 60). */
 export function timeSince(unix: number, units: [number, string, string][], now = Date.now() / 1000): { text: string; color: string | undefined } {
   const secs = Math.floor(now - unix);
   for (const [len, suffix, color] of units) if (secs >= len) return { text: `${Math.floor(secs / len)}${suffix}`, color: TIME_COLORS[color] };

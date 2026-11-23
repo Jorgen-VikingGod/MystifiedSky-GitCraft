@@ -368,7 +368,7 @@ export type Action =
   | { type: "undo" }
   | { type: "redo" };
 
-/** Measured layout values, sent by the Rust side (src/metrics.rs). */
+/** Measured layout values, sent by the Rust side (crates/gitcraft-core/src/metrics.rs). */
 export interface Metrics {
   node: number;
   avatar_inner: number;

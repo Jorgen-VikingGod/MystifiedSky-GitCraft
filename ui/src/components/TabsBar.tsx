@@ -23,7 +23,7 @@ const TAB_DRAG_OPACITY = 0.5;
 /** Within this distance of the strip's edge a drag scrolls the strip (GitCraft's choice). */
 const TAB_DRAG_EDGE = 32;
 
-/** Slide a tab from `fromX` px away into its place, metrics.tab_slide_ms (src/metrics.rs TAB_SLIDE_TIME_MS) long with an ease curve. */
+/** Slide a tab from `fromX` px away into its place, metrics.tab_slide_ms (crates/gitcraft-core/src/metrics.rs TAB_SLIDE_TIME_MS) long with an ease curve. */
 function slideTab(el: HTMLElement, fromX: number) {
   el.style.transition = "";
   const inFlightX = new DOMMatrixReadOnly(getComputedStyle(el).transform).m41;

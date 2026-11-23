@@ -89,7 +89,7 @@ pub(crate) fn api_url(c: &AiConfig) -> Result<String, String> {
     };
     let endpoint = if c.endpoint.trim().is_empty() { default } else { c.endpoint.trim() };
     if endpoint.is_empty() { return Err("Set the API endpoint URL in Preferences > AI.".into()); }
-    let mut url = tauri::Url::parse(endpoint).map_err(|_| "Enter a complete http:// or https:// endpoint in Preferences > AI.")?;
+    let mut url = url::Url::parse(endpoint).map_err(|_| "Enter a complete http:// or https:// endpoint in Preferences > AI.")?;
     if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return Err("Use an HTTP or HTTPS endpoint without login details or a #fragment. Save the API key separately.".into());
     }
@@ -242,7 +242,7 @@ fn error_message(v: &Value) -> &str {
 
 fn ai_response(request: reqwest::RequestBuilder, provider: &str) -> Result<(u16, Value), String> {
     let context = crate::read_jobs::context();
-    tauri::async_runtime::block_on(crate::read_jobs::wait_http(async {
+    crate::runtime().block_on(crate::read_jobs::wait_http(async {
         let mut response = request.send().await.map_err(crate::hosting::transport_error)?;
         let status = response.status();
         if status.is_redirection() {

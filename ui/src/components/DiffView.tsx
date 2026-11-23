@@ -293,7 +293,7 @@ function ImageDiff({ before, after }: { before: string | null; after: string | n
 
 interface Hunk {
   header: string;
-  lines: DiffLine[]; // body lines, indexes match the patch builder in src/files.rs
+  lines: DiffLine[]; // body lines, indexes match the patch builder in crates/gitcraft-core/src/files.rs
 }
 
 function splitHunks(lines: DiffLine[]): { pre: DiffLine[]; hunks: Hunk[] } {

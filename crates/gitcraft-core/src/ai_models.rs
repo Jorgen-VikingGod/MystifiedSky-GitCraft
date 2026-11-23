@@ -40,9 +40,9 @@ pub fn list(config: &ai::AiConfig) -> Result<Vec<Model>, String> {
     Ok(models)
 }
 
-fn catalog_url(config: &ai::AiConfig) -> Result<tauri::Url, String> {
+fn catalog_url(config: &ai::AiConfig) -> Result<url::Url, String> {
     let mut url =
-        tauri::Url::parse(&ai::api_url(config)?).map_err(|_| "Invalid AI endpoint URL.")?;
+        url::Url::parse(&ai::api_url(config)?).map_err(|_| "Invalid AI endpoint URL.")?;
     let suffix = if config.provider == "anthropic" {
         "/messages"
     } else {
@@ -89,7 +89,7 @@ fn list_api(config: &ai::AiConfig, key: Option<&str>) -> Result<Vec<Model>, Stri
             };
         }
         let context = crate::read_jobs::context();
-        let body: Value = tauri::async_runtime::block_on(crate::read_jobs::wait_http(async {
+        let body: Value = crate::runtime().block_on(crate::read_jobs::wait_http(async {
             let mut response = request.send().await.map_err(crate::hosting::transport_error)?;
             let status = response.status().as_u16();
             match status {

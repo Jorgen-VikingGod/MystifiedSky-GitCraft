@@ -28,7 +28,7 @@ const MARKER_STRIP_WIDTH = 12;
 const NO_REFS: string[] = [];
 
 export function GraphView({ repo, tabId }: Props) {
-  // Sizes from the graph constants (src/metrics.rs).
+  // Sizes from the graph constants (crates/gitcraft-core/src/metrics.rs).
   const m = useStore((s) => s.metrics);
   const cols = useStore((s) => s.settings.columns) ?? DEFAULT_COLUMNS;
   const widths = useStore((s) => s.settings.graphColumnWidths);

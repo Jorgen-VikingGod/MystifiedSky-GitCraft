@@ -1,0 +1,36 @@
+[package]
+name = "gitcraft-core"
+version = "0.1.0"
+edition = "2021"
+description = "GitCraft's Git, hosting, AI and terminal back end, independent of the user interface"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+url = "2"
+notify-debouncer-mini = "0.7"
+base64 = "0.23"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+portable-pty = "0.9"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
+encoding_rs = "0.8"
+regex = "1"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_System_Com",
+  "Win32_System_JobObjects", "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_System_Registry",
+] }

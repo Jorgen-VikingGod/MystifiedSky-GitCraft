@@ -40,6 +40,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
 - Update the libraries for native file dialogs, file watching, and terminal links.
 - Pin the actions used to build, test, and publish release artifacts.
+- Move the Rust backend into its own crate, `crates/gitcraft-core`, which no longer depends on Tauri. `cargo build` and `cargo test` cover the whole workspace.
 
 ### Fixed
 

@@ -149,7 +149,7 @@ pub(crate) fn diff(dir: &std::path::Path, args: &[&str]) -> Result<String, Strin
 }
 
 #[derive(Default)]
-pub(crate) struct Untracked {
+pub struct Untracked {
     pub files: Vec<String>,
     pub text: String,
 }
@@ -197,10 +197,10 @@ pub(crate) fn untracked(dir: &std::path::Path) -> Result<String, String> {
 
 #[derive(Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PreviewKind { Commit, Stash, Compose }
+pub enum PreviewKind { Commit, Stash, Compose }
 
 #[derive(serde::Serialize)]
-pub(crate) struct Preview { id: Option<u32>, files: Vec<String> }
+pub struct Preview { pub id: Option<u32>, pub files: Vec<String> }
 
 struct Pending {
     id: u32,
@@ -213,7 +213,7 @@ struct Pending {
 static PREVIEWS: std::sync::Mutex<Vec<Pending>> = std::sync::Mutex::new(Vec::new());
 const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
-pub(crate) fn preview(dir: &std::path::Path, kind: PreviewKind) -> Result<Preview, String> {
+pub fn preview(dir: &std::path::Path, kind: PreviewKind) -> Result<Preview, String> {
     if kind != PreviewKind::Compose && !diff(dir, &["diff", "--cached"])?.trim().is_empty() {
         return Ok(Preview { id: None, files: vec![] });
     }
@@ -230,7 +230,7 @@ pub(crate) fn preview(dir: &std::path::Path, kind: PreviewKind) -> Result<Previe
     Ok(Preview { id: Some(id), files })
 }
 
-pub(crate) fn take_preview(dir: &std::path::Path, kind: PreviewKind, id: Option<u32>) -> Result<Untracked, String> {
+pub fn take_preview(dir: &std::path::Path, kind: PreviewKind, id: Option<u32>) -> Result<Untracked, String> {
     let Some(id) = id else { return Ok(Untracked::default()); };
     let dir = dir.canonicalize().map_err(|error| error.to_string())?;
     let mut pending = PREVIEWS.lock().unwrap_or_else(|error| error.into_inner());

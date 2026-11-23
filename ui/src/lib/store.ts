@@ -490,7 +490,7 @@ export const DEFAULT_SETTINGS: Settings = {
   repoPrefs: {},
 };
 
-/** Same numbers as src/metrics.rs; replaced by the Rust values at start-up. */
+/** Same numbers as crates/gitcraft-core/src/metrics.rs; replaced by the Rust values at start-up. */
 export const DEFAULT_METRICS: Metrics = {
   node: 22,
   avatar_inner: 18,
