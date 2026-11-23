@@ -249,7 +249,8 @@ pub enum Then {
 /// What a system file dialog was opened for.
 pub enum Pick {
     /// Fill this field of the open dialog.
-    Field(String),
+    /// A dialog field (the dialog, by its token, and the field).
+    Field(u64, String),
     /// Open the chosen folder as a repository.
     OpenRepo,
     /// Open the chosen repository in a window of its own.
@@ -294,8 +295,9 @@ impl App {
 
     fn picked(&mut self, then: Pick, path: String) {
         match then {
-            Pick::Field(key) => {
-                if let Some(d) = self.dialog.as_mut() {
+            // Only into the dialog that asked; one opened since gets nothing.
+            Pick::Field(token, key) => {
+                if let Some(d) = self.dialog.as_mut().filter(|d| d.token == token) {
                     d.values.0.insert(key, Value::Text(path));
                 }
             }
@@ -645,7 +647,8 @@ impl App {
         }
         if let Some((key, title)) = browse {
             self.dialog = Some(dialog);
-            self.pick_folder(&title, Pick::Field(key));
+            let token = self.dialog.as_ref().map_or(0, |d| d.token);
+            self.pick_folder(&title, Pick::Field(token, key));
             return;
         }
         if let Some(i) = chosen {

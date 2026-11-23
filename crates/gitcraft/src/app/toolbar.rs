@@ -122,7 +122,7 @@ impl App {
                     let name = b.name.clone();
                     entries.push(item(format!("{}{}", if is_head { "✓ " } else { "   " }, b.name), move |app| {
                         if !is_head {
-                            app.act(tab, Action::Checkout { target: name });
+                            app.act(tab, Action::Checkout { target: name, changes: Default::default() });
                         }
                     }));
                 }
@@ -137,6 +137,12 @@ impl App {
         let max_x = rect.right() - right_w - group_w;
         let mut x = ideal.max(min_x).min(max_x.max(min_x));
         let slot = |x: f32, w: f32| Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
+        // Actions and Search stay at the right edge; where the window is too narrow for every
+        // button, the ones that would run under them are cut off (their commands stay in the
+        // menus and on their keys).
+        let limit = rect.right() - right_w;
+        let full_clip = ui.clip_rect();
+        ui.set_clip_rect(full_clip.intersect(Rect::from_min_max(full_clip.min, pos2(limit, full_clip.max.y))));
         let undo = v.and_then(|v| v.undo.undo.clone());
         let redo = v.and_then(|v| v.undo.redo.clone());
         if tb(ui, slot(x, 52.0), Icon::Undo2, "Undo", labels, &undo.as_ref().map_or("Nothing to undo".into(), |u| format!("Undo {u}")), undo.is_some(), 0, false).clicked() {
@@ -221,8 +227,9 @@ impl App {
         if tb(ui, slot(x, 52.0), Icon::SquareTerminal, "Terminal", labels, "Toggle the terminal panel (Ctrl+`)", v.is_some(), 0, false).clicked() {
             later.push(Box::new(|app| app.settings.toggle("showTerminal", false)));
         }
-        // Right: Actions and Search, at the right edge but never over the group.
-        let actions = slot((rect.right() - right_w).max(x + 52.0), 56.0);
+        ui.set_clip_rect(full_clip);
+        // Right: Actions and Search, always at the right edge.
+        let actions = slot(limit, 56.0);
         let search = slot(actions.right(), 52.0);
         let aresp = tb(ui, actions, Icon::Zap, "Actions", labels, "", v.is_some(), 0, false);
         if v.is_some() {
@@ -259,10 +266,17 @@ impl App {
         ]
     }
 
+    /// Search Commits: the search box is over the graph, so a file or history shown in the
+    /// centre makes way for it, unless the file has edits not saved yet.
     pub(crate) fn open_search(&mut self, tab: u64) {
-        if let Some(r) = self.repo_mut(tab) {
-            r.ui.search_open = true;
-            r.ui.focus_search = true;
+        let Some(r) = self.repo_mut(tab) else { return };
+        if r.diff_ui.editing && r.diff_ui.draft.is_some() {
+            return self.toast(false, "Save or cancel the changes to this file to search commits.");
         }
+        r.ui.diff = None;
+        r.ui.history = None;
+        r.ui.conflict = None;
+        r.ui.search_open = true;
+        r.ui.focus_search = true;
     }
 }

@@ -392,7 +392,7 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct HistoryFilter {
     pub author: Option<String>,
     pub path: Option<String>,
@@ -436,7 +436,7 @@ impl HistoryFilter {
 
 /// Which branches and tags the graph shows: hidden refs are left out; when any ref is
 /// soloed only the soloed refs are shown (full names such as "refs/heads/main").
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct RefView {
     #[serde(default)]
     pub hidden: Vec<String>,

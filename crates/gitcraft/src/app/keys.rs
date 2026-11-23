@@ -4,6 +4,7 @@
 
 use super::widgets::Tip;
 use super::App;
+use std::collections::HashMap;
 use super::icons::{self, Icon};
 use super::repo::Selection;
 use super::theme::{ACCENT, WARN, p};
@@ -410,7 +411,8 @@ impl App {
             if typing && !cmd.in_inputs {
                 continue;
             }
-            if self.dialog.is_some() && cmd.repo {
+            // A dialog keeps the repository behind it, and the tab it belongs to, as they are.
+            if self.dialog.is_some() && (cmd.repo || cmd.id == "nav:closeTab") {
                 continue;
             }
             ctx.input_mut(|i| i.consume_key(mods, key));
@@ -419,21 +421,41 @@ impl App {
     }
 
     pub(crate) fn open_palette(&mut self, mode: Picker) {
-        if matches!(mode, Picker::History | Picker::Blame) {
-            let tab = self.active;
-            if let Some(path) = self.repo(tab).map(|r| r.path.clone()) {
-                self.palette_files = None;
-                self.spawn(move || super::Msg::Tracked(gitcraft_core::files::tracked_files(std::path::Path::new(&path))));
+        let tab = self.active;
+        self.palette_request += 1;
+        let request = self.palette_request;
+        if matches!(mode, Picker::History | Picker::Blame)
+            && let Some(path) = self.repo(tab).map(|r| r.path.clone())
+        {
+            self.palette_files = None;
+            self.spawn(move || super::Msg::Tracked { request, result: gitcraft_core::files::tracked_files(std::path::Path::new(&path)) });
+        }
+        self.palette = Some(Palette { mode, query: String::new(), selected: 0, focus: true, tab, request, enter: false });
+    }
+
+    /// The tracked files for the file picker; a list for an earlier picker is dropped.
+    pub(super) fn tracked_loaded(&mut self, request: u64, result: Result<Vec<String>, String>) {
+        if self.palette.as_ref().is_none_or(|p| p.request != request) {
+            return;
+        }
+        match result {
+            Ok(files) => self.palette_files = Some(files),
+            Err(e) => {
+                self.palette_files = Some(Vec::new());
+                self.toast(false, e);
             }
         }
-        self.palette = Some(Palette { mode, query: String::new(), selected: 0, focus: true });
+        if let Some(p) = self.palette.as_mut() {
+            p.selected = 0;
+        }
     }
 
     /// The command palette and its pickers, over the window near the top.
     pub(super) fn draw_palette(&mut self, ctx: &egui::Context) {
         let Some(mut pal) = self.palette.take() else { return };
         let c = p();
-        let tab = self.active;
+        // The tab the palette was opened over.
+        let tab = pal.tab;
         let path = self.active_tab().and_then(|t| t.path().map(str::to_owned));
         // (key, label, hint, shortcut, action)
         let mut items: Vec<(String, String, String, String, PaletteAction)> = Vec::new();
@@ -534,6 +556,9 @@ impl App {
                     resp.request_focus();
                     pal.focus = false;
                 }
+                // The results shown were found before this frame's typing; an Enter typed with it
+                // runs on the next frame, against the results for the new text.
+                let pending = std::mem::take(&mut pal.enter);
                 if resp.changed() {
                     pal.selected = 0;
                 }
@@ -544,8 +569,10 @@ impl App {
                 if up {
                     pal.selected = pal.selected.saturating_sub(1);
                 }
-                if enter && !shown.is_empty() {
-                    run = Some(shown[pal.selected]);
+                if (enter || pending) && resp.changed() {
+                    pal.enter = true;
+                } else if (enter || pending) && !shown.is_empty() {
+                    run = Some(shown[pal.selected.min(shown.len() - 1)]);
                 }
                 if esc {
                     close = true;
@@ -569,7 +596,8 @@ impl App {
                     for (row, &i) in shown.iter().enumerate() {
                         let it = &items[i];
                         let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
-                        if r.hovered() {
+                        // Only a moving pointer picks a row, so the arrow keys work under a still one.
+                        if r.hovered() && ui.input(|i| i.pointer.is_moving()) {
                             pal.selected = row;
                         }
                         let on = row == pal.selected;
@@ -613,7 +641,7 @@ impl App {
                 }
                 PaletteAction::Command(id) => self.run_command(id),
                 PaletteAction::Open(path) => self.open_repo(&path),
-                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false } } else { Action::Checkout { target: name } }),
+                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: Default::default() } } else { Action::Checkout { target: name, changes: Default::default() } }),
                 PaletteAction::History(file, blame) => self.open_history(tab, &file, if blame { super::repo::HistoryMode::Blame } else { super::repo::HistoryMode::History }),
                 PaletteAction::Theme(id) => self.set_theme(id),
                 PaletteAction::Profile(i) => self.switch_profile(i),
@@ -689,6 +717,14 @@ impl App {
                     }
                     ui.add_space(12.0);
                     let f = s.filter.to_lowercase();
+                    // Every command's keys once, and the commands each key combination is on.
+                    let bound: HashMap<&str, Vec<String>> = COMMANDS.iter().map(|cmd| (cmd.id, self.bindings(cmd).iter().map(|b| b.to_uppercase()).collect())).collect();
+                    let mut on_keys: HashMap<&str, Vec<&Command>> = HashMap::new();
+                    for cmd in COMMANDS.iter() {
+                        for b in &bound[cmd.id] {
+                            on_keys.entry(b.as_str()).or_default().push(cmd);
+                        }
+                    }
                     egui::ScrollArea::vertical().max_height(screen.height() * 0.75 - 140.0).show(ui, |ui| {
                         for g in [Group::Repo, Group::Navigation, Group::Palette, Group::Ui] {
                             let list: Vec<&Command> = COMMANDS.iter().filter(|cmd| cmd.group == g && (f.is_empty() || cmd.label.to_lowercase().contains(&f) || self.keys_of(cmd.id).unwrap_or_default().to_lowercase().contains(&f))).collect();
@@ -700,8 +736,7 @@ impl App {
                             for cmd in list {
                                 let keys = self.keys_of(cmd.id).unwrap_or_default();
                                 let is_custom = custom.contains_key(cmd.id);
-                                let mine: Vec<String> = self.bindings(cmd).iter().map(|b| b.to_uppercase()).collect();
-                                let clash = COMMANDS.iter().find(|o| o.id != cmd.id && self.bindings(o).iter().any(|b| mine.contains(&b.to_uppercase())));
+                                let clash = bound[cmd.id].iter().filter_map(|b| on_keys.get(b.as_str())).flatten().copied().find(|o| o.id != cmd.id);
                                 let (row, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
                                 ui.painter().line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, c.white(0.05)));
                                 ui.painter().text(pos2(row.left(), row.center().y), Align2::LEFT_CENTER, cmd.label, FontId::proportional(13.0), c.fg);
@@ -793,6 +828,11 @@ pub struct Palette {
     pub query: String,
     pub selected: usize,
     pub focus: bool,
+    /// The tab it was opened over, and which opening this is.
+    pub tab: u64,
+    pub request: u64,
+    /// Enter was pressed with new text; run the choice when its results are in.
+    pub enter: bool,
 }
 
 #[derive(Default)]

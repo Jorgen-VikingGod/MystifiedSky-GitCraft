@@ -70,7 +70,8 @@ fn enc(s: &str) -> String {
 /// The page for a commit, branch or tag on the remote's site.
 pub fn web_link(remote_url: &str, target: &Target) -> Option<String> {
     let base = web_base(remote_url)?;
-    let b = base.to_lowercase();
+    // The site is told by its host name alone: a repository may be named after another site.
+    let b = url::Url::parse(&base).ok().and_then(|u| u.host_str().map(str::to_lowercase)).unwrap_or_default();
     Some(match target {
         Target::Repo => base,
         _ if b.contains("dev.azure.com") || b.contains("visualstudio.com") => match target {
@@ -156,6 +157,9 @@ mod tests {
         assert_eq!(web_base("git@ssh.dev.azure.com:v3/org/proj/repo").as_deref(), Some("https://dev.azure.com/org/proj/_git/repo"));
         assert_eq!(web_link("https://gitlab.com/a/b.git", &Target::Branch("feat/x".into())).as_deref(), Some("https://gitlab.com/a/b/-/tree/feat/x"));
         assert_eq!(web_link("git@github.com:a/b.git", &Target::Tag("v1".into())).as_deref(), Some("https://github.com/a/b/releases/tag/v1"));
+        // The path doesn't change the site: a GitHub repository named after another one.
+        assert_eq!(web_link("git@github.com:me/gitlab-tools.git", &Target::Commit("abc".into())).as_deref(), Some("https://github.com/me/gitlab-tools/commit/abc"));
+        assert_eq!(web_link("https://github.com/me/bitbucket-sync.git", &Target::Branch("main".into())).as_deref(), Some("https://github.com/me/bitbucket-sync/tree/main"));
         assert!(web_base("/local/path").is_none());
     }
 }

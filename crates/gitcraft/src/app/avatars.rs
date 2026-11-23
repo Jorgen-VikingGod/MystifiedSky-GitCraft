@@ -17,7 +17,8 @@ const KEEP: usize = 1024;
 
 enum State {
     Loading,
-    Ready(TextureHandle),
+    /// The picture, and when it was last drawn.
+    Ready(TextureHandle, Instant),
     Missing(Instant),
 }
 
@@ -42,8 +43,11 @@ pub fn texture(ctx: &egui::Context, email: &str) -> Option<TextureHandle> {
     let key = email.trim().to_lowercase();
     gitcraft_core::avatars::url(&key, PX)?;
     let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
-    match map.get(&key) {
-        Some(State::Ready(t)) => return Some(t.clone()),
+    match map.get_mut(&key) {
+        Some(State::Ready(t, used)) => {
+            *used = Instant::now();
+            return Some(t.clone());
+        }
         Some(State::Loading) => return None,
         Some(State::Missing(at)) if at.elapsed() < RETRY_AFTER => return None,
         _ => {}
@@ -54,7 +58,7 @@ pub fn texture(ctx: &egui::Context, email: &str) -> Option<TextureHandle> {
         return None;
     }
     if map.len() >= KEEP {
-        map.retain(|_, s| matches!(s, State::Ready(_)));
+        prune(&mut map);
     }
     map.insert(key.clone(), State::Loading);
     RUNNING.fetch_add(1, Ordering::Relaxed);
@@ -62,7 +66,7 @@ pub fn texture(ctx: &egui::Context, email: &str) -> Option<TextureHandle> {
     std::thread::spawn(move || {
         let picture = gitcraft_core::avatars::fetch(&key, PX).ok().flatten().and_then(|bytes| decode(&bytes));
         let state = match picture {
-            Some(image) => State::Ready(ctx.load_texture(format!("avatar:{key}"), image, TextureOptions::LINEAR)),
+            Some(image) => State::Ready(ctx.load_texture(format!("avatar:{key}"), image, TextureOptions::LINEAR), Instant::now()),
             None => State::Missing(Instant::now()),
         };
         cache().lock().unwrap_or_else(|e| e.into_inner()).insert(key, state);
@@ -70,6 +74,21 @@ pub fn texture(ctx: &egui::Context, email: &str) -> Option<TextureHandle> {
         ctx.request_repaint();
     });
     None
+}
+
+/// The cache is full: forget addresses whose wait before asking again is over, then the pictures
+/// drawn longest ago, a quarter of the cache at a time so this runs rarely. Requests still
+/// running, and addresses still waiting, stay.
+fn prune(map: &mut HashMap<String, State>) {
+    map.retain(|_, s| !matches!(s, State::Missing(at) if at.elapsed() >= RETRY_AFTER));
+    if map.len() < KEEP {
+        return;
+    }
+    let mut ready: Vec<(Instant, String)> = map.iter().filter_map(|(k, s)| if let State::Ready(_, used) = s { Some((*used, k.clone())) } else { None }).collect();
+    ready.sort_unstable();
+    for (_, key) in ready.into_iter().take((KEEP / 4).max(1)) {
+        map.remove(&key);
+    }
 }
 
 fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
@@ -85,4 +104,33 @@ pub fn paint(painter: &egui::Painter, texture: &TextureHandle, center: egui::Pos
     let shape = egui::epaint::RectShape::filled(rect, CornerRadius::same(radius), Color32::WHITE.gamma_multiply(alpha))
         .with_texture(texture.id(), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
     painter.add(shape);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_cache_drops_old_pictures_and_keeps_requests_and_waits() {
+        let ctx = egui::Context::default();
+        let picture = egui::ColorImage::new([1, 1], vec![Color32::WHITE]);
+        let start = Instant::now();
+        let mut map: HashMap<String, State> = HashMap::new();
+        for i in 0..KEEP {
+            let texture = ctx.load_texture(format!("t{i}"), picture.clone(), TextureOptions::LINEAR);
+            map.insert(format!("r{i}"), State::Ready(texture, start + Duration::from_millis(i as u64)));
+        }
+        map.insert("loading".into(), State::Loading);
+        map.insert("waiting".into(), State::Missing(Instant::now()));
+        if let Some(long_ago) = Instant::now().checked_sub(RETRY_AFTER * 2) {
+            map.insert("expired".into(), State::Missing(long_ago));
+        }
+        prune(&mut map);
+        assert!(map.contains_key("loading") && map.contains_key("waiting"));
+        assert!(!map.contains_key("expired"));
+        // The pictures drawn longest ago went, the latest stayed.
+        assert!(!map.contains_key("r0"));
+        assert!(map.contains_key(&format!("r{}", KEEP - 1)));
+        assert!(map.len() < KEEP);
+    }
 }

@@ -520,6 +520,12 @@ fn replace_file_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std:
     replace_file_at(&destination, write)
 }
 
+/// Write `bytes` to `path` through a new temporary file beside it (created exclusively, under a
+/// random name), so an existing file is replaced only once the new one is completely written.
+pub fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    replace_file_at(path, |file| std::io::Write::write_all(file, bytes))
+}
+
 fn replace_file_at(destination: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     let parent = destination.parent().ok_or_else(|| std::io::Error::other("File has no parent directory"))?;
     let mut pending = tempfile::NamedTempFile::new_in(parent)?;

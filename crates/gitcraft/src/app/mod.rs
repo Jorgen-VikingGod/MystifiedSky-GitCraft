@@ -123,15 +123,15 @@ pub enum Msg {
     Initialized(u64, Result<gitcraft_core::manage::InitOutcome, String>),
     Mono { title: String, result: Result<String, String> },
     Job(Job),
-    Tracked(Result<Vec<String>, String>),
-    Diff { tab: u64, key: String, versions: Box<gitcraft_core::files::FileVersions>, lines: Option<Vec<gitcraft_core::git::DiffLine>> },
-    Saved { tab: u64, file: String, result: Result<(), String> },
-    FileHistory { tab: u64, file: String, result: Result<gitcraft_core::files::FileHistoryPage, String> },
-    ConflictInfo { tab: u64, info: Box<gitcraft_core::rewrite::ConflictInfo> },
+    Tracked { request: u64, result: Result<Vec<String>, String> },
+    Diff { tab: u64, key: String, generation: u64, versions: Box<gitcraft_core::files::FileVersions>, lines: Option<Vec<gitcraft_core::git::DiffLine>> },
+    Saved { tab: u64, file: String, editor: u64, edits: u64, token: Option<String>, result: Result<(), String> },
+    FileHistory { tab: u64, file: String, request: u64, result: Result<gitcraft_core::files::FileHistoryPage, String> },
+    ConflictInfo { tab: u64, file: String, request: u64, info: Box<gitcraft_core::rewrite::ConflictInfo> },
     ConflictSaved { tab: u64, result: Result<String, String> },
     Ai { id: String, result: Box<Result<ai::AiOutput, String>> },
     AiPreview { tab: u64, kind: u8, result: Result<(Option<u32>, Vec<String>), String> },
-    Blame { tab: u64, key: (String, Option<String>, bool), result: Result<Vec<gitcraft_core::files::BlameLine>, String> },
+    Blame { tab: u64, key: (String, Option<String>, bool), request: u64, result: Result<Vec<gitcraft_core::files::BlameLine>, String> },
 }
 
 /// Where background threads leave [`Msg`]s; the window takes them each frame.
@@ -203,13 +203,21 @@ pub struct App {
     /// The left panel shown over an open file until the file closes.
     pub(crate) left_peek: bool,
     pub(crate) focus_left_filter: std::cell::Cell<bool>,
-    /// A worktree being added, to open once it exists.
-    pub(crate) after_worktree: Option<String>,
     /// Cached diffs, by tab and file.
     pub(crate) diffs: HashMap<(u64, String), diff::DiffCache>,
     shown_tab: u64,
     pub(crate) palette: Option<keys::Palette>,
     pub(crate) palette_files: Option<Vec<String>>,
+    /// Counts palette openings, so a file list for an earlier one is dropped.
+    pub(crate) palette_request: u64,
+    /// The bulk pull or fetch running in Repository Management (its number and the count
+    /// shown), and how many have been started.
+    pub(crate) bulk: Option<(u64, usize)>,
+    pub(crate) bulk_batch: u64,
+    /// Counts diff reads, so a read only fills the cache entry it was started for.
+    pub(crate) diff_reads: u64,
+    /// Counts file-history reads, so a page is added only by the latest read.
+    pub(crate) history_reads: u64,
     pub(crate) shortcuts: Option<keys::ShortcutsUi>,
     /// The command whose new keys are being recorded.
     pub(crate) recording: Option<String>,
@@ -229,7 +237,7 @@ pub struct App {
     pub(crate) hosted: HashMap<u64, hosting::Hosted>,
     pub(crate) launchpad: hosting::Launchpad,
     /// A Start a Pull Request dialog waiting for AI text: tab, branch, target.
-    pub(crate) pr_waiting: Option<(u64, String, String)>,
+    pub(crate) pr_waiting: Option<(u64, String, String, bool)>,
     fetched_at: Option<std::time::Instant>,
     primary: Option<Box<crate::instance::Primary>>,
     /// Clone links waiting for the dialog in front to close.
@@ -279,11 +287,15 @@ impl App {
             notices: Vec::new(),
             left_peek: false,
             focus_left_filter: std::cell::Cell::new(false),
-            after_worktree: None,
             diffs: HashMap::new(),
             shown_tab: 0,
             palette: None,
             palette_files: None,
+            palette_request: 0,
+            bulk: None,
+            bulk_batch: 0,
+            diff_reads: 0,
+            history_reads: 0,
             shortcuts: None,
             recording: None,
             focus_summary: None,
@@ -465,6 +477,10 @@ impl App {
     /// Show the repository at `path`: its tab when one is open, otherwise in place of the start
     /// screen in front, otherwise in a new tab.
     pub(crate) fn open_repo(&mut self, path: &str) {
+        // A folder already known under another spelling (a `\\?\` path on Windows, a trailing
+        // separator) keeps the name its settings, drafts and aliases are stored under.
+        let known = self.tabs.iter().filter_map(|t| t.path().map(str::to_owned)).chain(self.settings.recents()).find(|p| same_folder(p, path));
+        let path = known.as_deref().unwrap_or(path);
         let mut recents = self.settings.recents();
         recents.retain(|r| !same_folder(r, path));
         recents.insert(0, path.to_owned());
@@ -515,6 +531,15 @@ impl App {
 
     pub(crate) fn reopen_tab(&mut self) {
         let Some(mut tab) = self.closed.pop() else { return };
+        // A repository opened again since its tab was closed: go to that tab, so one folder
+        // never has two tabs (file changes refresh only one of them).
+        if let Some(path) = tab.path()
+            && let Some(open) = self.tabs.iter().find(|t| t.path() == Some(path))
+        {
+            self.active = open.id;
+            self.remember_tabs();
+            return;
+        }
         tab.id = self.take_id();
         if let Some(path) = tab.path().map(str::to_owned) {
             self.ensure_repo(tab.id, &path);
@@ -526,10 +551,12 @@ impl App {
 
     /// Move a tab `by` places among the tabs shown in the strip.
     pub(crate) fn shift_tab(&mut self, id: u64, by: isize) {
-        let Some(at) = self.tabs.iter().position(|t| t.id == id) else { return };
+        // The Launchpad tab isn't in the strip, so it is no neighbour to swap with.
+        let shown: Vec<usize> = self.tabs.iter().enumerate().filter(|(_, t)| t.kind != TabKind::Launchpad).map(|(i, _)| i).collect();
+        let Some(at) = shown.iter().position(|&i| self.tabs[i].id == id) else { return };
         let to = at as isize + by;
-        if to >= 0 && (to as usize) < self.tabs.len() {
-            self.tabs.swap(at, to as usize);
+        if to >= 0 && (to as usize) < shown.len() {
+            self.tabs.swap(shown[at], shown[to as usize]);
             self.remember_tabs();
         }
     }
@@ -620,7 +647,10 @@ impl eframe::App for App {
         if let Err(e) = self.settings.flush() {
             eprintln!("Could not save preferences: {e}");
         }
-        placement::save();
+        // Picture-taking runs leave the saved window geometry alone.
+        if self.screenshot.is_none() {
+            placement::save();
+        }
     }
 
     /// Closing the window quits the way the system expects.
@@ -704,7 +734,8 @@ impl App {
         let tab = self.active;
         let Some(r) = self.repo_mut(tab) else { return };
         let Some(v) = r.view.as_ref() else { return };
-        let file = v.data.status.unstaged.first().map(|f| (f.path.clone(), f.status == '?')).or_else(|| v.data.status.staged.first().map(|f| (f.path.clone(), false)));
+        use gitcraft_core::git::DiffSource;
+        let file = v.data.status.unstaged.first().map(|f| (f.path.clone(), f.status == '?', DiffSource::Unstaged)).or_else(|| v.data.status.staged.first().map(|f| (f.path.clone(), false, DiffSource::Staged)));
         let commit = v.data.commits.iter().find(|c| c.parents.len() == 1).map(|c| c.sha.clone());
         match view {
             "agents" => {
@@ -716,8 +747,8 @@ impl App {
                 self.shot_wait = 60;
             }
             "diff" | "inline" | "split" => {
-                if let Some((path, untracked)) = file {
-                    r.ui.diff = Some(repo::DiffTarget { source: gitcraft_core::git::DiffSource::Unstaged, file: path, untracked, parent: None });
+                if let Some((path, untracked, source)) = file {
+                    r.ui.diff = Some(repo::DiffTarget { source, file: path, untracked, parent: None });
                 }
                 let mode = if view == "diff" { "hunk" } else { view };
                 self.settings.set("diffMode", mode);
@@ -777,10 +808,10 @@ impl App {
             Msg::Changed { path, full } => self.changed(&path, full),
             Msg::Watching { tab, result } => self.watching(tab, result),
             Msg::Acted { tab, action, quiet, result } => {
-                let worktree = matches!(*action, Action::WorktreeAdd { .. }) && result.ok;
+                let worktree = (matches!(*action, Action::WorktreeAdd { .. } | Action::WorktreeRemove { .. }) && result.ok).then(|| (*action).clone());
                 self.acted(tab, *action, quiet, result);
-                if worktree {
-                    self.worktree_added();
+                if let Some(action) = worktree {
+                    self.worktree_done(&action);
                 }
             }
             Msg::CommitFiles { tab, sha, files, signature } => {
@@ -816,6 +847,7 @@ impl App {
             Msg::Locks { tab, result } => {
                 if let Some(r) = self.repo_mut(tab) {
                     r.side.locks = Some(result);
+                    r.side.locks_loading = false;
                 }
             }
             Msg::Plan { tab, result } => self.plan_ready(tab, result),
@@ -830,22 +862,19 @@ impl App {
                 self.engine.jobs.acknowledge(&job.id);
                 self.job = Some(job);
             }
-            Msg::Tracked(result) => match result {
-                Ok(files) => self.palette_files = Some(files),
-                Err(e) => {
-                    self.palette_files = Some(Vec::new());
-                    self.toast(false, e);
-                }
-            },
-            Msg::Diff { tab, key, versions, lines } => self.diff_loaded(tab, key, *versions, lines),
-            Msg::Saved { tab, file, result } => self.saved(tab, file, result),
-            Msg::FileHistory { tab, file, result } => self.history_loaded(tab, file, result),
-            Msg::ConflictInfo { tab, info } => self.conflict_loaded(tab, *info),
+            Msg::Tracked { request, result } => self.tracked_loaded(request, result),
+            Msg::Diff { tab, key, generation, versions, lines } => self.diff_loaded(tab, key, generation, *versions, lines),
+            Msg::Saved { tab, file, editor, edits, token, result } => self.saved(tab, file, editor, edits, token, result),
+            Msg::FileHistory { tab, file, request, result } => self.history_loaded(tab, file, request, result),
+            Msg::ConflictInfo { tab, file, request, info } => self.conflict_loaded(tab, file, request, *info),
             Msg::ConflictSaved { tab, result } => self.conflict_saved(tab, result),
             Msg::Ai { id, result } => self.ai_done(id, *result),
             Msg::AiPreview { tab, kind, result } => self.ai_preview(tab, kind, result),
-            Msg::Blame { tab, key, result } => {
-                if let Some(r) = self.repo_mut(tab) {
+            Msg::Blame { tab, key, request, result } => {
+                if let Some(r) = self.repo_mut(tab)
+                    && r.history_ui.blame_reads.get(&key) == Some(&request)
+                {
+                    r.history_ui.blame_reads.remove(&key);
                     r.history_ui.blame.insert(key, match result {
                         Ok(l) => repo::Loaded::Ready(l),
                         Err(e) => repo::Loaded::Failed(e),
@@ -861,6 +890,13 @@ pub fn dialog_open(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(egui::Id::NULL.with("dialog_open"))).unwrap_or(false)
 }
 
+/// A number never handed out before in this run: tells apart editors and reads whose own state
+/// is reset when a view opens again.
+pub fn unique_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The last part of a path, as a tab title.
 pub fn folder_name(path: &str) -> String {
     path.split(['/', '\\']).rfind(|p| !p.is_empty()).unwrap_or(path).to_owned()
@@ -868,7 +904,19 @@ pub fn folder_name(path: &str) -> String {
 
 /// Whether two paths name the same folder, ignoring a trailing separator (and case on Windows).
 pub fn same_folder(a: &str, b: &str) -> bool {
-    let trim = |p: &str| p.trim_end_matches(['/', '\\']).to_owned();
+    // A backslash is a separator only on Windows; elsewhere it is part of a name. On Windows the
+    // extended-length form (`\\?\C:\x`, `\\?\UNC\server\x`) names the same folder as the usual one.
+    let trim = |p: &str| {
+        if !cfg!(windows) {
+            return p.trim_end_matches('/').to_owned();
+        }
+        let p = p.replace('/', "\\");
+        let p = match p.strip_prefix("\\\\?\\UNC\\") {
+            Some(rest) => format!("\\\\{rest}"),
+            None => p.strip_prefix("\\\\?\\").map(str::to_owned).unwrap_or(p),
+        };
+        p.trim_end_matches('\\').to_owned()
+    };
     if cfg!(windows) { trim(a).eq_ignore_ascii_case(&trim(b)) } else { Path::new(&trim(a)) == Path::new(&trim(b)) }
 }
 
@@ -881,7 +929,8 @@ fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(rgba).map_err(|e| e.to_string())
+    writer.write_image_data(rgba).map_err(|e| e.to_string())?;
+    writer.finish().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

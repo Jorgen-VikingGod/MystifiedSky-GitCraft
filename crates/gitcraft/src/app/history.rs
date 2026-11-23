@@ -21,12 +21,17 @@ pub struct HistoryUi {
     pub error: Option<String>,
     pub ignore_revs: bool,
     pub blame: HashMap<(String, Option<String>, bool), Loaded<Vec<BlameLine>>>,
+    /// The blame reads running, by key: a finished read fills its entry only if it is still the
+    /// one awaited (a change in the working folder asks for a new one).
+    pub blame_reads: HashMap<(String, Option<String>, bool), u64>,
     pub hover: Option<String>,
+    /// The read whose page is awaited.
+    pub request: u64,
 }
 
 impl Default for HistoryUi {
     fn default() -> Self {
-        HistoryUi { file: String::new(), entries: Vec::new(), cursor: None, loading: false, error: None, ignore_revs: true, blame: HashMap::new(), hover: None }
+        HistoryUi { file: String::new(), entries: Vec::new(), cursor: None, loading: false, error: None, ignore_revs: true, blame: HashMap::new(), blame_reads: HashMap::new(), hover: None, request: 0 }
     }
 }
 
@@ -53,15 +58,22 @@ impl App {
         }
         r.history_ui.loading = true;
         let (path, file, cursor) = (r.path.clone(), r.history_ui.file.clone(), r.history_ui.cursor.clone());
+        // Each read has a number; only the latest one's page is added, so a read for this file
+        // from before it was opened again doesn't add its page.
+        self.history_reads += 1;
+        let request = self.history_reads;
+        if let Some(r) = self.repo_mut(tab) {
+            r.history_ui.request = request;
+        }
         self.spawn(move || {
             let result = gitcraft_core::files::file_history_page(std::path::Path::new(&path), &file, cursor, gitcraft_core::metrics::FILE_HISTORY_MAX);
-            super::Msg::FileHistory { tab, file, result }
+            super::Msg::FileHistory { tab, file, request, result }
         });
     }
 
-    pub(crate) fn history_loaded(&mut self, tab: u64, file: String, result: Result<gitcraft_core::files::FileHistoryPage, String>) {
+    pub(crate) fn history_loaded(&mut self, tab: u64, file: String, request: u64, result: Result<gitcraft_core::files::FileHistoryPage, String>) {
         let Some(r) = self.repo_mut(tab) else { return };
-        if r.history_ui.file != file {
+        if r.history_ui.file != file || r.history_ui.request != request {
             return;
         }
         r.history_ui.loading = false;
@@ -82,8 +94,10 @@ impl App {
             return;
         }
         r.history_ui.blame.insert(key.clone(), Loaded::Loading);
+        let request = super::unique_id();
+        r.history_ui.blame_reads.insert(key.clone(), request);
         let path = r.path.clone();
-        self.spawn(move || super::Msg::Blame { tab, key, result: gitcraft_core::files::blame(std::path::Path::new(&path), &file, rev.as_deref(), ignore) });
+        self.spawn(move || super::Msg::Blame { tab, key, request, result: gitcraft_core::files::blame(std::path::Path::new(&path), &file, rev.as_deref(), ignore) });
     }
 
     pub(crate) fn history_view(&self, ui: &mut Ui, tab: u64, r: &mut RepoTab, target: &HistoryTarget, later: &mut Vec<Later>) {
@@ -153,6 +167,15 @@ impl App {
                 && h.entries.is_empty()
             {
                 note(ui, &format!("Could not load file history: {e}"), REMOVED);
+                // The first page failed: read it again (later pages have their own retry).
+                if h.cursor.is_none() && !h.loading {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        if widgets::link(ui, "Retry", 12.0).clicked() {
+                            later.push(Box::new(move |app| app.want_history_page(tab)));
+                        }
+                    });
+                }
             }
             if h.loading && h.entries.is_empty() {
                 note(ui, "Loading history…", c.fg3);

@@ -23,8 +23,15 @@ pub fn agent_label(agent: &str) -> Option<&'static str> {
     AGENT_LABEL.iter().find(|(k, _)| *k == agent).map(|(_, l)| *l)
 }
 
-/// A folder path compared the way the file system does.
+/// A folder path compared the way the file system does. Backslashes separate folders only in
+/// Windows paths (a drive letter, a `\\server` share, or any path on Windows); elsewhere they are
+/// part of a name.
 pub fn folder_key(s: &str) -> String {
+    let b = s.as_bytes();
+    let windows_path = cfg!(windows) || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || s.starts_with("\\\\");
+    if !windows_path {
+        return s.trim_end_matches('/').to_owned();
+    }
     let p = s.replace('\\', "/");
     let p = p.strip_prefix("//?/UNC/").map(|r| format!("//{r}")).or_else(|| p.strip_prefix("//?/").map(str::to_owned)).unwrap_or(p);
     let p = p.trim_end_matches('/').to_owned();
@@ -98,6 +105,8 @@ fn session_status(a: Option<&AgentSession>) -> &'static str {
 #[derive(Default)]
 pub struct AgentsUi {
     pub sessions: Option<Loaded<Vec<AgentSession>>>,
+    /// Counts the session scans, so an earlier scan's result is dropped.
+    pub request: u64,
     pub read_at: Option<Instant>,
     pub key: String,
     pub statuses: HashMap<String, (Loaded<WorkStatus>, Instant)>,
@@ -161,9 +170,14 @@ impl App {
     fn want_agent_sessions(&mut self, tab: u64, roots: Vec<String>, key: String) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let ai = self.settings.get::<Value>("ai").unwrap_or_default();
-        let dir = |a: &str| connection(&ai, a).and_then(|c| c["cliConfigDir"].as_str().map(str::to_owned)).filter(|d| !d.trim().is_empty());
+        let dir = |a: &str| connection(&ai, a).and_then(|c| c["cliConfigDir"].as_str().map(|d| d.trim().to_owned())).filter(|d| !d.is_empty());
         let (claude, codex) = (dir("claude"), dir("codex"));
+        // Each scan has a number, and only the latest one's sessions are shown: two scans can
+        // look in the same folders.
+        let mut request = 0;
         if let Some(r) = self.repo_mut(tab) {
+            r.agents.request += 1;
+            request = r.agents.request;
             r.agents.read_at = Some(Instant::now());
             if r.agents.key != key || r.agents.sessions.is_none() {
                 r.agents.sessions = Some(Loaded::Loading);
@@ -177,7 +191,9 @@ impl App {
             }
             let list = gitcraft_core::agents::sessions(&roots, claude.as_deref(), codex.as_deref());
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                if let Some(r) = app.repo_mut(tab) {
+                if let Some(r) = app.repo_mut(tab)
+                    && r.agents.request == request
+                {
                     r.agents.sessions = Some(Loaded::Ready(list));
                 }
             }))
@@ -241,11 +257,12 @@ impl App {
         }
         let agent = self.settings.string("codingAgent", "claude");
         let agent_name = agent_label(&agent);
-        let filter = au.filter.to_lowercase();
+        // The same text the session rows are matched by: titles, ids and agents.
+        let filter = au.filter.trim().to_lowercase();
         let visible: Vec<&Worktree> = worktrees
             .iter()
             .filter(|w| {
-                let titles = grouped.get(&folder_key(&w.path)).map(|g| g.iter().map(|a| a.title.as_str()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                let titles = grouped.get(&folder_key(&w.path)).map(|g| g.iter().map(|a| format!("{} {} {}", a.title, a.id, a.agent)).collect::<Vec<_>>().join(" ")).unwrap_or_default();
                 format!("{} {} {titles}", w.path, w.branch).to_lowercase().contains(&filter)
             })
             .collect();
@@ -358,7 +375,14 @@ impl App {
                     }
                     Some(Ok(s.clone()))
                 }
-                Some((Loaded::Failed(_), _)) => Some(Err(())),
+                // Tried again after the same pause as a status that was read.
+                Some((Loaded::Failed(_), at)) => {
+                    if at.elapsed().as_secs() >= 10 {
+                        let p = wt.path.clone();
+                        later.push(Box::new(move |app| app.want_worktree_status(tab, p)));
+                    }
+                    Some(Err(()))
+                }
                 Some((Loaded::Loading, _)) => None,
                 None => {
                     let p = wt.path.clone();
@@ -520,6 +544,11 @@ mod tests {
         assert!(same_folder("C:\\Repo\\", "c:/repo"));
         assert!(same_folder("\\\\?\\C:\\Repo", "c:/repo"));
         assert!(!same_folder("/home/a/Repo", "/home/a/repo"));
+        // Outside Windows a backslash is part of a folder's name.
+        if !cfg!(windows) {
+            assert!(!same_folder("/home/a/x\\y", "/home/a/x/y"));
+            assert!(same_folder("/home/a/repo/", "/home/a/repo"));
+        }
     }
 
     #[test]

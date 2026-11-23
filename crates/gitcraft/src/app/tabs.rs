@@ -271,33 +271,43 @@ impl App {
         }
     }
 
-    /// While a tab is dragged, move it past each neighbour the pointer crosses the middle of.
+    /// While a tab is dragged, move it past each neighbour the pointer crosses the middle of
+    /// (all of them, however far it went in one frame), the release included.
     fn drop_dragged_tab(&mut self, ui: &Ui, rects: &[(u64, Rect)]) {
         let Some(drag) = &self.tab_drag else { return };
-        let dragged = drag.id;
-        if !ui.input(|i| i.pointer.primary_down()) {
-            self.tab_drag = None;
-            return self.remember_tabs();
-        }
-        let Some(pointer) = ui.ctx().pointer_interact_pos() else { return };
-        let left = pointer.x - drag.grab;
-        let Some(&(_, own)) = rects.iter().find(|(id, _)| *id == dragged) else { return };
-        let right = left + own.width();
-        for (id, rect) in rects {
-            if *id == dragged {
-                continue;
+        let (dragged, grab) = (drag.id, drag.grab);
+        let released = !ui.input(|i| i.pointer.primary_down());
+        let pointer = ui.ctx().pointer_interact_pos().or_else(|| ui.input(|i| i.pointer.latest_pos()));
+        if let Some(pointer) = pointer
+            && let Some(&(_, own)) = rects.iter().find(|(id, _)| *id == dragged)
+        {
+            let left = pointer.x - grab;
+            let right = left + own.width();
+            // The furthest neighbour passed: the last one to the right, the first to the left.
+            let mut target = None;
+            for (id, rect) in rects {
+                if *id == dragged {
+                    continue;
+                }
+                if rect.left() > own.left() && right > rect.center().x {
+                    target = Some(*id);
+                }
+                if rect.left() < own.left() && left < rect.center().x && target.is_none() {
+                    target = Some(*id);
+                }
             }
-            let passed_right = rect.left() > own.left() && right > rect.center().x;
-            let passed_left = rect.left() < own.left() && left < rect.center().x;
-            if passed_right || passed_left {
+            if let Some(target) = target {
                 let a = self.tabs.iter().position(|t| t.id == dragged);
-                let b = self.tabs.iter().position(|t| t.id == *id);
+                let b = self.tabs.iter().position(|t| t.id == target);
                 if let (Some(a), Some(b)) = (a, b) {
                     let tab = self.tabs.remove(a);
                     self.tabs.insert(b, tab);
                 }
-                break;
             }
+        }
+        if released {
+            self.tab_drag = None;
+            self.remember_tabs();
         }
     }
 

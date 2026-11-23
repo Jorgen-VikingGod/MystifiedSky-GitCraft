@@ -25,6 +25,9 @@ pub struct WorkUi {
     pub skip_hooks: Option<bool>,
     pub sign_off: bool,
     pub coauthors: String,
+    /// The commit running now: the draft and co-authors it was made from, and whether to push
+    /// once it succeeds.
+    pub submitted: Option<Submitted>,
     /// Folders closed in the tree view.
     pub closed: std::collections::HashSet<String>,
     pub template_applied: bool,
@@ -52,6 +55,14 @@ pub fn working_changes(s: &WorkStatus) -> (usize, usize, usize, usize) {
 }
 
 /// Add Co-authored-by trailers for each `Name <email>` in the comma-separated list.
+/// What a commit was made from, kept until its result arrives.
+#[derive(Clone, Default)]
+pub struct Submitted {
+    pub draft: super::repo::Draft,
+    pub coauthors: String,
+    pub push: bool,
+}
+
 pub fn with_coauthors(description: &str, list: &str) -> String {
     let people: Vec<&str> = list.split(',').map(str::trim).filter(|p| {
         let Some((name, rest)) = p.split_once('<') else { return false };
@@ -538,6 +549,8 @@ impl App {
         for (is_staged, e) in events {
             match e {
                 FileEvent::Open(f) => {
+                    // The picked file shows in the centre, in place of an open conflict.
+                    r.ui.conflict = None;
                     r.ui.diff = Some(DiffTarget { source: if is_staged { DiffSource::Staged } else { DiffSource::Unstaged }, untracked: f.status == '?', file: f.path, parent: None });
                 }
                 FileEvent::Button(f) => {
@@ -748,11 +761,18 @@ impl App {
         let Some(r) = self.repo(tab) else { return };
         let Some(v) = r.view.as_ref() else { return };
         let path = v.path.clone();
+        // One commit at a time: what a commit was made from is cleared only when it succeeds.
+        if r.work.submitted.is_some() {
+            return self.toast(false, "Wait for the running commit to finish before committing again.");
+        }
         if v.data.status.conflicted || v.data.status.unstaged.iter().any(|f| f.status == 'U') {
             return self.toast(false, "Resolve and stage every conflicted file before committing.");
         }
         let draft = self.draft(&path);
-        if !all && v.data.status.staged.is_empty() && !draft.amend {
+        // With nothing staged there is nothing to commit, except during a merge: the merge
+        // commit itself records the merge.
+        let merging = v.data.state_note.as_deref() == Some("merging");
+        if !all && v.data.status.staged.is_empty() && !draft.amend && !merging {
             return;
         }
         if draft.summary.trim().is_empty() {
@@ -772,13 +792,12 @@ impl App {
         let description = with_coauthors(&draft.description, &wu.coauthors);
         let skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
         let sign_off = wu.sign_off;
+        // The draft and co-authors stay until the commit succeeds; a push after the commit
+        // runs only then.
+        let submitted = Submitted { draft: draft.clone(), coauthors: wu.coauthors.clone(), push: self.settings.flag("pushAfterCommit", false) };
         self.act(tab, Action::Commit { summary: draft.summary.clone(), description, amend: draft.amend, stage_all: all, skip_hooks: skip, strip_comments: false, sign_off });
         if let Some(r) = self.repo_mut(tab) {
-            r.work.coauthors.clear();
-            r.work.template_applied = false;
-        }
-        if self.settings.flag("pushAfterCommit", false) {
-            self.act(tab, Action::Push { force: false, lease: None, review: None });
+            r.work.submitted = Some(submitted);
         }
     }
 

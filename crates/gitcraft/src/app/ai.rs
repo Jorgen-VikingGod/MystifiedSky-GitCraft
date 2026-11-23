@@ -13,10 +13,10 @@ use std::path::Path;
 /// What an AI request produced, and where it goes.
 pub enum AiOutput {
     CommitMessage { path: String, before: super::repo::Draft, summary: String, description: String },
-    StashTitle { tab: u64, text: String },
+    StashTitle { tab: u64, before: String, text: String },
     Explain { title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
-    Merge { tab: u64, revision: u64, text: String },
+    Merge { tab: u64, file: String, editor: u64, revision: u64, text: String },
     PullText { tab: u64, title: String, body: String },
 }
 
@@ -59,9 +59,17 @@ impl App {
             gitcraft_core::read_jobs::cancel(&id);
         }
         self.ai_label = None;
+        // A stopped AI merge no longer keeps the conflict editor busy.
+        for r in self.repos.values_mut() {
+            r.conflict_ui.ai_busy = false;
+        }
     }
 
     pub(crate) fn ai_done(&mut self, id: String, result: Result<AiOutput, String>) {
+        // A request stopped with Stop AI changes nothing, whatever it brings back.
+        if !self.ai_reads.contains(&id) {
+            return;
+        }
         self.ai_reads.retain(|r| *r != id);
         if self.ai_reads.is_empty() {
             self.ai_label = None;
@@ -93,9 +101,20 @@ impl App {
                     self.set_draft(&path, d);
                 }
             }
-            AiOutput::StashTitle { tab, text } => {
-                if let Some(r) = self.repo_mut(tab) {
-                    r.work.stash_message = text;
+            AiOutput::StashTitle { tab, before, text } => {
+                // A title typed while this was generated is kept unless the generated one is chosen.
+                let now = self.repo(tab).map(|r| r.work.stash_message.clone()).unwrap_or_default();
+                if now == before {
+                    if let Some(r) = self.repo_mut(tab) {
+                        r.work.stash_message = text;
+                    }
+                } else {
+                    let shown = format!("{text}\n\nYour stash title changed while this was generated.");
+                    self.dialog = Some(Dialog::new("Generated stash title", super::dialogs::Body::Text(shown)).choice("Use generated title", Kind::Default, move |app, _| {
+                        if let Some(r) = app.repo_mut(tab) {
+                            r.work.stash_message = text;
+                        }
+                    }));
                 }
             }
             AiOutput::Explain { title, text } => {
@@ -108,7 +127,7 @@ impl App {
                 let plural = if n == 1 { "" } else { "s" };
                 self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits })));
             }
-            AiOutput::Merge { tab, revision, text } => self.ai_merged(tab, revision, Ok(text)),
+            AiOutput::Merge { tab, file, editor, revision, text } => self.ai_merged(tab, &file, editor, revision, Ok(text)),
             AiOutput::PullText { tab, title, body } => self.pr_text_ready(tab, title, body),
         }
     }
@@ -160,11 +179,14 @@ impl App {
                     Ok(AiOutput::CommitMessage { path, before, summary, description })
                 });
             }
-            Reviewed::Stash => self.ai_run("Naming the stash…", move || {
-                let dir = Path::new(&path);
-                let files = ai_context::take_preview(dir, PreviewKind::Stash, preview)?;
-                Ok(AiOutput::StashTitle { tab, text: ai::stash_message(dir, &files.text)? })
-            }),
+            Reviewed::Stash => {
+                let before = self.repo(tab).map(|r| r.work.stash_message.clone()).unwrap_or_default();
+                self.ai_run("Naming the stash…", move || {
+                    let dir = Path::new(&path);
+                    let files = ai_context::take_preview(dir, PreviewKind::Stash, preview)?;
+                    Ok(AiOutput::StashTitle { tab, before, text: ai::stash_message(dir, &files.text)? })
+                })
+            }
             Reviewed::Compose => self.ai_run("Grouping your changes into commits…", move || {
                 let dir = Path::new(&path);
                 let files = ai_context::take_preview(dir, PreviewKind::Compose, preview)?;
@@ -201,8 +223,9 @@ impl App {
         });
     }
 
-    pub(crate) fn ai_resolve_conflict(&mut self, tab: u64, base: String, ours: String, theirs: String, file: String, revision: u64) {
-        self.ai_run("Merging both sides…", move || Ok(AiOutput::Merge { tab, revision, text: ai::resolve_conflict(&base, &ours, &theirs, &file)? }));
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ai_resolve_conflict(&mut self, tab: u64, base: String, ours: String, theirs: String, file: String, editor: u64, revision: u64) {
+        self.ai_run("Merging both sides…", move || Ok(AiOutput::Merge { tab, editor, revision, text: ai::resolve_conflict(&base, &ours, &theirs, &file)?, file }));
         if let Some(r) = self.repo_mut(tab) {
             r.conflict_ui.ai_busy = true;
         }

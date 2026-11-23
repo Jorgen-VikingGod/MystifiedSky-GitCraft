@@ -30,6 +30,8 @@ pub fn show(ui: &mut Ui, text: &str, base: &str) -> Option<String> {
     let mut job = egui::text::LayoutJob::default();
     let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
     let mut list_depth: Vec<Option<u64>> = Vec::new();
+    // How deep the emphasis, strong and strikethrough spans are nested.
+    let mut depth: (u32, u32, u32) = (0, 0, 0);
     let mut in_code_block = false;
     let mut code = String::new();
     let mut quote = 0;
@@ -115,16 +117,38 @@ pub fn show(ui: &mut Ui, text: &str, base: &str) -> Option<String> {
                 in_code_block = false;
                 egui::Frame::new().fill(c.field).corner_radius(egui::CornerRadius::same(4)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                     ui.set_width(width - 16.0 - indent);
-                    ui.add(egui::Label::new(RichText::new(code.trim_end()).monospace().size(12.0).color(c.fg)).wrap());
+                    // As written, trailing spaces and blank lines included; only the block's last
+                    // line break goes.
+                    let shown = code.strip_suffix('\n').unwrap_or(&code);
+                    ui.add(egui::Label::new(RichText::new(shown).monospace().size(12.0).color(c.fg)).wrap());
                 });
                 ui.add_space(6.0);
             }
-            Event::Start(Tag::Emphasis) => style.italic = true,
-            Event::End(TagEnd::Emphasis) => style.italic = false,
-            Event::Start(Tag::Strong) => style.bold = true,
-            Event::End(TagEnd::Strong) => style.bold = false,
-            Event::Start(Tag::Strikethrough) => style.strike = true,
-            Event::End(TagEnd::Strikethrough) => style.strike = false,
+            // Counted, so closing an inner emphasis keeps the outer one.
+            Event::Start(Tag::Emphasis) => {
+                depth.0 += 1;
+                style.italic = true;
+            }
+            Event::End(TagEnd::Emphasis) => {
+                depth.0 = depth.0.saturating_sub(1);
+                style.italic = depth.0 > 0;
+            }
+            Event::Start(Tag::Strong) => {
+                depth.1 += 1;
+                style.bold = true;
+            }
+            Event::End(TagEnd::Strong) => {
+                depth.1 = depth.1.saturating_sub(1);
+                style.bold = depth.1 > 0;
+            }
+            Event::Start(Tag::Strikethrough) => {
+                depth.2 += 1;
+                style.strike = true;
+            }
+            Event::End(TagEnd::Strikethrough) => {
+                depth.2 = depth.2.saturating_sub(1);
+                style.strike = depth.2 > 0;
+            }
             Event::Start(Tag::Link { dest_url, .. }) => style.link = web_url(&dest_url, base),
             Event::End(TagEnd::Link) => style.link = None,
             Event::Start(Tag::Image { dest_url, .. }) => {

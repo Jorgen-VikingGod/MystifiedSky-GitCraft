@@ -93,16 +93,26 @@ pub fn refs_by_commit<'a>(refs: &'a [GitRef], head: Option<&str>, hidden: &[Stri
 pub fn group_refs<'a>(refs: &[&'a GitRef]) -> Vec<(&'a GitRef, Option<&'a GitRef>)> {
     let mut used: HashSet<*const GitRef> = HashSet::new();
     let mut pairs: HashMap<*const GitRef, &GitRef> = HashMap::new();
-    for local in refs.iter().filter(|r| r.kind == RefKind::Local) {
-        let upstream = local.upstream.strip_prefix("refs/remotes/").unwrap_or(&local.upstream);
-        let candidates: Vec<&&GitRef> = refs
-            .iter()
-            .filter(|r| r.kind == RefKind::Remote && r.sha == local.sha && !used.contains(&(**r as *const GitRef)))
-            .filter(|r| if upstream.is_empty() { r.name.split_once('/').map(|x| x.1) == Some(local.name.as_str()) } else { r.name == upstream })
-            .collect();
-        if candidates.len() == 1 {
-            used.insert(*candidates[0] as *const GitRef);
-            pairs.insert(*local as *const GitRef, candidates[0]);
+    let upstream_of = |local: &GitRef| local.upstream.strip_prefix("refs/remotes/").unwrap_or(&local.upstream).to_owned();
+    // A remote branch some local branch names as its upstream belongs to that branch only.
+    let configured: HashSet<String> = refs.iter().filter(|r| r.kind == RefKind::Local).map(|r| upstream_of(r)).filter(|u| !u.is_empty()).collect();
+    // First the configured upstreams, then, for branches without one, a remote branch of the
+    // same name that no branch claims.
+    for by_config in [true, false] {
+        for local in refs.iter().filter(|r| r.kind == RefKind::Local) {
+            let upstream = upstream_of(local);
+            if by_config == upstream.is_empty() || pairs.contains_key(&(*local as *const GitRef)) {
+                continue;
+            }
+            let candidates: Vec<&&GitRef> = refs
+                .iter()
+                .filter(|r| r.kind == RefKind::Remote && r.sha == local.sha && !used.contains(&(**r as *const GitRef)))
+                .filter(|r| if by_config { r.name == upstream } else { !configured.contains(&r.name) && r.name.split_once('/').map(|x| x.1) == Some(local.name.as_str()) })
+                .collect();
+            if candidates.len() == 1 {
+                used.insert(*candidates[0] as *const GitRef);
+                pairs.insert(*local as *const GitRef, candidates[0]);
+            }
         }
     }
     refs.iter().filter(|r| !used.contains(&(**r as *const GitRef))).map(|r| (*r, pairs.get(&(*r as *const GitRef)).copied())).collect()
@@ -585,23 +595,23 @@ impl App {
         let lanes_x = |l: usize, refs: f32| refs + GUTTER + l as f32 * LANE + LANE / 2.0;
         let labelled: HashSet<&str> = by_sha.keys().copied().collect();
         let hover_ref_id = ui.scope_id().with(("hover_ref", tab));
-        let hover_ref: Option<usize> = ui.data(|d| d.get_temp(hover_ref_id)).flatten();
+        // The row of the hovered label, and whether that label is a tag (a tag highlights only
+        // its commit, a branch its line).
+        let hover_ref: Option<(usize, bool)> = ui.data(|d| d.get_temp(hover_ref_id)).flatten();
         let highlighted = match hover_ref {
-            Some(i) if highlight_hover => {
-                let tag = by_sha.get(commits.get(i).map_or("", |c| c.sha.as_str())).and_then(|v| v.first()).is_some_and(|r| r.kind == RefKind::Tag);
-                hover_segment(v, &r.index, &labelled, i, tag)
-            }
+            Some((i, tag)) if highlight_hover => hover_segment(v, &r.index, &labelled, i, tag),
             _ => HashSet::new(),
         };
+        let hover_row = hover_ref.map(|(i, _)| i);
         let hover_active = !highlighted.is_empty();
-        let mut new_hover_ref: Option<usize> = None;
+        let mut new_hover_ref: Option<(usize, bool)> = None;
         // Rows outside a hovered label fade after a 1 s pause, over half a second.
         let clock = ui.input(|i| i.time);
         let since_id = hover_ref_id.with("since");
         let since = match ui.data(|d| d.get_temp::<(Option<usize>, f64)>(since_id)) {
-            Some((was, at)) if was == hover_ref => at,
+            Some((was, at)) if was == hover_row => at,
             _ => {
-                ui.data_mut(|d| d.insert_temp(since_id, (hover_ref, clock)));
+                ui.data_mut(|d| d.insert_temp(since_id, (hover_row, clock)));
                 clock
             }
         };
@@ -784,7 +794,7 @@ impl App {
                         let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), Sense::click());
                         end_x = label_rect.right();
                         if lresp.hovered() {
-                            new_hover_ref = Some(i);
+                            new_hover_ref = Some((i, first.kind == RefKind::Tag));
                             stack = Some((i, clock));
                         }
                         if lresp.clicked() {
@@ -812,7 +822,7 @@ impl App {
                             let mresp = ui.interact(mr, ui.scope_id().with(("more_refs", tab, i)), Sense::click());
                             end_x = mr.right();
                             if mresp.hovered() || mresp.clicked() {
-                                new_hover_ref = Some(i);
+                                new_hover_ref = Some((i, first.kind == RefKind::Tag));
                                 stack = Some((i, clock));
                             }
                         }
@@ -828,6 +838,7 @@ impl App {
                             let h = desired.min(if upwards { above } else { below }).max(INNER);
                             let top = if upwards { label_rect.bottom() - h } else { label_rect.top() };
                             let left = label_rect.left().min(screen.right() - w - 8.0).max(screen.left() + 8.0);
+                            let mut stack_tag: Option<bool> = None;
                             egui::Area::new(stack_id.with("area")).order(egui::Order::Foreground).fixed_pos(pos2(left, top)).constrain(false).show(ui.ctx(), |ui| {
                                 let (area, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
                                 ui.painter().rect_filled(area, CornerRadius::same(2), fill);
@@ -839,6 +850,7 @@ impl App {
                                         let (row, rresp) = ui.allocate_exact_size(vec2(w, INNER), Sense::click());
                                         if rresp.hovered() {
                                             ui.painter().rect_filled(row, CornerRadius::ZERO, c.white(0.1));
+                                            stack_tag = Some(g.kind == RefKind::Tag);
                                         }
                                         let chevron = if k == 0 { 14.0 } else { 0.0 };
                                         let painter = ui.painter().clone();
@@ -866,7 +878,7 @@ impl App {
                                     }
                                 });
                                 if ui.rect_contains_pointer(area) {
-                                    new_hover_ref = Some(i);
+                                    new_hover_ref = Some((i, stack_tag.unwrap_or(first.kind == RefKind::Tag)));
                                     stack = Some((i, clock));
                                 }
                             });
@@ -1221,8 +1233,8 @@ impl App {
     pub(crate) fn checkout_ref(&mut self, tab: u64, r: &GitRef) {
         let head = self.repo(tab).and_then(|t| t.view.as_ref()).and_then(|v| v.data.head_branch.clone());
         match r.kind {
-            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone() }),
-            RefKind::Remote => self.act(tab, Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false }),
+            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone(), changes: Default::default() }),
+            RefKind::Remote => self.act(tab, Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: Default::default() }),
             _ => {}
         }
     }

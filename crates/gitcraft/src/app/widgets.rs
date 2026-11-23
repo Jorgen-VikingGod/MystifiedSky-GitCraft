@@ -96,6 +96,8 @@ pub fn button(ui: &mut Ui, kind: Kind, icon: Option<Icon>, text: &str, height: f
     let icon_w = icon.map_or(0.0, |_| size + if text.is_empty() { 0.0 } else { 6.0 });
     let width = pad * 2.0 + icon_w + galley.size().x;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), if enabled { Sense::click() } else { Sense::hover() });
+    // Screen readers get what egui's own button tells them: a button, its label, whether it works.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
     let hover = enabled && response.hovered();
     let (fill, stroke) = match kind {
         Kind::Default => (c.white(if hover { 0.1 } else { 0.05 }), c.white(0.1)),
@@ -124,6 +126,7 @@ pub fn small(ui: &mut Ui, kind: Kind, text: &str) -> Response {
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, tip: &str) -> Response {
     let c = p();
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size + 6.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
     let ink = if response.hovered() { c.white(1.0) } else { c.fg2 };
     icons::paint(ui, rect, icon, size, ink);
     if !tip.is_empty() { response.tip(tip) } else { response }
@@ -206,6 +209,9 @@ pub fn section_head(ui: &mut Ui, open: bool, height: f32, title: &str, extra: im
     let c = p();
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    // An expandable heading, open or closed.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, true, title));
+    ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open));
     if response.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.white(0.05));
     }
@@ -232,9 +238,13 @@ pub fn checkbox(ui: &mut Ui, value: &mut bool, label: &str, size: f32) -> Respon
             ui.painter().rect(bx, CornerRadius::same(2), c.field, Stroke::new(1.0, c.white(0.4)), StrokeKind::Inside);
         }
         ui.painter().galley(pos2(bx.right() + 8.0, rect.center().y - galley.size().y / 2.0), galley, c.white(0.85));
+        let mut response = response;
         if response.clicked() {
             *value = !*value;
+            response.mark_changed();
         }
+        let checked = *value;
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, checked, label));
         response
     })
     .inner

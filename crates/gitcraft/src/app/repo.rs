@@ -104,6 +104,10 @@ pub struct RepoTab {
     pub loading: bool,
     /// Bumped by every change that makes running reads stale.
     pub generation: u64,
+    /// What the running full read asks for, and what the history shown was read with: loaded
+    /// pages are kept across a refresh only when both are the same.
+    requested: Option<RefView>,
+    shown_query: Option<RefView>,
     /// Another full read was asked for while one ran.
     again: bool,
     status_loading: bool,
@@ -146,6 +150,8 @@ impl RepoTab {
             error: None,
             loading: false,
             generation: 0,
+            requested: None,
+            shown_query: None,
             again: false,
             status_loading: false,
             status_again: false,
@@ -344,6 +350,7 @@ impl App {
         r.again = false;
         r.deferred = None;
         let (path, generation) = (r.path.clone(), r.generation);
+        r.requested = Some(view.clone());
         self.spawn(move || Msg::Repo { tab, generation, result: Box::new(session::open_repo(&engine, &path, Some(max), Some(view))) });
     }
 
@@ -354,11 +361,16 @@ impl App {
             let Some(r) = self.repo_mut(tab) else { return };
             r.loading = false;
             if r.generation == generation {
+                let query = r.requested.take();
                 match result {
                     Ok(mut next) => {
                         if let Some(prev) = r.view.take() {
-                            // Keep the pages already loaded when the history itself didn't change.
-                            if same_history(&prev, &next) && next.data.commits.iter().zip(prev.data.commits.iter()).all(|(a, b)| a.sha == b.sha) {
+                            // Keep the pages already loaded when the history itself didn't change:
+                            // the same branches, read the same way, and the new first page is
+                            // the start of what was loaded.
+                            let same_query = query.is_some() && r.shown_query == query;
+                            let starts_the_same = !next.data.commits.is_empty() && next.data.commits.len() <= prev.data.commits.len() && next.data.commits.iter().zip(prev.data.commits.iter()).all(|(a, b)| a.sha == b.sha);
+                            if same_query && same_history(&prev, &next) && starts_the_same {
                                 next.data.commits = prev.data.commits;
                                 next.graph = prev.graph;
                                 next.data.has_more = prev.data.has_more;
@@ -366,8 +378,11 @@ impl App {
                             }
                         }
                         r.view = Some(next);
+                        r.shown_query = query;
                         r.error = None;
                         r.page_error = None;
+                        // The working folder may have changed: comparisons against it are read again.
+                        r.range_files.retain(|(_, to), _| to != git::WORKDIR);
                         r.reindex();
                         if let Some(Selection::Commit(sha)) = r.ui.selection.clone()
                             && !r.index.contains_key(&sha)
@@ -422,6 +437,12 @@ impl App {
         let Some(r) = self.repo_mut(tab) else { return };
         r.page_loading = false;
         if r.generation != generation {
+            // An outdated page is dropped; paging goes on from the history shown, unless a full
+            // read is running (it starts paging itself when it's done).
+            let more = !r.loading && r.view.as_ref().is_some_and(|v| v.history_cursor.is_some() && (show_all || v.data.commits.len() < initial));
+            if more {
+                self.load_more(tab);
+            }
             return;
         }
         match result {
@@ -530,6 +551,10 @@ impl App {
     pub(crate) fn changed(&mut self, path: &str, full: bool) {
         let Some(tab) = self.tab_of(path) else { return };
         let Some(r) = self.repo_mut(tab) else { return };
+        // A working-copy blame may be out of date now (the event doesn't say which file), also
+        // one still being read: it is read again. Blames of a revision stay.
+        r.history_ui.blame.retain(|(_, rev, _), _| rev.is_some());
+        r.history_ui.blame_reads.retain(|(_, rev, _), _| rev.is_some());
         if r.running.is_some() {
             let seen = r.action_change.unwrap_or(false);
             r.action_change = Some(seen || full);
@@ -541,6 +566,10 @@ impl App {
     /// Something the open diff, conflict or comparison shows may have changed.
     pub(crate) fn diff_changed(&mut self, tab: u64) {
         self.diffs.retain(|k, _| k.0 != tab);
+        // Picked lines point into the diff just dropped; the new one may differ.
+        if let Some(r) = self.repo_mut(tab) {
+            r.diff_ui.picked = None;
+        }
     }
 
     /// Run a Git action in the background, after the ones already waiting for this repository.
@@ -628,27 +657,46 @@ impl App {
     /// Returns whether it showed something instead of the plain message.
     fn after_action(&mut self, tab: u64, action: &Action, result: &ActionResult, quiet: bool) -> bool {
         use super::dialogs::Dialog;
+        // What the commit was made from: only that is cleared, so edits made while it ran stay.
+        let submitted = if let Action::Commit { .. } = action { self.repo_mut(tab).and_then(|r| r.work.submitted.take()) } else { None };
         if result.ok {
+            if let Action::SaveResolved { file, .. } = action {
+                self.conflict_resolved(tab, file);
+            }
             if let Action::Commit { .. } = action
                 && let Some(r) = self.repo(tab)
             {
                 let path = r.path.clone();
-                self.set_draft(&path, Draft::default());
+                let sent = submitted.unwrap_or_default();
+                if self.draft(&path) == sent.draft {
+                    self.set_draft(&path, Draft::default());
+                }
                 if let Some(r) = self.repo_mut(tab) {
                     r.ui.diff = None;
+                    r.work.template_applied = false;
+                    if r.work.coauthors == sent.coauthors {
+                        r.work.coauthors.clear();
+                    }
+                }
+                // Next in line, before actions queued while the commit ran, so it pushes the
+                // branch just committed to.
+                if sent.push
+                    && let Some(r) = self.repo_mut(tab)
+                {
+                    r.queue.push_front((Action::Push { force: false, lease: None, review: None }, false));
                 }
             }
             return false;
         }
         let msg = result.message.as_str();
         match action {
-            Action::CheckoutRemote { remote_branch, stash_if_needed: false } if !quiet && msg.starts_with("Local changes block this checkout.") => {
+            Action::CheckoutRemote { remote_branch, stash_if_needed: false, .. } if !quiet && msg.starts_with("Local changes block this checkout.") => {
                 self.dialog = Some(Dialog::confirm(
                     "Stash changes and continue?",
                     &format!("Git needs to replace files that have local changes. Save your staged, unstaged, and untracked changes in a named stash, then retry checking out {remote_branch}. You can restore the stash when you're ready.\n\n{msg}"),
                     "Stash and continue",
                     false,
-                    super::dialogs::Then::Act(tab, Action::CheckoutRemote { remote_branch: remote_branch.clone(), stash_if_needed: true }),
+                    super::dialogs::Then::Act(tab, Action::CheckoutRemote { remote_branch: remote_branch.clone(), stash_if_needed: true, changes: Default::default() }),
                 ));
                 true
             }

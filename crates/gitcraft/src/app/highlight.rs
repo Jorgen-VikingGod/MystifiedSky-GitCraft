@@ -73,16 +73,21 @@ pub fn syntax_for(path: &str) -> Option<&'static SyntaxReference> {
 /// A highlighter that carries its state from line to line.
 pub struct Lines {
     inner: HighlightLines<'static>,
+    /// A line was too long to colour, so the state after it is unknown: the rest stays plain.
+    lost: bool,
 }
 
 impl Lines {
     pub fn new(syntax: &'static SyntaxReference, dark: bool) -> Lines {
-        Lines { inner: HighlightLines::new(syntax, if dark { &DARK } else { &LIGHT }) }
+        Lines { inner: HighlightLines::new(syntax, if dark { &DARK } else { &LIGHT }), lost: false }
     }
 
     /// Colours of one line (without its newline).
     pub fn line(&mut self, text: &str) -> Runs {
-        if text.len() > LENGTH_LIMIT {
+        if self.lost || text.len() > LENGTH_LIMIT {
+            // The parser didn't read the long line (a comment or string may end in it), so
+            // colouring later lines could be wrong: they stay plain text.
+            self.lost = true;
             return Vec::new();
         }
         let with_newline = format!("{text}\n");
@@ -144,6 +149,19 @@ pub fn job(text: &str, runs: Option<&Runs>, base: Color32, font: egui::FontId, m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_after_a_skipped_long_line_stay_plain() {
+        // The comment closes on the long line; the code after it must not stay comment-coloured.
+        let long = format!("{} */", "x".repeat(LENGTH_LIMIT + 10));
+        let text = format!("/* start\n{long}\nlet a = 1;");
+        let runs = whole("a.rs", &text, true);
+        assert_eq!(runs.len(), 3);
+        assert!(!runs[0].is_empty());
+        assert!(runs[1].is_empty() && runs[2].is_empty());
+        // Normal files are coloured as before.
+        assert!(whole("a.rs", "let a = 1;\nlet b = 2;", true).iter().all(|r| !r.is_empty()));
+    }
 
     #[test]
     fn colours_known_languages_and_covers_each_line_exactly() {

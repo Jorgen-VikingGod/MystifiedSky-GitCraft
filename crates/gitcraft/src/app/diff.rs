@@ -24,6 +24,10 @@ const GUTTER: f32 = 44.0;
 /// A diff read for a tab.
 #[derive(Default)]
 pub struct DiffCache {
+    /// Which read filled this entry: a read for an entry dropped since doesn't fill a new one.
+    pub generation: u64,
+    /// The editor and its revision the comparison was made of (`None`: the file as read).
+    pub compared_edits: Option<(u64, u64)>,
     pub versions: Option<Loaded<FileVersions>>,
     pub lines: Option<Loaded<Vec<DiffLine>>>,
     pub comparison: Option<(bool, Comparison)>,
@@ -46,6 +50,11 @@ pub struct DiffUi {
     pub allow_large: bool,
     pub saving: bool,
     pub draft_hl: Option<(u64, bool, Vec<Runs>)>,
+    /// Counts edits in the editor, so a save or a comparison knows which text it was of.
+    pub edits: u64,
+    /// This view of the file (a run-wide id): a save or comparison from a view closed since
+    /// changes nothing here.
+    pub editor: u64,
 }
 
 pub fn source_label(src: &DiffSource) -> String {
@@ -76,17 +85,21 @@ impl App {
             return;
         }
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        self.diffs.insert((tab, key.clone()), DiffCache { versions: Some(Loaded::Loading), ..Default::default() });
+        self.diff_reads += 1;
+        let generation = self.diff_reads;
+        self.diffs.insert((tab, key.clone()), DiffCache { generation, versions: Some(Loaded::Loading), ..Default::default() });
         self.spawn(move || {
             let dir = std::path::Path::new(&path);
             let versions = gitcraft_core::files::versions_with_limit(dir, &target.source, &target.file, target.parent.as_deref(), target.untracked, allow_large);
             let lines = (!versions.too_large && !versions.binary).then(|| gitcraft_core::git::file_diff_opts(dir, &target.source, &target.file, target.untracked, target.parent.as_deref(), false));
-            super::Msg::Diff { tab, key, versions: Box::new(versions), lines }
+            super::Msg::Diff { tab, key, generation, versions: Box::new(versions), lines }
         });
     }
 
-    pub(crate) fn diff_loaded(&mut self, tab: u64, key: String, versions: FileVersions, lines: Option<Vec<DiffLine>>) {
-        let entry = self.diffs.entry((tab, key)).or_default();
+    /// A finished read: it fills the cache entry it was started for, and nothing once that entry
+    /// was dropped (the file changed) or replaced by a newer read.
+    pub(crate) fn diff_loaded(&mut self, tab: u64, key: String, generation: u64, versions: FileVersions, lines: Option<Vec<DiffLine>>) {
+        let Some(entry) = self.diffs.get_mut(&(tab, key)).filter(|e| e.generation == generation) else { return };
         let images = (versions.old_image.is_some() || versions.new_image.is_some()).then(|| (versions.old_image.as_deref().and_then(data_url_bytes), versions.new_image.as_deref().and_then(data_url_bytes)));
         entry.images = images;
         entry.versions = Some(Loaded::Ready(versions));
@@ -101,22 +114,34 @@ impl App {
             return;
         }
         r.diff_ui.saving = true;
-        let (path, token) = (r.path.clone(), r.diff_ui.token.clone());
+        let (path, token, editor, edits) = (r.path.clone(), r.diff_ui.token.clone(), r.diff_ui.editor, r.diff_ui.edits);
         self.spawn(move || {
-            let result = gitcraft_core::files::save_checked_mode(std::path::Path::new(&path), &target.file, &draft, token.as_deref(), utf8);
-            super::Msg::Saved { tab, file: target.file, result }
+            let dir = std::path::Path::new(&path);
+            let result = gitcraft_core::files::save_checked_mode(dir, &target.file, &draft, token.as_deref(), utf8);
+            // What is on disk now, for the next save of edits made meanwhile.
+            let token = result.is_ok().then(|| gitcraft_core::files::content_token(std::fs::read(dir.join(&target.file)).ok().as_deref()));
+            super::Msg::Saved { tab, file: target.file, editor, edits, token, result }
         });
     }
 
-    pub(crate) fn saved(&mut self, tab: u64, file: String, result: Result<(), String>) {
-        if let Some(r) = self.repo_mut(tab) {
+    /// A save finished. It ends editing only if the same editor still shows that file with the
+    /// text that was saved; edits made meanwhile stay, to be saved over what was written. The
+    /// repository is read again either way.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn saved(&mut self, tab: u64, file: String, editor: u64, edits: u64, token: Option<String>, result: Result<(), String>) {
+        let same_editor = self.repo(tab).is_some_and(|r| r.diff_ui.editor == editor && r.ui.diff.as_ref().is_some_and(|t| t.file == file));
+        if same_editor && let Some(r) = self.repo_mut(tab) {
             r.diff_ui.saving = false;
         }
         match result {
             Ok(()) => {
-                if let Some(r) = self.repo_mut(tab) {
-                    r.diff_ui.draft = None;
-                    r.diff_ui.editing = false;
+                if same_editor && let Some(r) = self.repo_mut(tab) {
+                    if r.diff_ui.edits == edits {
+                        r.diff_ui.draft = None;
+                        r.diff_ui.editing = false;
+                    } else if token.is_some() {
+                        r.diff_ui.token = token;
+                    }
                 }
                 let name = file.rsplit('/').next().unwrap_or(&file).to_owned();
                 self.toast(true, format!("Saved {name}"));
@@ -140,7 +165,7 @@ impl App {
         let c = p();
         let key0 = diff_key(target, false);
         if r.diff_ui.key != key0 {
-            r.diff_ui = DiffUi { key: key0, ..Default::default() };
+            r.diff_ui = DiffUi { key: key0, editor: super::unique_id(), ..Default::default() };
         }
         let key = diff_key(target, r.diff_ui.allow_large);
         let cache = self.diffs.get(&(tab, key.clone()));
@@ -380,8 +405,11 @@ impl App {
             let old = v.old.clone().unwrap_or_default();
             let new = r.diff_ui.draft.clone().unwrap_or_else(|| v.new.clone().unwrap_or_default());
             let Some(cache) = cache else { return };
+            // The comparison is of the text shown: the edit in progress (by its revision) or the
+            // file as read, so an edit or Cancel compares again.
+            let edits = r.diff_ui.draft.is_some().then_some((r.diff_ui.editor, r.diff_ui.edits));
             let comparison = match &cache.comparison {
-                Some((ws, cmp)) if *ws == ignore_ws => cmp,
+                Some((ws, cmp)) if *ws == ignore_ws && cache.compared_edits == edits => cmp,
                 _ => {
                     let (o, n, t, f) = (old, new, key.clone(), target.file.clone());
                     later.push(Box::new(move |app| {
@@ -390,6 +418,7 @@ impl App {
                         let hl_new = highlight::whole(&f, &n, dark);
                         if let Some(e) = app.diffs.get_mut(&(tab, t.clone())) {
                             e.comparison = Some((ignore_ws, cmp));
+                            e.compared_edits = edits;
                             e.hl = Some((dark, hl_old, hl_new));
                         }
                     }));
@@ -713,7 +742,9 @@ pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, sp
     ui.push_id(id, |ui| {
         scroll.show_viewport(ui, |ui, viewport| {
             let full = ui.available_width();
-            let width = if split || wrap { full } else { longest.max(full) };
+            // Without wrapping, a long line scrolls sideways: in Split view each column is as wide
+            // as the longest line.
+            let width = if wrap { full } else if split { (longest * 2.0).max(full) } else { longest.max(full) };
             let (_, _) = ui.allocate_exact_size(vec2(width, total.max(viewport.height())), Sense::hover());
             let origin = ui.min_rect().min;
             let painter = ui.painter().clone();
@@ -835,13 +866,14 @@ fn editor(ui: &mut Ui, file: &str, d: &mut DiffUi, shown: String, wrap: bool, da
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, width: f32| {
         let s = buf.as_str();
         let mut job = egui::text::LayoutJob::default();
+        let count = s.split('\n').count();
         for (i, line) in s.split('\n').enumerate() {
             let part = highlight::job(line, runs.get(i), c.white(0.85), font.clone(), &[]);
             for section in part.sections {
                 let (a, b) = (section.byte_range.start.0, section.byte_range.end.0);
                 job.append(&part.text[a..b], 0.0, section.format);
             }
-            if i + 1 < s.split('\n').count() {
+            if i + 1 < count {
                 job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), c.fg));
             }
         }
@@ -860,6 +892,7 @@ fn editor(ui: &mut Ui, file: &str, d: &mut DiffUi, shown: String, wrap: bool, da
             let edit = egui::TextEdit::multiline(&mut text).code_editor().frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(lines).layouter(&mut layouter);
             if ui.add(edit).changed() {
                 d.draft = Some(text.clone());
+                d.edits += 1;
             }
         });
     });
@@ -898,7 +931,14 @@ fn image_diff(ui: &mut Ui, key: &str, before: Option<&[u8]>, after: Option<&[u8]
                     ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, c.white(0.1)), StrokeKind::Inside);
                     match bytes {
                         Some(bytes) => {
-                            let img = egui::Image::from_bytes(format!("bytes://{key}-{side}"), bytes.to_vec()).max_size(rect.size()).maintain_aspect_ratio(true);
+                            // Named by its content too, so a changed picture isn't shown from egui's cache.
+                            let id = {
+                                use std::hash::{Hash, Hasher};
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                bytes.hash(&mut h);
+                                h.finish()
+                            };
+                            let img = egui::Image::from_bytes(format!("bytes://{key}-{side}-{id:016x}"), bytes.to_vec()).max_size(rect.size()).maintain_aspect_ratio(true);
                             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)));
                             child.add(img);
                         }

@@ -28,8 +28,8 @@ impl App {
         if !viewing {
             self.left_peek = false;
         }
-        let show_left = self.settings.flag("showLeft", true) && (!viewing || self.left_peek);
-        let show_right = self.settings.flag("showRight", true) && r.view.is_some();
+        let mut show_left = self.settings.flag("showLeft", true) && (!viewing || self.left_peek);
+        let mut show_right = self.settings.flag("showRight", true) && r.view.is_some();
         let mut left_w = if show_left { self.settings.num("leftWidth", 381.0) as f32 } else { 28.0 };
         let mut right_w = if show_right { self.settings.num("rightWidth", 342.0) as f32 } else { 0.0 };
         // Side panels give way on small windows, keeping room for the graph.
@@ -41,6 +41,16 @@ impl App {
             left_w -= shrink_left;
             right_w = (right_w - (over - shrink_left)).max(if show_right { 300.0_f32.min(right_w) } else { 0.0 });
         }
+        // Still no room at their smallest: the right panel, then the left one, steps aside until
+        // the window is wide enough again (their saved widths stay as they are).
+        if left_w + right_w > room && show_right {
+            show_right = false;
+            right_w = 0.0;
+        }
+        if left_w + right_w > room && show_left {
+            show_left = false;
+            left_w = 28.0;
+        }
         let left = Rect::from_min_size(body.min, vec2(left_w, body.height()));
         {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -48,7 +58,7 @@ impl App {
             if show_left {
                 self.left_panel(&mut child, tab, &mut r, &mut later);
             } else {
-                self.left_strip(&mut child, Some(&r), &mut later);
+                self.left_strip(&mut child, Some(tab), Some(&r), &mut later);
             }
         }
         let mut x = left.right();
@@ -65,7 +75,8 @@ impl App {
         let centre_right = if show_right { right.left() - 2.0 } else { body.right() };
         let centre = Rect::from_min_max(pos2(x, body.top()), pos2(centre_right, body.bottom()));
         // Terminal under the centre.
-        let show_term = self.settings.flag("showTerminal", false) && r.view.is_some();
+        // It gives way when the centre is too short for it and the graph above it.
+        let show_term = self.settings.flag("showTerminal", false) && r.view.is_some() && centre.height() >= 100.0 + 2.0 + 120.0;
         let term_h = if show_term { (self.settings.num("terminalHeight", 220.0) as f32).clamp(100.0, (centre.height() - 120.0).max(100.0)) } else { 0.0 };
         let main = Rect::from_min_max(centre.min, pos2(centre.right(), centre.bottom() - term_h - if show_term { 2.0 } else { 0.0 }));
         {

@@ -24,6 +24,8 @@ pub struct List {
     pub loading: bool,
     pub error: Option<String>,
     pub started: bool,
+    /// Counts the requests, so only the latest one's answer changes the list.
+    pub request: u64,
 }
 
 /// What the hosting service holds for one repository tab.
@@ -121,6 +123,8 @@ impl App {
         }
         h.prs.loading = true;
         h.prs.started = true;
+        h.prs.request += 1;
+        let request = h.prs.request;
         let cursor = if more { h.prs.cursor.clone() } else { None };
         let filter = if h.filter.is_empty() { "open".to_owned() } else { h.filter.clone() };
         let wanted = filter.clone();
@@ -131,7 +135,7 @@ impl App {
             });
             super::Msg::Apply(Box::new(move |app: &mut App| {
                 let h = app.hosted_mut(tab);
-                if (if h.filter.is_empty() { "open" } else { h.filter.as_str() }) != wanted {
+                if (if h.filter.is_empty() { "open" } else { h.filter.as_str() }) != wanted || h.prs.request != request {
                     return;
                 }
                 h.prs.loading = false;
@@ -215,6 +219,9 @@ impl App {
         let prs = h.map_or(&empty, |h| &h.prs);
         let issues = h.map_or(&empty, |h| &h.issues);
         let head = r.view.as_ref().and_then(|v| v.data.head_branch.clone());
+        // The panel's filter narrows the loaded rows too, as it does the other sections.
+        let needle = filter.trim().to_lowercase();
+        let matches = |text: String| needle.is_empty() || text.to_lowercase().contains(&needle);
         let note = |ui: &mut Ui, list: &List| {
             if !on {
                 super::left::section_note(ui, "This repository's remote is outside the configured hosting services.");
@@ -267,7 +274,7 @@ impl App {
                 ui.add_space(4.0);
             }
             note(ui, prs);
-            for pr in &prs.items {
+            for pr in prs.items.iter().filter(|pr| matches(format!("{} #{} {} {} {}", s(pr, "title"), pr["number"].as_u64().unwrap_or(0), s(pr, "author"), s(pr, "source"), s(pr, "target")))) {
                 let number = pr["number"].as_u64().unwrap_or(0);
                 let draft = pr["draft"].as_bool().unwrap_or(false);
                 let label = s(pr, "title");
@@ -301,7 +308,7 @@ impl App {
                 later.push(Box::new(move |app| app.want_issues(tab, false)));
             }
             note(ui, issues);
-            for i in &issues.items {
+            for i in issues.items.iter().filter(|i| matches(format!("{} #{} {} {}", s(i, "title"), i["number"].as_u64().unwrap_or(0), s(i, "key"), i["labels"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default()))) {
                 let key = s(i, "key");
                 let label = if key.is_empty() { format!("#{}", i["number"].as_u64().unwrap_or(0)) } else { key };
                 let resp = super::left::section_row(ui, 1, Icon::CircleDot, &s(i, "title"), Some(&label), Some(GOOD)).tip(i["labels"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default());
@@ -706,9 +713,9 @@ impl App {
                     ui.add(egui::TextEdit::multiline(&mut pu.comment).frame(egui::Frame::NONE).hint_text("Leave a comment").desired_rows(4).desired_width(f32::INFINITY));
                 });
                 if widgets::button(ui, Kind::Primary, None, "Comment", 24.0, !pu.busy && !pu.comment.trim().is_empty()).clicked() {
-                    let body = pu.comment.trim().to_owned();
+                    let draft = pu.comment.clone();
                     pu.busy = true;
-                    later.push(Box::new(move |app| app.send_pr_comment(tab, number, body)));
+                    later.push(Box::new(move |app| app.send_pr_comment(tab, number, draft)));
                 }
             });
         });
@@ -965,15 +972,18 @@ impl App {
         }));
     }
 
-    fn send_pr_comment(&mut self, tab: u64, number: u64, body: String) {
+    /// Post `draft` (trimmed) on the pull request; the box is cleared only if it still holds it.
+    fn send_pr_comment(&mut self, tab: u64, number: u64, draft: String) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let gitlab = self.gitlab();
         self.spawn(move || {
-            let r = gitcraft_core::session::remote_of(&path, &gitlab).and_then(|remote| gitcraft_core::hosting::add_comment(&remote, number, &body));
+            let body = draft.trim();
+            let r = gitcraft_core::session::remote_of(&path, &gitlab).and_then(|remote| gitcraft_core::hosting::add_comment(&remote, number, body));
             super::Msg::Apply(Box::new(move |app: &mut App| {
                 if let Some(t) = app.repo_mut(tab) {
                     t.pr_ui.busy = false;
-                    if r.is_ok() {
+                    // Cleared only on the pull request it was posted to, if not edited since.
+                    if r.is_ok() && t.pr_ui.number == number && t.pr_ui.comment == draft {
                         t.pr_ui.comment.clear();
                     }
                 }
@@ -1099,7 +1109,8 @@ impl App {
         self.pull_request_dialog(tab, branch, target, body, None);
     }
 
-    fn pull_request_dialog(&mut self, tab: u64, branch: String, target: Option<String>, template: Option<String>, text: Option<(String, String)>) {
+    /// `text`: the title, description and draft choice to start from (after Write with AI).
+    fn pull_request_dialog(&mut self, tab: u64, branch: String, target: Option<String>, template: Option<String>, text: Option<(String, String, bool)>) {
         let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
         let r = v.data.refs.iter().find(|x| x.kind == gitcraft_core::git::RefKind::Local && x.name == branch).cloned();
         let head = r.as_ref().and_then(|r| v.data.commits.iter().find(|c| c.sha == r.sha)).cloned();
@@ -1112,15 +1123,16 @@ impl App {
         ];
         let body = [head.as_ref().map(|h| h.body.clone()).filter(|b| !b.is_empty()), template].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         let b2 = branch.clone();
-        let (title, body) = text.unwrap_or_else(|| (head.map(|h| h.summary).unwrap_or_else(|| branch.clone()), body));
+        let (title, body, draft) = text.unwrap_or_else(|| (head.map(|h| h.summary).unwrap_or_else(|| branch.clone()), body, false));
         let d = Dialog::new(&format!("Start a pull request from {branch}"), super::dialogs::Body::Form { intro: "The branch is pushed first if the remote doesn't have it yet.".into(), fields, grid: false })
             .width(560.0)
             .text_value("target", &target.unwrap_or_else(|| "main".into()))
             .text_value("title", &title)
             .text_value("body", &body)
+            .flag_value("draft", draft)
             .choice("Write with AI", Kind::Ai, move |app, v| {
                 let target = v.text("target").trim().to_owned();
-                app.pr_waiting = Some((tab, b2.clone(), target.clone()));
+                app.pr_waiting = Some((tab, b2.clone(), target.clone(), v.flag("draft")));
                 app.ai_pull_request(tab, b2, target);
             })
             .choice("Create Pull Request", Kind::Primary, move |app, v| {
@@ -1135,7 +1147,7 @@ impl App {
     /// "Write with AI" filled the title and description.
     pub(crate) fn pr_text_ready(&mut self, tab: u64, title: String, body: String) {
         match self.pr_waiting.take() {
-            Some((t, branch, target)) if t == tab && self.dialog.is_none() => self.pull_request_dialog(tab, branch, Some(target), None, Some((title, body))),
+            Some((t, branch, target, draft)) if t == tab && self.dialog.is_none() => self.pull_request_dialog(tab, branch, Some(target), None, Some((title, body, draft))),
             other => self.pr_waiting = other.filter(|(t, ..)| *t != tab),
         }
     }
@@ -1371,6 +1383,7 @@ impl App {
                     Ok(page) => {
                         list.items.push(serde_json::to_value(page.items).unwrap_or_default());
                         list.cursor = page.cursor;
+                        list.error = None;
                     }
                     Err(e) => list.error = Some(e),
                 }

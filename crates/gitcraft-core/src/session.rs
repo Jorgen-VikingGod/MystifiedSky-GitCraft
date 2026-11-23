@@ -371,15 +371,24 @@ pub fn clone_launch(value: &str) -> Option<LaunchIntent> {
     }
     let mut fields = launch.query_pairs();
     let (name, value) = fields.next()?;
-    if name != "url" || fields.next().is_some() || value.chars().any(char::is_control) {
+    if name != "url" || fields.next().is_some() {
         return None;
     }
-    let url = url::Url::parse(&value).ok()?;
+    clone_url(&value).map(|url| LaunchIntent::Clone { url })
+}
+
+/// A repository address a launch may ask to clone: plain http(s) with a host and a path, and no
+/// credentials, query or fragment.
+pub fn clone_url(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() ||
         url.password().is_some() || url.query().is_some() || url.fragment().is_some() || matches!(url.path(), "" | "/") {
         return None;
     }
-    Some(LaunchIntent::Clone { url: url.into() })
+    Some(url.into())
 }
 
 /// What the program's arguments ask to open: one folder, or a `gitcraft://` link. `args[0]` is

@@ -8,24 +8,40 @@ use super::icons::{self, Icon};
 use super::theme::{GOOD, WARN, p};
 use super::widgets::{self, Kind, REMOVED};
 use egui::{CornerRadius, FontId, Rect, Sense, Ui, Vec2, pos2, vec2};
-use gitcraft_core::actions::Action;
+use gitcraft_core::actions::{Action, RemoteBranch};
 use gitcraft_core::manage::CleanupBranch;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// The latest branch review's number and, once it is done, its branches.
+type Review = Arc<Mutex<(u64, Option<Vec<CleanupBranch>>)>>;
+/// A repository's pull mode and its autostash preference for a rebase pull.
+type PullMode = (String, Option<bool>);
+
 impl App {
     /// Clean Up Local Branches: filter by age, merge and upstream state, then delete the picked ones.
     pub(crate) fn cleanup_dialog(&mut self, tab: u64) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        let list: Arc<Mutex<Option<Vec<CleanupBranch>>>> = Default::default();
-        let load = |list: &Arc<Mutex<Option<Vec<CleanupBranch>>>>, app: &App, path: &str, patches: bool| {
-            *list.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // The branches of the latest review, with the number of that review: a slower, earlier
+        // review never replaces a newer one's list.
+        let list: Review = Default::default();
+        let load = |list: &Review, app: &App, path: &str, patches: bool| {
+            let request = {
+                let mut l = list.lock().unwrap_or_else(|e| e.into_inner());
+                l.0 += 1;
+                l.1 = None;
+                l.0
+            };
             let (l, path) = (list.clone(), path.to_owned());
             let ctx = app.ctx.clone();
             std::thread::spawn(move || {
                 let branches = gitcraft_core::manage::review_cleanup(Path::new(&path), patches);
-                *l.lock().unwrap_or_else(|e| e.into_inner()) = Some(branches);
+                let mut l = l.lock().unwrap_or_else(|e| e.into_inner());
+                if l.0 == request {
+                    l.1 = Some(branches);
+                }
+                drop(l);
                 ctx.request_repaint();
             });
         };
@@ -76,7 +92,7 @@ impl App {
             ui.add_space(8.0);
             let now = chrono::Local::now().timestamp();
             let min_age = days.parse::<i64>().unwrap_or(0) * 86400;
-            let all = list.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let all = list.lock().unwrap_or_else(|e| e.into_inner()).1.clone();
             let shown: Vec<CleanupBranch> = all.clone().unwrap_or_default().into_iter().filter(|b| {
                 now - b.time >= min_age
                     && (merge == "any" || (merge == "merged") == (b.merged || b.patch_equivalent))
@@ -139,7 +155,8 @@ impl App {
                     let n = picked.len();
                     if widgets::button(ui, Kind::Danger, None, &format!("Delete {n} branch{}", if n == 1 { "" } else { "es" }), 28.0, n > 0).clicked() {
                         let names: Vec<String> = picked.iter().cloned().collect();
-                        let ups: Vec<String> = names.iter().filter(|nm| remotes.contains(*nm) && all.as_ref().is_some_and(|l| l.iter().any(|b| &b.name == *nm && !b.upstream_gone))).cloned().collect();
+                        // Each remote branch as reviewed here, so a changed upstream isn't deleted.
+                        let ups: Vec<RemoteBranch> = all.iter().flatten().filter(|b| picked.contains(&b.name) && remotes.contains(&b.name) && !b.upstream.is_empty() && !b.upstream_gone).map(|b| RemoteBranch { branch: b.name.clone(), remote: b.remote.clone(), reference: b.remote_ref.clone() }).collect();
                         app.act(tab, Action::DeleteBranches { names, remotes: ups });
                         close = true;
                     }
@@ -377,9 +394,19 @@ impl App {
         if paths.is_empty() {
             return self.toast(false, if pull { "No repositories to pull" } else { "No repositories to fetch" });
         }
-        let modes: Vec<String> = paths.iter().map(|p| {
+        // One bulk run at a time, so one can't clear another's progress.
+        if self.bulk.is_some() {
+            return self.toast(false, "Wait for the repositories being pulled or fetched to finish");
+        }
+        self.bulk_batch += 1;
+        let batch = self.bulk_batch;
+        self.bulk = Some((batch, 0));
+        // Each repository's pull mode, and its autostash preference for a rebase pull.
+        let modes: Vec<PullMode> = paths.iter().map(|p| {
             let m = self.pull_mode(p);
-            if m == "fetch" { "ff".into() } else { m }
+            let m = if m == "fetch" { "ff".to_owned() } else { m };
+            let autostash = if m == "rebase" { self.repo_pref(p, "pullAutostash").and_then(|v| v.as_bool()) } else { None };
+            (m, autostash)
         }).collect();
         let engine = self.engine.clone();
         let total = paths.len();
@@ -388,19 +415,28 @@ impl App {
         let inbox = self.inbox.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let queue: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(paths.into_iter().zip(modes).collect()));
+            let queue: Arc<Mutex<Vec<(String, PullMode)>>> = Arc::new(Mutex::new(paths.into_iter().zip(modes).collect()));
             let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let workers: Vec<_> = (0..3.min(total)).map(|_| {
                 let (q, done, failed, engine, inbox, ctx) = (queue.clone(), done.clone(), failed.clone(), engine.clone(), inbox.clone(), ctx.clone());
                 std::thread::spawn(move || loop {
-                    let Some((path, mode)) = q.lock().unwrap_or_else(|e| e.into_inner()).pop() else { break };
-                    let action = if pull { Action::Pull { mode, autostash: None } } else { Action::Fetch };
+                    let Some((path, (mode, autostash))) = q.lock().unwrap_or_else(|e| e.into_inner()).pop() else { break };
+                    let action = if pull { Action::Pull { mode, autostash } } else { Action::Fetch };
                     if !engine.perform(&path, action).ok {
                         failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| app.busy = Some(format!("{verb} repositories ({n} of {total} complete)…")))));
+                    // Counts arrive from several workers: only a higher count of this batch shows.
+                    inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| {
+                        if let Some((b, shown)) = app.bulk.as_mut()
+                            && *b == batch
+                            && n > *shown
+                        {
+                            *shown = n;
+                            app.busy = Some(format!("{verb} repositories ({n} of {total} complete)…"));
+                        }
+                    })));
                     ctx.request_repaint();
                 })
             }).collect();
@@ -409,7 +445,10 @@ impl App {
             }
             let failed = failed.load(std::sync::atomic::Ordering::Relaxed);
             inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| {
-                app.busy = None;
+                if app.bulk.is_some_and(|(b, _)| b == batch) {
+                    app.bulk = None;
+                    app.busy = None;
+                }
                 refresh.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 let what = if pull { "Pulled" } else { "Fetched" };
                 app.toast(failed == 0, format!("{what} {} of {total} repositories{}", total - failed, if failed > 0 { format!("; {failed} failed") } else { String::new() }));

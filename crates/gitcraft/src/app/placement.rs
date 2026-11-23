@@ -15,6 +15,8 @@ pub const MIN: [f32; 2] = [760.0, 520.0];
 
 /// Wait this long after the last change before writing the file.
 const SAVE_AFTER: Duration = Duration::from_secs(2);
+/// After a failed write, wait this long before the next try.
+const RETRY_AFTER: Duration = Duration::from_secs(10);
 
 struct Restore {
     store: Store,
@@ -80,14 +82,19 @@ pub fn track(ctx: &egui::Context) {
     let fullscreen = info.fullscreen.unwrap_or(false);
     let mut p = r.store.get(MAIN).unwrap_or_else(|| Placement::new(SIZE, scale));
     let before = p.clone();
+    // egui gives places and sizes in interface points: times the zoom they are the system's
+    // points, and times the native scale too, physical pixels.
+    let px = scale * zoom;
     if !maximized && !fullscreen {
-        if let Some(inner) = info.inner_rect {
-            p.normal.size = [inner.width() * zoom, inner.height() * zoom];
-        }
+        // The whole client area (GitCraft draws its own title bar and frame in it). Where the
+        // system doesn't say where the window is (Wayland), its size still comes from the
+        // area egui lays out in.
+        let size = info.inner_rect.map(|inner| inner.size()).unwrap_or_else(|| ctx.content_rect().size());
+        p.normal.size = [size.x * zoom, size.y * zoom];
         p.position_px = if r.no_position {
             None
         } else {
-            info.outer_rect.map(|o| [(o.min.x * scale).round() as i32, (o.min.y * scale).round() as i32])
+            info.outer_rect.map(|o| [(o.min.x * px).round() as i32, (o.min.y * px).round() as i32])
         };
         p.normal.pos = p.position_px.map_or([0.0, 0.0], |[x, y]| [x as f32 / scale, y as f32 / scale]);
         p.scale = scale;
@@ -96,7 +103,7 @@ pub fn track(ctx: &egui::Context) {
     p.maximized = maximized;
     p.fullscreen = fullscreen;
     if let Some(size) = info.monitor_size {
-        p.monitor = Some(MonitorKey::new("", [(size.x * scale).round() as u32, (size.y * scale).round() as u32]));
+        p.monitor = Some(MonitorKey::new("", [(size.x * px).round() as u32, (size.y * px).round() as u32]));
     }
     if p != before && p.normal.size.iter().all(|v| v.is_finite() && *v > 0.0) {
         r.store.set(MAIN, &p);
@@ -115,9 +122,13 @@ fn save_when_due(r: &mut Restore) {
 }
 
 fn save_now(r: &mut Restore) {
-    r.changed = None;
-    if let Err(e) = r.store.save() {
-        eprintln!("Couldn't save the window's size and place: {e}");
+    match r.store.save() {
+        Ok(_) => r.changed = None,
+        Err(e) => {
+            eprintln!("Couldn't save the window's size and place: {e}");
+            // Try again a little later rather than every frame.
+            r.changed = Instant::now().checked_add(RETRY_AFTER - SAVE_AFTER);
+        }
     }
 }
 

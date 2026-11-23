@@ -60,10 +60,22 @@ fn launch_intent(argument: &str, cwd: &std::path::Path) -> Option<gitcraft_core:
     let path = cwd.join(explorer_argument(argument).as_ref());
     if path.is_dir() {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
-        Some(LaunchIntent::Repository { path: path.to_string_lossy().into_owned() })
+        Some(LaunchIntent::Repository { path: plain_path(&path.to_string_lossy()) })
     } else {
         eprintln!("Not a folder: {argument}");
         None
+    }
+}
+
+/// A canonical path in the form people and settings use: on Windows without the
+/// extended-length prefix canonicalize adds (`\\?\C:\x` is `C:\x`, `\\?\UNC\s\x` is `\\s\x`).
+fn plain_path(path: &str) -> String {
+    if !cfg!(windows) {
+        return path.to_owned();
+    }
+    match path.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).to_owned(),
     }
 }
 

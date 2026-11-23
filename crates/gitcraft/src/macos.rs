@@ -40,7 +40,6 @@ define_class!(
             let paths: Vec<_> = files
                 .iter()
                 .flat_map(|files| files.iter())
-                .take(20)
                 .filter_map(|object| object.downcast::<NSURL>().ok())
                 .filter(|url| url.isFileURL())
                 .filter_map(|url| url.path().map(|path| PathBuf::from(path.to_string())))

@@ -16,7 +16,7 @@ use craft_ipc::{Discovery, LinkError, RuntimeDir};
 use gitcraft_core::session::LaunchIntent;
 use serde_json::{Value, json};
 use std::fs::File;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const APP: &str = "gitcraft";
@@ -24,49 +24,83 @@ const HANDOFF: Duration = Duration::from_secs(10);
 /// More than this in one launch is not a file manager.
 const MAX_INTENTS: usize = 64;
 
+/// How long a launch waits for the window to take what it handed over.
+const TAKEN_WITHIN: Duration = Duration::from_secs(3);
+
 /// What the running window has been asked to open, and how to wake it.
 #[derive(Default)]
 struct Queue {
     intents: Vec<LaunchIntent>,
     ctx: Option<egui::Context>,
+    /// Deliveries so far, and how many of them the window has taken.
+    delivered: u64,
+    taken: u64,
+    /// The window is quitting: what arrives now would not be opened.
+    closing: bool,
 }
 
-fn queue() -> &'static Mutex<Queue> {
-    static QUEUE: OnceLock<Mutex<Queue>> = OnceLock::new();
+fn queue() -> &'static (Mutex<Queue>, Condvar) {
+    static QUEUE: OnceLock<(Mutex<Queue>, Condvar)> = OnceLock::new();
     QUEUE.get_or_init(Default::default)
 }
 
+fn lock_queue() -> std::sync::MutexGuard<'static, Queue> {
+    queue().0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Hand launch intents to the window (from the server, a macOS event or a Finder service) and
-/// bring it to the front.
-pub fn deliver(intents: Vec<LaunchIntent>) {
-    let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
+/// bring it to the front. Returns the delivery's number, or `None` when the window is quitting.
+pub fn deliver(intents: Vec<LaunchIntent>) -> Option<u64> {
+    let mut q = lock_queue();
+    if q.closing {
+        return None;
+    }
     q.intents.extend(intents);
+    q.delivered += 1;
     if let Some(ctx) = &q.ctx {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Where the system doesn't let a window take the focus by itself (Wayland), mark it.
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
         ctx.request_repaint();
     }
+    Some(q.delivered)
 }
 
 /// The window is up: later deliveries wake it.
 pub fn attach(ctx: &egui::Context) {
-    queue().lock().unwrap_or_else(|e| e.into_inner()).ctx = Some(ctx.clone());
+    lock_queue().ctx = Some(ctx.clone());
 }
 
 /// What arrived since the last frame.
 pub fn take() -> Vec<LaunchIntent> {
-    std::mem::take(&mut queue().lock().unwrap_or_else(|e| e.into_inner()).intents)
+    let mut q = lock_queue();
+    q.taken = q.delivered;
+    let intents = std::mem::take(&mut q.intents);
+    drop(q);
+    queue().1.notify_all();
+    intents
 }
 
-/// Read the `open` object of an `app.activate` call.
-pub fn intents_from(open: &Value) -> Vec<LaunchIntent> {
-    let Some(list) = open.get("gitcraft").and_then(Value::as_array) else { return Vec::new() };
+/// The window is quitting: later launches open their own window.
+pub fn close() {
+    lock_queue().closing = true;
+    queue().1.notify_all();
+}
+
+/// Read the `open` object of an `app.activate` call. `None` when the request can't be taken as a
+/// whole (too many items, or one that isn't valid), so nothing of it is opened and the sender
+/// opens its own window instead.
+pub fn intents_from(open: &Value) -> Option<Vec<LaunchIntent>> {
+    let list = open.get("gitcraft").and_then(Value::as_array)?;
+    if list.len() > MAX_INTENTS {
+        return None;
+    }
     list.iter()
-        .take(MAX_INTENTS)
-        .filter_map(|item| match (item["kind"].as_str(), item["path"].as_str(), item["url"].as_str()) {
-            (Some("repository"), Some(path), _) if !path.is_empty() && !path.chars().any(char::is_control) => Some(LaunchIntent::Repository { path: path.to_owned() }),
-            // Checked again as a link, so the running copy applies its own rules.
-            (Some("clone"), _, Some(url)) => gitcraft_core::session::clone_launch(&format!("gitcraft://clone?url={}", url::form_urlencoded::byte_serialize(url.as_bytes()).collect::<String>())),
+        .map(|item| match (item["kind"].as_str(), item["path"].as_str(), item["url"].as_str()) {
+            // Any folder a launch may name on the command line.
+            (Some("repository"), Some(path), _) if !path.is_empty() && !path.contains('\0') => Some(LaunchIntent::Repository { path: path.to_owned() }),
+            (Some("clone"), _, Some(url)) => gitcraft_core::session::clone_url(url).map(|url| LaunchIntent::Clone { url }),
             _ => None,
         })
         .collect()
@@ -80,10 +114,30 @@ struct Window;
 
 impl Activate for Window {
     fn activate(&self, _token: Option<String>, _from_pid: Option<u32>, open: Option<Value>) -> Activation {
-        let has_window = queue().lock().unwrap_or_else(|e| e.into_inner()).ctx.is_some();
-        deliver(open.as_ref().map(intents_from).unwrap_or_default());
+        let intents = match open.as_ref().map(intents_from) {
+            Some(Some(intents)) => intents,
+            None => Vec::new(),
+            // Refused as a whole: the sender opens a window of its own.
+            Some(None) => return Activation::No,
+        };
+        let has_window = lock_queue().ctx.is_some();
+        let Some(number) = deliver(intents) else { return Activation::No };
         // Queued before the window opened, they are shown with it.
-        if has_window { Activation::Requested } else { Activation::Yes }
+        if !has_window {
+            return Activation::Yes;
+        }
+        // Answer once the window took them; if it quits first, the sender takes over.
+        let (lock, taken) = queue();
+        let q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (q, _) = taken.wait_timeout_while(q, TAKEN_WITHIN, |q| q.taken < number && !q.closing).unwrap_or_else(|e| e.into_inner());
+        if q.taken >= number {
+            Activation::Requested
+        } else if q.closing {
+            Activation::No
+        } else {
+            // Still queued in a running window: it opens them on its next frame.
+            Activation::Requested
+        }
     }
 }
 
@@ -115,6 +169,7 @@ pub struct Primary {
 impl Primary {
     /// Stop taking launches (GitCraft is quitting), so the next one starts its own window.
     pub fn shutdown(&mut self) {
+        close();
         if let Some(server) = self.server.take() {
             let _ = server.shutdown();
         }
@@ -140,6 +195,10 @@ pub fn claim(intents: &[LaunchIntent]) -> Claim {
 }
 
 pub fn claim_in(runtime: &RuntimeDir, intents: &[LaunchIntent], budget: Duration, version: &str) -> Claim {
+    // More than one launch hands over: open them in a window of our own.
+    if intents.len() > MAX_INTENTS {
+        return Claim::Standalone(format!("{} folders are more than a launch hands over", intents.len()));
+    }
     let lock_path = runtime.path().join(format!("{APP}.lock"));
     let file = match File::options().create(true).truncate(false).write(true).open(&lock_path) {
         Ok(f) => f,
@@ -193,12 +252,20 @@ fn forward(runtime: &RuntimeDir, intents: &[LaunchIntent], version: &str) -> Res
             client.hello(&HelloClient { app: APP.into(), app_version: version.into(), pid: std::process::id(), instance: craft_ipc::random_uuid()?, protocol_min: 1, protocol_max: 1 })?;
             client.call("app.activate", json!({ "from_pid": std::process::id(), "open": open_payload(intents) }))
         })();
-        match call {
-            Ok(_) => return Ok(()),
+        match call.map(|reply| handed_over(&reply)) {
+            Ok(true) => return Ok(()),
+            // Refused (the window is quitting, or can't take this): keep trying, then open our own.
+            Ok(false) => last = "the running copy did not take the launch".to_owned(),
             Err(e) => last = e.to_string(),
         }
     }
     Err(last)
+}
+
+/// Whether an `app.activate` reply (`{"activated": true | false | "requested"}`) says the running
+/// window took the launch; anything else counts as refused.
+fn handed_over(reply: &Value) -> bool {
+    matches!(reply.get("activated"), Some(Value::Bool(true))) || reply.get("activated").and_then(Value::as_str) == Some("requested")
 }
 
 #[cfg(test)]
@@ -208,9 +275,25 @@ mod tests {
     #[test]
     fn launch_payloads_round_trip_and_are_checked() {
         let intents = vec![LaunchIntent::Repository { path: "/home/a/repo".into() }, LaunchIntent::Clone { url: "https://example.invalid/a/b.git".into() }];
-        assert_eq!(intents_from(&open_payload(&intents)), intents);
-        let bad = json!({"gitcraft": [{"kind": "clone", "url": "file:///etc"}, {"kind": "repository", "path": "a\nb"}, {"kind": "other"}]});
-        assert!(intents_from(&bad).is_empty());
+        assert_eq!(intents_from(&open_payload(&intents)), Some(intents));
+        // A folder name may hold any character but NUL, as on the command line.
+        let newline = vec![LaunchIntent::Repository { path: "/home/a/odd\nname".into() }];
+        assert_eq!(intents_from(&open_payload(&newline)), Some(newline));
+        // One bad item, or too many, refuses the whole request.
+        for bad in [json!({"gitcraft": [{"kind": "repository", "path": "/a"}, {"kind": "clone", "url": "file:///etc"}]}), json!({"gitcraft": [{"kind": "other"}]})] {
+            assert_eq!(intents_from(&bad), None);
+        }
+        let many: Vec<_> = (0..=MAX_INTENTS).map(|i| LaunchIntent::Repository { path: format!("/r{i}") }).collect();
+        assert_eq!(intents_from(&open_payload(&many)), None);
+    }
+
+    #[test]
+    fn only_a_taken_launch_counts_as_handed_over() {
+        assert!(handed_over(&json!({"activated": true})));
+        assert!(handed_over(&json!({"activated": "requested"})));
+        for refused in [json!({"activated": false}), json!(false), json!({}), json!({"activated": "no"})] {
+            assert!(!handed_over(&refused));
+        }
     }
 
     #[test]

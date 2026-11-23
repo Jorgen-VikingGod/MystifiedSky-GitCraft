@@ -105,6 +105,15 @@ pub enum CheckoutChanges {
     Discard,
 }
 
+/// A remote branch to delete, as it was reviewed: the local branch it is the upstream of, the
+/// remote, and the branch's name there (`refs/heads/...`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RemoteBranch {
+    pub branch: String,
+    pub remote: String,
+    pub reference: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
@@ -194,7 +203,8 @@ pub enum Action {
     SubmoduleUpdate { paths: Vec<String> },
     SubmoduleRemove { path: String },
     /// "Clean Up Local Branches": delete local branches and, optionally, their remote branches.
-    DeleteBranches { names: Vec<String>, remotes: Vec<String> },
+    /// Delete local branches, and the remote branches reviewed with them.
+    DeleteBranches { names: Vec<String>, remotes: Vec<RemoteBranch> },
     GitflowInit { config: crate::manage::GitflowConfig },
     LfsInstall,
     /// "Compose commits with AI": commit the given groups of files one after another.
@@ -1276,11 +1286,17 @@ impl Engine {
                     }
                 }
                 for r in &remotes {
-                    let Some((remote, reference)) = remote_targets.get(r.as_str()) else { failed.push(r.clone()); continue; };
+                    // Only the remote branch that was reviewed: if the branch's upstream changed
+                    // since, nothing is deleted on the remote.
+                    let Some((remote, reference)) = remote_targets.get(r.branch.as_str()) else { failed.push(r.branch.clone()); continue; };
+                    if **remote != r.remote || **reference != r.reference {
+                        failed.push(format!("{} (its upstream changed)", r.branch));
+                        continue;
+                    }
                     let default = git::run(dir, &["symbolic-ref", "-q", &format!("refs/remotes/{remote}/HEAD")]);
                     let default_ref = default.stdout.trim().strip_prefix(&format!("refs/remotes/{remote}/")).map(|branch| format!("refs/heads/{branch}"));
                     if default_ref.as_deref() == Some(reference.as_str()) || !self.job(repo, "push", dir, &["push", "--delete", "--", remote, reference]).ok {
-                        failed.push(r.clone());
+                        failed.push(r.branch.clone());
                     }
                 }
                 if failed.is_empty() {

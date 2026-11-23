@@ -272,7 +272,6 @@ impl App {
             .flag_value("new", true)
             .choice("Create Worktree", Kind::Primary, move |app, values| {
                 let folder = s(values, "path");
-                app.after_worktree = Some(folder.clone());
                 app.act(tab, Action::WorktreeAdd { path: folder, branch: s(values, "branch"), new_branch: values.flag("new"), start });
             });
         self.dialog = Some(d);
@@ -287,10 +286,9 @@ impl App {
 
     pub(crate) fn remove_worktree(&mut self, tab: u64, wt: &str) {
         let wt = wt.to_owned();
+        // Its tab closes once the worktree is removed (see `worktree_done`), so a refused removal
+        // leaves it open.
         self.dialog = Some(Dialog::confirm_with("Remove worktree?", &format!("Remove the worktree at {wt}? Its folder is deleted; its branch stays."), "Remove", true, move |app, _| {
-            if let Some(other) = app.tab_of(&wt) {
-                app.close_tab(other);
-            }
             app.act(tab, Action::WorktreeRemove { path: wt, force: false });
         }));
     }
@@ -452,12 +450,17 @@ impl App {
         self.dialog = Some(Dialog::prompt("Track with Git LFS", "Pattern (for example *.psd or assets/**)", "*.psd", "Track", move |app, v| app.act(tab, Action::LfsTrack { pattern: s(v, "value"), lockable: false })));
     }
 
-    /// The commit a new tab of a worktree opens after it was added.
-    pub(crate) fn worktree_added(&mut self) {
-        if let Some(path) = self.after_worktree.take()
-            && Path::new(&path).is_dir()
-        {
-            self.open_repo(&path);
+    /// After a worktree action succeeded: a new worktree opens in a tab of its own, and a removed
+    /// one's tab closes.
+    pub(crate) fn worktree_done(&mut self, action: &Action) {
+        match action {
+            Action::WorktreeAdd { path, .. } if Path::new(path).is_dir() => self.open_repo(path),
+            Action::WorktreeRemove { path, .. } => {
+                if let Some(t) = self.tab_of(path) {
+                    self.close_tab(t);
+                }
+            }
+            _ => {}
         }
     }
 }

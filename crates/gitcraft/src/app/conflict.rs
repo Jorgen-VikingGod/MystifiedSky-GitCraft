@@ -40,10 +40,16 @@ pub struct ConflictUi {
     /// Bumped by every edit; an AI answer for an older edit is dropped.
     pub revision: u64,
     pub saving: bool,
+    /// The latest read of the file's conflict (a run-wide id), so an earlier read, also one from
+    /// before the editor opened again, doesn't replace it.
+    pub request: u64,
+    /// This editor, opened for `file`: an AI answer asked for by an editor closed since is dropped.
+    pub editor: u64,
 }
 
-/// Complete Git conflict blocks; incomplete or ordinary marker-like text stays as it is.
-pub fn parse_conflicts(text: &str) -> Vec<Segment> {
+/// Complete Git conflict blocks, with markers at least `marker` characters long (the file's
+/// conflict-marker size); incomplete or ordinary marker-like text stays as it is.
+pub fn parse_conflicts(text: &str, marker: usize) -> Vec<Segment> {
     let normalized = text.replace("\r\n", "\n");
     let mut lines: Vec<&str> = normalized.split('\n').collect();
     if lines.last() == Some(&"") {
@@ -54,7 +60,7 @@ pub fn parse_conflicts(text: &str) -> Vec<Segment> {
     let mut i = 0;
     while i < lines.len() {
         let size = lines[i].chars().take_while(|c| *c == '<').count();
-        let opening = size >= 7 && (lines[i].len() == size || lines[i][size..].starts_with(' '));
+        let opening = size >= if marker == 0 { 7 } else { marker } && (lines[i].len() == size || lines[i][size..].starts_with(' '));
         if !opening {
             common.push(lines[i].to_owned());
             i += 1;
@@ -127,18 +133,20 @@ pub fn conflict_output(segments: &[Segment], picks: &HashMap<usize, Pick>, worki
     text
 }
 
-/// Even an incomplete marker block must not be staged as resolved.
-pub fn has_conflict_markers(text: &str) -> bool {
+/// Even an incomplete marker block must not be staged as resolved. `marker` is the file's
+/// conflict-marker size.
+pub fn has_conflict_markers(text: &str, marker: usize) -> bool {
+    let marker = if marker == 0 { 7 } else { marker };
     text.lines().any(|l| {
         let l = l.trim_end_matches('\r');
         for ch in ['<', '|', '>'] {
             let n = l.chars().take_while(|c| *c == ch).count();
-            if n >= 7 && (l.len() == n || l[n..].starts_with(' ')) {
+            if n >= marker && (l.len() == n || l[n..].starts_with(' ')) {
                 return true;
             }
         }
         let n = l.chars().take_while(|c| *c == '=').count();
-        n >= 7 && l.len() == n
+        n >= marker && l.len() == n
     })
 }
 
@@ -151,12 +159,18 @@ impl App {
     fn want_conflict(&mut self, tab: u64, file: &str) {
         let Some(r) = self.repo_mut(tab) else { return };
         r.conflict_ui.info = Some(Loaded::Loading);
+        let request = super::unique_id();
+        r.conflict_ui.request = request;
         let (path, file) = (r.path.clone(), file.to_owned());
-        self.spawn(move || Msg::ConflictInfo { tab, info: Box::new(gitcraft_core::rewrite::conflict_info(std::path::Path::new(&path), &file)) });
+        self.spawn(move || Msg::ConflictInfo { tab, info: Box::new(gitcraft_core::rewrite::conflict_info(std::path::Path::new(&path), &file)), file, request });
     }
 
-    pub(crate) fn conflict_loaded(&mut self, tab: u64, info: ConflictInfo) {
-        if let Some(r) = self.repo_mut(tab) {
+    /// A read of a file's conflict: used only if it is the editor's latest read of that file.
+    pub(crate) fn conflict_loaded(&mut self, tab: u64, file: String, request: u64, info: ConflictInfo) {
+        if let Some(r) = self.repo_mut(tab)
+            && r.conflict_ui.file == file
+            && r.conflict_ui.request == request
+        {
             r.conflict_ui.info = Some(Loaded::Ready(info));
         }
     }
@@ -185,17 +199,15 @@ impl App {
             return;
         }
         let working = info.working.clone().unwrap_or_default();
-        let segments = parse_conflicts(&working);
+        let segments = parse_conflicts(&working, info.marker_size);
         let output = cu.manual.clone().unwrap_or_else(|| conflict_output(&segments, &cu.picks, &working));
         let crlf = working.contains("\r\n");
         let normalized = output.replace("\r\n", "\n");
         let text = if crlf { normalized.replace('\n', "\r\n") } else { normalized };
         let file = cu.file.clone();
-        if !has_conflict_markers(&output) {
-            cu.base = None;
-            cu.picks.clear();
-            cu.manual = None;
-            r.ui.conflict = None;
+        if !has_conflict_markers(&output, info.marker_size) {
+            // The picks and the editor stay until the file is saved and marked resolved
+            // (`conflict_resolved`), so a failed save can be tried again.
             self.act(tab, Action::SaveResolved { file, content: text, expected: Some(info.working_token.clone()), utf8: Some(utf8) });
         } else {
             cu.saving = true;
@@ -205,6 +217,20 @@ impl App {
                 Ok(()) => Msg::ConflictSaved { tab, result: Ok(format!("Saved {file}; conflict markers remain to resolve")) },
                 Err(e) => Msg::ConflictSaved { tab, result: Err(e) },
             });
+        }
+    }
+
+    /// The file was saved and marked resolved: close its editor.
+    pub(crate) fn conflict_resolved(&mut self, tab: u64, file: &str) {
+        if let Some(r) = self.repo_mut(tab)
+            && r.conflict_ui.file == file
+        {
+            r.conflict_ui.base = None;
+            r.conflict_ui.picks.clear();
+            r.conflict_ui.manual = None;
+            if r.ui.conflict.as_deref() == Some(file) {
+                r.ui.conflict = None;
+            }
         }
     }
 
@@ -239,7 +265,7 @@ impl App {
     pub(crate) fn conflict_view(&self, ui: &mut Ui, tab: u64, r: &mut RepoTab, file: &str, later: &mut Vec<Later>) {
         let c = p();
         if r.conflict_ui.file != file {
-            r.conflict_ui = ConflictUi { file: file.to_owned(), ..Default::default() };
+            r.conflict_ui = ConflictUi { file: file.to_owned(), editor: super::unique_id(), ..Default::default() };
         }
         if r.conflict_ui.info.is_none() {
             let f = file.to_owned();
@@ -261,7 +287,8 @@ impl App {
             }
         };
         let working = info.working.clone().unwrap_or_default();
-        let segments = parse_conflicts(&working);
+        let marker = info.marker_size;
+        let segments = parse_conflicts(&working, marker);
         let chunks: Vec<usize> = segments.iter().enumerate().filter(|(_, s)| matches!(s, Segment::Conflict { .. })).map(|(i, _)| i).collect();
         let (ours_label, theirs_label) = (info.ours_label.clone(), info.theirs_label.clone());
         let mut close = false;
@@ -437,7 +464,9 @@ impl App {
                     let mut p = pick_of(&cu.picks, i);
                     let list = if side { &mut p.b } else { &mut p.a };
                     list.iter_mut().for_each(|x| *x = on);
-                    p.touched = true;
+                    // Taking all back off a chunk with nothing else picked leaves it undecided
+                    // again, not resolved to nothing.
+                    p.touched = on || p.a.iter().chain(p.b.iter()).any(|x| *x);
                     cu.picks.insert(i, p);
                 }
                 cu.revision += 1;
@@ -446,8 +475,8 @@ impl App {
         // Output.
         let built = conflict_output(&segments, &cu.picks, &working);
         let output = cu.manual.clone().unwrap_or_else(|| built.clone());
-        let unresolved = if cu.manual.is_none() { chunks.iter().filter(|i| !cu.picks.get(i).is_some_and(|p| p.touched)).count() } else { parse_conflicts(&output).iter().filter(|s| matches!(s, Segment::Conflict { .. })).count() };
-        let all_done = !has_conflict_markers(&output);
+        let unresolved = if cu.manual.is_none() { chunks.iter().filter(|i| !cu.picks.get(i).is_some_and(|p| p.touched)).count() } else { parse_conflicts(&output, marker).iter().filter(|s| matches!(s, Segment::Conflict { .. })).count() };
+        let all_done = !has_conflict_markers(&output, marker);
         let out_color = hex(&gitcraft_core::metrics::metrics().conflict_output);
         let orect = Rect::from_min_max(pos2(body.left(), panes.bottom()), body.max);
         let mut oui = ui.new_child(egui::UiBuilder::new().max_rect(orect).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -487,13 +516,15 @@ impl App {
         let ai_label = if cu.ai_busy { "Resolving…" } else { "Auto-resolve with AI" };
         if widgets::button(&mut orow, Kind::Ai, Some(Icon::Sparkles), ai_label, 22.0, !cu.ai_busy).tip("Ask the AI (Preferences > AI) to merge both sides; check the result before saving").clicked() {
             cu.ai_busy = true;
-            let (base, ours, theirs, f, revision) = (info.base.clone().unwrap_or_default(), info.ours.clone().unwrap_or_default(), info.theirs.clone().unwrap_or_default(), file.to_owned(), cu.revision);
-            later.push(Box::new(move |app| app.ai_resolve_conflict(tab, base, ours, theirs, f, revision)));
+            let (base, ours, theirs, f, editor, revision) = (info.base.clone().unwrap_or_default(), info.ours.clone().unwrap_or_default(), info.theirs.clone().unwrap_or_default(), file.to_owned(), cu.editor, cu.revision);
+            later.push(Box::new(move |app| app.ai_resolve_conflict(tab, base, ours, theirs, f, editor, revision)));
         }
+        // Read-only while its save runs, so nothing typed meanwhile is cleared by that save.
+        let saving = cu.saving;
         match cu.manual.as_mut() {
             Some(text) => {
                 egui::ScrollArea::vertical().id_salt("conflict_manual").auto_shrink([false, false]).show(&mut oui, |ui| {
-                    if ui.add(egui::TextEdit::multiline(text).code_editor().frame(egui::Frame::NONE.inner_margin(egui::Margin::same(8))).desired_width(f32::INFINITY)).changed() {
+                    if ui.add(egui::TextEdit::multiline(text).interactive(!saving).code_editor().frame(egui::Frame::NONE.inner_margin(egui::Margin::same(8))).desired_width(f32::INFINITY)).changed() {
                         cu.revision += 1;
                     }
                 });
@@ -516,8 +547,13 @@ impl App {
     }
 
     /// The AI's merge of both sides, put in the Output for review.
-    pub(crate) fn ai_merged(&mut self, tab: u64, revision: u64, result: Result<String, String>) {
+    pub(crate) fn ai_merged(&mut self, tab: u64, file: &str, editor: u64, revision: u64, result: Result<String, String>) {
         let Some(r) = self.repo_mut(tab) else { return };
+        // A suggestion for another file, or for an editor of this file closed since, changes
+        // nothing here.
+        if r.conflict_ui.file != file || r.conflict_ui.editor != editor {
+            return;
+        }
         r.conflict_ui.ai_busy = false;
         match result {
             Ok(_) if r.conflict_ui.revision != revision => self.toast(false, "The conflict or your output changed. The outdated AI suggestion was not applied."),
@@ -547,7 +583,7 @@ mod tests {
 
     #[test]
     fn conflicts_parse_and_rebuild() {
-        let segs = parse_conflicts(TEXT);
+        let segs = parse_conflicts(TEXT, 7);
         assert_eq!(segs.len(), 3);
         assert!(matches!(&segs[1], Segment::Conflict { ours, theirs, .. } if ours == &["mine"] && theirs == &["theirs"]));
         assert_eq!(conflict_output(&segs, &HashMap::new(), TEXT), TEXT);
@@ -555,13 +591,23 @@ mod tests {
         picks.insert(1, Pick { a: vec![true], b: vec![true], touched: true });
         let out = conflict_output(&segs, &picks, TEXT);
         assert_eq!(out, "a\nmine\ntheirs\nz\n");
-        assert!(!has_conflict_markers(&out));
-        assert!(has_conflict_markers(TEXT));
+        assert!(!has_conflict_markers(&out, 7));
+        assert!(has_conflict_markers(TEXT, 7));
     }
 
     #[test]
     fn incomplete_blocks_stay_as_text() {
-        let segs = parse_conflicts("<<<<<<< HEAD\nno end\n");
+        let segs = parse_conflicts("<<<<<<< HEAD\nno end\n", 7);
         assert_eq!(segs, vec![Segment::Common(vec!["<<<<<<< HEAD".into(), "no end".into()])]);
+    }
+
+    #[test]
+    fn a_shorter_marker_size_is_recognised_when_saving_too() {
+        let text = "a\n<<< HEAD\nmine\n===\ntheirs\n>>> branch\nz\n";
+        assert!(matches!(&parse_conflicts(text, 3)[1], Segment::Conflict { ours, .. } if ours == &["mine"]));
+        assert!(has_conflict_markers(text, 3));
+        // With Git's default, those lines are plain text.
+        assert_eq!(parse_conflicts(text, 7).len(), 1);
+        assert!(!has_conflict_markers(text, 7));
     }
 }

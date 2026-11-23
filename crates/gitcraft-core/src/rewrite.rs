@@ -192,6 +192,14 @@ pub struct ConflictInfo {
     pub ours_label: String,
     pub theirs_label: String,
     pub binary: bool,
+    /// How long the file's conflict markers are (its `conflict-marker-size` attribute, else 7).
+    pub marker_size: usize,
+}
+
+/// The `conflict-marker-size` attribute of `file`, or Git's default of 7.
+pub fn conflict_marker_size(dir: &Path, file: &str) -> usize {
+    let out = crate::git::run(dir, &["check-attr", "conflict-marker-size", "--", file]);
+    out.stdout.lines().next().and_then(|l| l.rsplit(": ").next()).and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(7)
 }
 
 /// The names shown for "current" and "incoming": during a merge HEAD's branch and MERGE_HEAD's
@@ -240,6 +248,7 @@ pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
         working_token,decoding_loss,
         working:decoded.next().unwrap(),base:decoded.next().unwrap(),ours:decoded.next().unwrap(),theirs:decoded.next().unwrap(),
         ours_label,theirs_label,binary,
+        marker_size: conflict_marker_size(dir, file),
     }
 }
 

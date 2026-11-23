@@ -21,6 +21,8 @@ pub struct SideData {
     pub gitflow: Option<gitcraft_core::manage::GitflowConfig>,
     pub lfs: Option<gitcraft_core::manage::LfsInfo>,
     pub locks: Option<Result<Vec<gitcraft_core::manage::LfsLock>, String>>,
+    /// A lock list is being read: no second request meanwhile.
+    pub locks_loading: bool,
     pub submodules: Option<Vec<gitcraft_core::manage::Submodule>>,
     pub conflicts: Option<gitcraft_core::extras::ConflictCheck>,
 }
@@ -46,6 +48,7 @@ impl App {
                 gitflow: Some(gitcraft_core::manage::gitflow_config(dir)),
                 lfs: Some(gitcraft_core::manage::lfs_info(dir)),
                 locks: None,
+                locks_loading: false,
                 submodules: Some(gitcraft_core::manage::submodules(dir)),
                 conflicts: detect.then(|| gitcraft_core::extras::conflict_check(dir, None)),
             };
@@ -57,9 +60,10 @@ impl App {
         if let Some(r) = self.repo_mut(tab)
             && r.side.generation == side.generation
         {
-            let locks = r.side.locks.take();
+            let (locks, loading) = (r.side.locks.take(), r.side.locks_loading);
             r.side = side;
             r.side.locks = locks;
+            r.side.locks_loading = loading;
         }
     }
 
@@ -574,12 +578,17 @@ impl App {
     }
 
     pub(crate) fn want_lfs_locks(&mut self, tab: u64) {
-        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        let Some(r) = self.repo_mut(tab) else { return };
+        if r.side.locks_loading {
+            return;
+        }
+        r.side.locks_loading = true;
+        let path = r.path.clone();
         self.spawn(move || super::Msg::Locks { tab, result: gitcraft_core::manage::lfs_locks(std::path::Path::new(&path)) });
     }
 
     /// The left panel shrunk to icons with counts.
-    pub(crate) fn left_strip(&self, ui: &mut Ui, r: Option<&RepoTab>, later: &mut Vec<Later>) {
+    pub(crate) fn left_strip(&self, ui: &mut Ui, tab: Option<u64>, r: Option<&RepoTab>, later: &mut Vec<Later>) {
         let c = p();
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.panel);
@@ -591,7 +600,8 @@ impl App {
             (Icon::Cloud, "Remote", Some(v.map_or(0, |v| v.data.remotes.len()))),
             (Icon::Network, "Worktrees", Some(v.map_or(0, |v| v.data.worktrees.len()))),
             (Icon::CloudCog, "Cloud Patches", Some(0)),
-            (Icon::GitPullRequest, "Pull Requests", Some(0)),
+            // The loaded pull requests, as the full panel counts them; none before they load.
+            (Icon::GitPullRequest, "Pull Requests", tab.and_then(|t| self.hosted.get(&t)).filter(|h| h.prs.started && !h.prs.loading).map(|h| h.prs.items.len())),
             (Icon::CircleDot, "Issues", None),
             (Icon::Users, "Teams", None),
         ];

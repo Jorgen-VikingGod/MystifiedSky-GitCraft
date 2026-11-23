@@ -96,6 +96,11 @@ pub fn autosquash(items: &[RebaseItem]) -> Vec<RebaseItem> {
     let mut ordered: Vec<RebaseItem> = Vec::new();
     let mut targets: std::collections::HashMap<String, String> = Default::default();
     for item in items.iter().rev() {
+        // A commit marked Drop stays where it is, whatever its subject says.
+        if item.action == Step::Drop {
+            ordered.push(item.clone());
+            continue;
+        }
         let marker = ["fixup! ", "squash! "].iter().find_map(|p| item.summary.strip_prefix(p).map(|rest| (*p, rest)));
         let Some((kind, mut subject)) = marker else {
             ordered.push(item.clone());
@@ -265,6 +270,12 @@ impl App {
         let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
         let line = head_line(v);
         let Some(old) = Self::oldest(v, &shas) else { return };
+        // Squashing commits apart from each other would reorder the ones between them.
+        let mut at: Vec<usize> = shas.iter().filter_map(|s| line.iter().position(|l| l == s)).collect();
+        at.sort_unstable();
+        if at.len() != shas.len() || at.windows(2).any(|w| w[1] != w[0] + 1) {
+            return self.toast(false, "Pick commits next to each other to squash them.");
+        }
         let Some(target) = line.iter().position(|l| *l == old).and_then(|p| line.get(p + 1)).cloned() else {
             return self.toast(false, "There is no older commit to squash into.");
         };
@@ -312,6 +323,15 @@ mod tests {
         let order: Vec<&str> = out.iter().map(|i| i.sha.as_str()).collect();
         assert_eq!(order, ["b", "c", "a"]);
         assert_eq!(out[1].action, Step::Fixup);
+    }
+
+    #[test]
+    fn a_dropped_fixup_stays_where_it_is() {
+        let mut dropped = item("c", "fixup! Add login");
+        dropped.action = Step::Drop;
+        let out = autosquash(&[dropped, item("b", "Other"), item("a", "Add login")]);
+        assert_eq!(out.iter().map(|i| i.sha.as_str()).collect::<Vec<_>>(), ["c", "b", "a"]);
+        assert_eq!(out[0].action, Step::Drop);
     }
 
     #[test]
@@ -403,6 +423,8 @@ impl App {
         let mut new_drag = dragging;
         egui::ScrollArea::vertical().id_salt(("rebase", tab)).max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // While a message is edited, the order stays put, so the message stays with its commit.
+            let locked = plan.editing.is_some();
             for i in 0..n {
                 let it = plan.items[i].clone();
                 let selected = plan.focus == i;
@@ -415,7 +437,7 @@ impl App {
                 if resp.clicked() {
                     plan.focus = i;
                 }
-                if resp.drag_started() {
+                if resp.drag_started() && !locked {
                     new_drag = Some(i);
                 }
                 if let Some(from) = dragging
@@ -466,9 +488,9 @@ impl App {
                 ui.painter().galley(pos2(sha_x, top.center().y - shag.size().y / 2.0), shag, c.fg3);
                 for (k, (icon, dir, tip)) in [(Icon::ArrowUp, -1isize, "Move up (Ctrl+↑)"), (Icon::ArrowDown, 1, "Move down (Ctrl+↓)")].into_iter().enumerate() {
                     let ar = Rect::from_min_size(pos2(top.right() - 12.0 - arrows_w + k as f32 * 20.0, top.center().y - 8.0), Vec2::splat(16.0));
-                    let a = ui.interact(ar, ui.scope_id().with(("mv", i, k)), Sense::click()).tip(tip);
-                    icons::paint(ui, ar, icon, 13.0, if a.hovered() { c.white(1.0) } else { c.fg3 });
-                    if a.clicked() {
+                    let a = ui.interact(ar, ui.scope_id().with(("mv", i, k)), if locked { Sense::hover() } else { Sense::click() }).tip(if locked { "Finish editing the message first" } else { tip });
+                    icons::paint(ui, ar, icon, 13.0, if locked { c.fg3.gamma_multiply(0.4) } else if a.hovered() { c.white(1.0) } else { c.fg3 });
+                    if a.clicked() && !locked {
                         moves = Some((i, dir));
                     }
                 }
