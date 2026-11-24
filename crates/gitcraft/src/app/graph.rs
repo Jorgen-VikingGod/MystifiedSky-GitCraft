@@ -349,6 +349,7 @@ impl App {
         let total = commits.len() + off + usize::from(v.data.has_more);
         let head_idx = r.index.get(&v.data.head_sha).copied();
         let head_lane = head_idx.and_then(|i| v.graph.rows.get(i)).map_or(0, |row| row.col as usize);
+        let lanes = WipLanes::new(wip, self.pinned_ref(&path).is_some(), head_lane, head_idx, commits.len());
         let q = r.ui.search.trim().to_lowercase();
         let matches: Vec<usize> = if q.is_empty() {
             Vec::new()
@@ -371,7 +372,7 @@ impl App {
 
         // ---- Header row (and the bars under it) ----
         let pane_w = ui.available_width();
-        let lay = layout(&cols, &widths, v.graph.width, pane_w - 12.0);
+        let lay = layout(&cols, &widths, v.graph.width + lanes.extra(), pane_w - 12.0);
         let scroll_id = ui.scope_id().with(("graph_scroll", tab));
         let scroll_x = ui.data(|d| d.get_temp::<f32>(scroll_id.with("x"))).unwrap_or(0.0);
         let (head_rect, _) = ui.allocate_exact_size(vec2(pane_w, HEADER), Sense::hover());
@@ -790,7 +791,7 @@ impl App {
                     painter.rect_filled(lr, CornerRadius::same(2), c.panel);
                     painter.galley(lr.min + vec2(6.0, 0.0), g, c.fg2);
                 }
-                let node_x = rect.left() + lanes_x(gr.col as usize, lay.refs);
+                let node_x = rect.left() + lanes_x(lanes.row(gr.col as usize, i), lay.refs);
                 // Labels.
                 let refs = by_sha.get(commit.sha.as_str());
                 if lay.refs > 0.0 {
@@ -911,7 +912,16 @@ impl App {
                         }
                     }
                     if (refs.is_some() || end_x > zone.left() + REF_MARGIN) && lay.graph > 0.0 {
-                        painter.with_clip_rect(Rect::from_min_max(zone.min, pos2(node_x - NODE / 2.0, zone.bottom()))).line_segment([pos2(end_x, rect.center().y), pos2(node_x - NODE / 2.0, rect.center().y)], Stroke::new(2.0, color.gamma_multiply(fade)));
+                        let clip = painter.with_clip_rect(Rect::from_min_max(zone.min, pos2(node_x - NODE / 2.0, zone.bottom())));
+                        let (y, stroke) = (rect.center().y, Stroke::new(2.0, color.gamma_multiply(fade)));
+                        // A gap where the connector crosses the working changes' dashed line.
+                        if lanes.crosses_wip(gr.col as usize, i) {
+                            let wip_x = rect.left() + lanes_x(lanes.wip_lane, lay.refs);
+                            clip.line_segment([pos2(end_x, y), pos2(wip_x - LANE / 4.0, y)], stroke);
+                            clip.line_segment([pos2(wip_x + LANE / 4.0, y), pos2(node_x - NODE / 2.0, y)], stroke);
+                        } else {
+                            clip.line_segment([pos2(end_x, y), pos2(node_x - NODE / 2.0, y)], stroke);
+                        }
                     }
                 }
                 // Commit band behind the node and the message border.
@@ -990,25 +1000,30 @@ impl App {
                 let gp = painter.with_clip_rect(zone.intersect(ui.clip_rect()));
                 let mut pts: Vec<Pos2> = Vec::new();
                 let lx = |l: usize| origin.x + lanes_x(l, lay.refs);
-                for d in first..=last {
+                // The working changes: a dashed node in a lane of their own, joined to the
+                // checked-out commit by a dashed line, drawn also while the node is scrolled away.
+                if wip {
+                    let x = lx(lanes.wip_lane);
+                    let stroke = Stroke::new(2.0, lane_color(head_lane));
+                    let yc = origin.y + ROW / 2.0;
+                    if first == 0 {
+                        dashed_circle(&gp, pos2(x, yc), NODE / 2.0 - 1.0, stroke);
+                    }
+                    if let Some(h) = head_idx {
+                        let start = yc + NODE / 2.0;
+                        let to = (origin.y + (h + off) as f32 * ROW + ROW / 2.0).min(origin.y + viewport.bottom() + ROW);
+                        // Dashes keep their place as the line scrolls.
+                        let mut y = start + ((origin.y + viewport.top() - start).max(0.0) / 6.0).floor() * 6.0;
+                        while y < to {
+                            gp.line_segment([pos2(x, y), pos2(x, (y + 3.0).min(to))], stroke);
+                            y += 6.0;
+                        }
+                    }
+                }
+                for d in first.max(off)..=last {
                     let y0 = origin.y + d as f32 * ROW;
                     let yc = y0 + ROW / 2.0;
                     let y1 = y0 + ROW;
-                    if d < off {
-                        let x = lx(head_lane);
-                        let stroke = Stroke::new(2.0, lane_color(head_lane));
-                        dashed_circle(&gp, pos2(x, yc), NODE / 2.0 - 1.0, stroke);
-                        if let Some(h) = head_idx {
-                            let to = origin.y + (h + off) as f32 * ROW + ROW / 2.0;
-                            let to = to.min(origin.y + viewport.bottom() + ROW);
-                            let mut y = yc + NODE / 2.0;
-                            while y < to {
-                                gp.line_segment([pos2(x, y), pos2(x, (y + 3.0).min(to))], stroke);
-                                y += 6.0;
-                            }
-                        }
-                        continue;
-                    }
                     let i = d - off;
                     let Some(row) = v.graph.rows.get(i) else { continue };
                     let dim = if !q.is_empty() && !match_set.contains(&i) { MIN_ALPHA } else { 1.0 };
@@ -1017,22 +1032,31 @@ impl App {
                     let line = |pts: &[Pos2], stroke: Stroke, dashed: bool| {
                         if dashed { gp.extend(egui::Shape::dashed_line(pts, stroke, 3.0, 3.0)) } else { gp.add(egui::Shape::line(pts.to_vec(), stroke)); }
                     };
+                    // Lanes enter the row where the row above drew them and leave where this
+                    // row does (they differ at the end of the working changes' lane).
+                    let (top, here) = (|l: u16| lx(lanes.top(l as usize, i)), |l: u16| lx(lanes.row(l as usize, i)));
                     for [a, b] in &row.up_runs {
                         for lane in *a..=*b {
-                            line(&[pos2(lx(lane as usize), y0), pos2(lx(lane as usize), yc)], Stroke::new(2.0, lane_color(lane as usize)), dashed_at(i, lane, true));
+                            let stroke = Stroke::new(2.0, lane_color(lane as usize));
+                            if top(lane) == here(lane) {
+                                line(&[pos2(here(lane), y0), pos2(here(lane), yc)], stroke, dashed_at(i, lane, true));
+                            } else {
+                                curve(&mut pts, pos2(top(lane), y0), pos2(here(lane), yc), false);
+                                line(&pts, stroke, dashed_at(i, lane, true));
+                            }
                         }
                     }
                     for [a, b] in &row.down_runs {
                         for lane in *a..=*b {
-                            line(&[pos2(lx(lane as usize), yc), pos2(lx(lane as usize), y1)], Stroke::new(2.0, lane_color(lane as usize)), dashed_at(i, lane, false));
+                            line(&[pos2(here(lane), yc), pos2(here(lane), y1)], Stroke::new(2.0, lane_color(lane as usize)), dashed_at(i, lane, false));
                         }
                     }
                     for s in &row.up {
-                        curve(&mut pts, pos2(lx(s.from as usize), y0), pos2(lx(s.to as usize), yc), false);
+                        curve(&mut pts, pos2(top(s.from), y0), pos2(here(s.to), yc), false);
                         line(&pts, Stroke::new(2.0, lane_color(s.color as usize)), dashed_at(i, s.from, true));
                     }
                     for s in &row.down {
-                        curve(&mut pts, pos2(lx(s.from as usize), yc), pos2(lx(s.to as usize), y1), true);
+                        curve(&mut pts, pos2(here(s.from), yc), pos2(here(s.to), y1), true);
                         line(&pts, Stroke::new(2.0, lane_color(s.color as usize)), dashed_at(i, s.from, false));
                     }
                 }
@@ -1041,7 +1065,7 @@ impl App {
                     let i = d - off;
                     let (Some(row), Some(commit)) = (v.graph.rows.get(i), commits.get(i)) else { continue };
                     let yc = origin.y + d as f32 * ROW + ROW / 2.0;
-                    let x = lx(row.col as usize);
+                    let x = lx(lanes.row(row.col as usize, i));
                     let color = lane_color(row.color as usize);
                     let fade = if !q.is_empty() && !match_set.contains(&i) { MIN_ALPHA } else { 1.0 };
                     if stash_of.contains_key(commit.sha.as_str()) {
@@ -1492,5 +1516,92 @@ mod tests {
         // The turn ends straight above the target.
         let before_last = pts[pts.len() - 2];
         assert!((before_last.x - 44.0).abs() < 0.01);
+    }
+}
+
+/// Where the graph's lanes are drawn when there are working changes: their dashed line gets a
+/// lane of its own above the checked-out commit (the left one, or the checked-out branch's when
+/// a branch is pinned), the lanes beside it move one to the right until that commit, and below
+/// it the checked-out branch's lane is the leftmost.
+#[derive(Clone, Copy, Debug)]
+struct WipLanes {
+    wip: bool,
+    pinned: bool,
+    head_lane: usize,
+    wip_lane: usize,
+    /// Rows (commit indexes) above the checked-out commit, beside the working changes' lane.
+    wip_end: usize,
+}
+
+impl WipLanes {
+    fn new(wip: bool, pinned: bool, head_lane: usize, head_idx: Option<usize>, commits: usize) -> WipLanes {
+        WipLanes { wip, pinned, head_lane, wip_lane: if pinned { head_lane } else { 0 }, wip_end: if wip { head_idx.unwrap_or(commits) } else { 0 } }
+    }
+
+    /// Lanes the graph needs besides the history's own.
+    fn extra(&self) -> u16 {
+        u16::from(self.wip_end > 0)
+    }
+
+    fn shifted(&self, lane: usize) -> usize {
+        if lane >= self.wip_lane { lane + 1 } else { lane }
+    }
+
+    fn history(&self, lane: usize) -> usize {
+        if !self.wip || self.pinned || self.head_lane == 0 {
+            lane
+        } else if lane == self.head_lane {
+            0
+        } else if lane < self.head_lane {
+            lane + 1
+        } else {
+            lane
+        }
+    }
+
+    /// Where `lane` is drawn in commit row `i`.
+    fn row(&self, lane: usize, i: usize) -> usize {
+        if i < self.wip_end { self.shifted(lane) } else { self.history(lane) }
+    }
+
+    /// Where `lane` comes in at the top of commit row `i` (from the row above).
+    fn top(&self, lane: usize, i: usize) -> usize {
+        if self.wip_end > 0 && i <= self.wip_end { self.shifted(lane) } else { self.history(lane) }
+    }
+
+    /// Whether row `i`'s label connector to its node crosses the working changes' line.
+    fn crosses_wip(&self, lane: usize, i: usize) -> bool {
+        i < self.wip_end && lane >= self.wip_lane
+    }
+}
+
+#[cfg(test)]
+mod wip_lane_tests {
+    use super::WipLanes;
+
+    #[test]
+    fn working_changes_get_a_lane_of_their_own_above_the_checked_out_commit() {
+        // Head is the third commit, on lane 1; nothing pinned.
+        let l = WipLanes::new(true, false, 1, Some(2), 10);
+        assert_eq!((l.wip_lane, l.extra()), (0, 1));
+        // Above the head everything moves right past lane 0.
+        assert_eq!((l.row(0, 0), l.row(1, 1)), (1, 2));
+        // From the head down, the head's lane is leftmost and the lanes left of it move over.
+        assert_eq!((l.row(1, 2), l.row(0, 2), l.row(2, 5)), (0, 1, 2));
+        // The head row's lines come in from where the row above drew them.
+        assert_eq!((l.top(1, 2), l.top(1, 3)), (2, 0));
+        assert!(l.crosses_wip(0, 1) && !l.crosses_wip(0, 2));
+    }
+
+    #[test]
+    fn a_pinned_branch_keeps_its_lane_and_no_changes_change_nothing() {
+        let pinned = WipLanes::new(true, true, 2, Some(3), 10);
+        assert_eq!(pinned.wip_lane, 2);
+        assert_eq!((pinned.row(1, 0), pinned.row(2, 0), pinned.row(2, 4)), (1, 3, 2));
+        let clean = WipLanes::new(false, false, 1, Some(2), 10);
+        assert_eq!((clean.extra(), clean.row(1, 0), clean.row(1, 5)), (0, 1, 1));
+        // Head on the first row: no shifted rows, the head's lane still leftmost.
+        let top = WipLanes::new(true, false, 1, Some(0), 10);
+        assert_eq!((top.extra(), top.row(1, 0), top.row(0, 0)), (0, 0, 1));
     }
 }
