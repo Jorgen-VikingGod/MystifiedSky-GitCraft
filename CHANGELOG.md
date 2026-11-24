@@ -82,6 +82,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Security
 
+- Update the Rust cookie and URL libraries to address two new security advisories.
 - Limit GitCraft hosting credentials to explicit network commands and refuse editor saves that resolve outside the repository.
 
 - Review untracked AI context before sending it, omit known credential files and redact common token formats.
