@@ -98,15 +98,38 @@ impl Changes {
     }
 }
 
+/// What [`save_changes_within`] returns when another window held the lock all the while.
+pub const LOCK_BUSY: &str = "The preferences are being saved by another GitCraft window.";
+
 /// Write `changes` into the preferences file as it is now on disk, so what another GitCraft
 /// window saved in the meantime is kept, and return the merged document. Other processes
 /// wait on the lock file beside it while this one reads and writes.
 pub fn save_changes(path: &Path, changes: &Changes) -> Result<Value, String> {
+    save_changes_within(path, changes, None)
+}
+
+/// [`save_changes`], waiting at most `wait` for the lock (`None`: as long as it takes), so a
+/// window that saves while another one holds the lock stays responsive and tries again later.
+/// Gives [`LOCK_BUSY`] when the wait ran out.
+pub fn save_changes_within(path: &Path, changes: &Changes, wait: Option<std::time::Duration>) -> Result<Value, String> {
     let _guard = ACCESS.lock().unwrap_or_else(|error| error.into_inner());
     let parent = path.parent().ok_or("Settings path has no parent")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path.with_extension("json.lock")).map_err(|error| error.to_string())?;
-    lock.lock().map_err(|error| format!("Could not lock the preferences: {error}"))?;
+    match wait {
+        None => lock.lock().map_err(|error| format!("Could not lock the preferences: {error}"))?,
+        Some(wait) => {
+            let until = std::time::Instant::now() + wait;
+            loop {
+                match lock.try_lock() {
+                    Ok(()) => break,
+                    Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(fs::TryLockError::WouldBlock) => return Err(LOCK_BUSY.into()),
+                    Err(fs::TryLockError::Error(error)) => return Err(format!("Could not lock the preferences: {error}")),
+                }
+            }
+        }
+    }
     let mut doc = match fs::read(path) {
         Ok(bytes) => match parse(&bytes) {
             Some(doc) => {
@@ -143,6 +166,23 @@ mod tests {
         let quarantined = fs::read_dir(temp.path()).unwrap().flatten().find(|entry| entry.file_name().to_string_lossy().starts_with("settings.corrupt-")).unwrap();
         assert_eq!(fs::read(quarantined.path()).unwrap(), b"damaged preferences");
         assert_eq!(load(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn a_held_lock_makes_a_bounded_save_give_up_quickly() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let mut changes = Changes::default();
+        changes.settings.insert("zoom".into(), Some(serde_json::json!(1.5)));
+        // Another window holds the lock (a separate open file, as another process would).
+        let held = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path.with_extension("json.lock")).unwrap();
+        held.lock().unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(save_changes_within(&path, &changes, Some(std::time::Duration::from_millis(50))).unwrap_err(), LOCK_BUSY);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!path.exists(), "nothing written without the lock");
+        held.unlock().unwrap();
+        assert_eq!(save_changes_within(&path, &changes, Some(std::time::Duration::from_millis(50))).unwrap()["settings"]["zoom"], 1.5);
     }
 
     #[test]

@@ -147,7 +147,16 @@ jobs:
           else
             cargo build --release --locked -p gitcraft --target "$TARGET"
           fi
-          cargo packager --release -p gitcraft --formats "$FORMATS" --binaries-dir "$bin_dir" --out-dir "$bin_dir/bundle/packager"
+          # cargo-packager 0.11.8 parses --binaries-dir without using it: --target is what points it
+          # at target/<triple>/release. It also changes into crates/gitcraft before packaging, so the
+          # output folder is made absolute here.
+          out_dir="$PWD/$bin_dir/bundle/packager"
+          mkdir -p "$out_dir"
+          cargo packager --release -p gitcraft --target "$TARGET" --formats "$FORMATS" --out-dir "$out_dir"
+          if ! compgen -G "$out_dir/*" >/dev/null; then
+            echo "::error::cargo packager left nothing in $out_dir."
+            exit 1
+          fi
           # The packager makes no RPM packages.
           if [[ "$RPM" == true ]]; then
             cargo install cargo-generate-rpm --locked --version 0.21.1

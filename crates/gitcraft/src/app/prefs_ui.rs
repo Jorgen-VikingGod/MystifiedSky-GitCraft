@@ -33,12 +33,11 @@ pub struct PrefsUi {
     pub section: String,
     /// What text fields hold while they are being edited.
     pub buffers: HashMap<String, String>,
-    pub config: HashMap<String, Loaded<HashMap<String, String>>>,
-    pub account: Option<Loaded<gitcraft_core::accounts::AccountInfo>>,
+    /// Fields edited but not saved yet (by buffer id): saved when the section changes or
+    /// Preferences close, as they would be when the field loses focus.
+    pub pending: HashMap<String, (Target, Pending)>,
     pub versions: Option<Loaded<gitcraft_core::prefs::Versions>>,
-    pub statuses: Option<Loaded<Vec<gitcraft_core::hosting::ServiceStatus>>>,
     pub service: String,
-    pub busy: Option<String>,
     pub models: Option<(String, Loaded<Vec<gitcraft_core::ai_models::Model>>)>,
     pub test: Option<(String, bool, String)>,
     pub program: Option<(String, String, Result<String, String>)>,
@@ -46,6 +45,24 @@ pub struct PrefsUi {
     pub lfs: Option<gitcraft_core::manage::LfsInfo>,
     pub sparse: Option<gitcraft_core::manage::SparseInfo>,
     pub submodules: Option<Vec<gitcraft_core::manage::Submodule>>,
+}
+
+/// What Preferences read and run, kept on the app rather than in [`PrefsUi`], which is taken out
+/// while Preferences are drawn: reads asked for and tasks started while drawing land here.
+#[derive(Default)]
+pub struct PrefsData {
+    pub config: HashMap<String, Loaded<HashMap<String, String>>>,
+    pub account: Option<Loaded<gitcraft_core::accounts::AccountInfo>>,
+    pub statuses: Option<Loaded<Vec<gitcraft_core::hosting::ServiceStatus>>>,
+    /// The preferences task running, which turns its buttons off.
+    pub busy: Option<String>,
+}
+
+/// How a field's edit is saved.
+#[derive(Clone, Copy, Debug)]
+pub enum Pending {
+    Text,
+    Number(f64, f64),
 }
 
 const EDITORS: [(&str, &str); 11] = super::external_tools::EDITORS;
@@ -166,6 +183,34 @@ impl App {
             ui.service = "github".into();
         }
         self.prefs = Some(ui);
+        self.prefs_data = PrefsData::default();
+    }
+
+    /// Save fields edited but not saved yet (their focus is gone with the section or the screen).
+    fn save_pending(&mut self, pui: &mut PrefsUi) {
+        for (id, (t, kind)) in std::mem::take(&mut pui.pending) {
+            let Some(v) = pui.buffers.remove(&id) else { continue };
+            let current = self.pref(&t);
+            match kind {
+                Pending::Text => {
+                    let now = match &current {
+                        Value::String(s) => s.clone(),
+                        Value::Null => String::new(),
+                        v => v.to_string(),
+                    };
+                    if v != now {
+                        self.set_pref(&t, Value::String(v));
+                    }
+                }
+                Pending::Number(min, max) => {
+                    let now = current.as_f64().unwrap_or(0.0);
+                    let n = v.trim().parse::<f64>().unwrap_or(now).clamp(min, max);
+                    if (n - now).abs() > f64::EPSILON {
+                        self.set_pref(&t, json!(n));
+                    }
+                }
+            }
+        }
     }
 
     /// A preference's current value.
@@ -184,7 +229,7 @@ impl App {
             Target::Repo(path, k) => self.repo_pref(path, k).unwrap_or(Value::Null),
             Target::Config(scope, path, k) => {
                 let key = format!("{scope}|{}", path.clone().unwrap_or_default());
-                match self.prefs.as_ref().and_then(|p| p.config.get(&key)) {
+                match self.prefs_data.config.get(&key) {
                     Some(Loaded::Ready(m)) => m.get(k).map(|v| Value::String(v.clone())).unwrap_or(Value::Null),
                     _ => Value::Null,
                 }
@@ -247,10 +292,8 @@ impl App {
                         if let Err(e) = r {
                             app.toast(false, e);
                         }
-                        if let Some(p) = app.prefs.as_mut() {
-                            p.config.clear();
-                            p.account = None;
-                        }
+                        app.prefs_data.config.clear();
+                        app.prefs_data.account = None;
                     }))
                 });
             }
@@ -269,16 +312,14 @@ impl App {
                 }
                 i[k] = value;
                 self.settings.set("integrations", i);
-                if let Some(p) = self.prefs.as_mut() {
-                    p.statuses = None;
-                }
+                self.prefs_data.statuses = None;
             }
         }
     }
 
     fn want_config(&mut self, scope: &str, path: Option<String>, keys: &[&str]) {
         let key = format!("{scope}|{}", path.clone().unwrap_or_default());
-        let Some(p) = self.prefs.as_mut() else { return };
+        let p = &mut self.prefs_data;
         if p.config.contains_key(&key) {
             return;
         }
@@ -288,15 +329,13 @@ impl App {
         self.spawn(move || {
             let m = gitcraft_core::prefs::config_get(path.as_deref().map(Path::new), &scope, &keys);
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                if let Some(p) = app.prefs.as_mut() {
-                    p.config.insert(key, Loaded::Ready(m));
-                }
+                app.prefs_data.config.insert(key, Loaded::Ready(m));
             }))
         });
     }
 
     fn want_account(&mut self) {
-        let Some(p) = self.prefs.as_mut() else { return };
+        let p = &mut self.prefs_data;
         if p.account.is_some() {
             return;
         }
@@ -304,15 +343,13 @@ impl App {
         self.spawn(|| {
             let info = gitcraft_core::accounts::info(Path::new("."));
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                if let Some(p) = app.prefs.as_mut() {
-                    p.account = Some(Loaded::Ready(info));
-                }
+                app.prefs_data.account = Some(Loaded::Ready(info));
             }))
         });
     }
 
     fn want_statuses(&mut self) {
-        let Some(p) = self.prefs.as_mut() else { return };
+        let p = &mut self.prefs_data;
         if p.statuses.is_some() {
             return;
         }
@@ -321,24 +358,18 @@ impl App {
             let handles: Vec<_> = SERVICES.iter().map(|s| std::thread::spawn(move || gitcraft_core::hosting::status(s.id))).collect();
             let list: Vec<_> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                if let Some(p) = app.prefs.as_mut() {
-                    p.statuses = Some(Loaded::Ready(list));
-                }
+                app.prefs_data.statuses = Some(Loaded::Ready(list));
             }))
         });
     }
 
     /// Run a preferences task away from the window; `done` gets its answer.
     fn prefs_task<T: Send + 'static>(&mut self, busy: &str, job: impl FnOnce() -> Result<T, String> + Send + 'static, done: impl FnOnce(&mut App, T) + Send + 'static) {
-        if let Some(p) = self.prefs.as_mut() {
-            p.busy = Some(busy.to_owned());
-        }
+        self.prefs_data.busy = Some(busy.to_owned());
         self.spawn(move || {
             let r = job();
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                if let Some(p) = app.prefs.as_mut() {
-                    p.busy = None;
-                }
+                app.prefs_data.busy = None;
                 match r {
                     Ok(v) => done(app, v),
                     Err(e) => app.toast(false, e),
@@ -356,6 +387,7 @@ impl App {
         let tab_path = self.active_tab().and_then(|t| t.path().map(str::to_owned));
         let tab_title = self.active_tab().map(|t| t.title.clone()).unwrap_or_default();
         let mut close = false;
+        let section_before = pui.section.clone();
         // Not constrained to the screen: egui would move an area that ends up taller than the room
         // below the menu bar up over the menus.
         egui::Area::new(egui::Id::NULL.with("prefs")).order(egui::Order::Foreground).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
@@ -451,6 +483,10 @@ impl App {
                 }
                 ui.add_space(16.0);
             });
+            // Edits in the section left are saved, as a click elsewhere would save them.
+            if pui.section != section_before {
+                self.save_pending(&mut pui);
+            }
             let body = Rect::from_min_max(pos2(nav.right() + 1.0, area.top()), area.max);
             let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
             bui.set_clip_rect(body);
@@ -470,7 +506,9 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.dialog.is_none() && !ctx.egui_wants_keyboard_input() {
             close = true;
         }
-        if !close {
+        if close {
+            self.save_pending(&mut pui);
+        } else {
             self.prefs = Some(pui);
         }
     }
@@ -604,9 +642,13 @@ impl App {
         if !resp.has_focus() && !commit && *buf != current {
             *buf = current.clone();
         }
+        if resp.has_focus() && *buf != current {
+            pui.pending.insert(id.clone(), (t.clone(), Pending::Text));
+        }
         if commit {
             let v = buf.clone();
             pui.buffers.remove(&id);
+            pui.pending.remove(&id);
             if v != current {
                 self.set_pref(&t, Value::String(v));
             }
@@ -629,9 +671,13 @@ impl App {
         if !focused && !lost && *buf != current {
             *buf = current.clone();
         }
+        if focused && *buf != current {
+            pui.pending.insert(id.clone(), (t.clone(), Pending::Text));
+        }
         if lost {
             let v = buf.clone();
             pui.buffers.remove(&id);
+            pui.pending.remove(&id);
             if v != current {
                 self.set_pref(&t, Value::String(v));
             }
@@ -648,9 +694,13 @@ impl App {
         if !resp.has_focus() && !commit && *buf != shown {
             *buf = shown.clone();
         }
+        if resp.has_focus() && *buf != shown {
+            pui.pending.insert(id.clone(), (t.clone(), Pending::Number(min, max)));
+        }
         if commit {
             let n = buf.trim().parse::<f64>().unwrap_or(current).clamp(min, max);
             pui.buffers.remove(&id);
+            pui.pending.remove(&id);
             if (n - current).abs() > f64::EPSILON {
                 self.set_pref(&t, json!(n));
             }
@@ -747,7 +797,7 @@ impl App {
                 h(ui, "SSH");
                 note(ui, "Used when a remote's address starts with git@ or ssh://. With the local SSH agent, Git uses your system's SSH setup (~/.ssh/config and the agent); otherwise it uses the key below.");
                 self.want_account();
-                let acc = match &pui.account {
+                let acc = match &self.prefs_data.account {
                     Some(Loaded::Ready(a)) => Some((a.ssh_keygen, a.gcm, a.credential_helper.clone(), a.email.clone(), a.ssh_keys.iter().map(|k| (k.path.clone(), k.kind.clone(), k.public.clone())).collect::<Vec<_>>())),
                     _ => None,
                 };
@@ -1025,7 +1075,7 @@ impl App {
         let active = self.settings.get_root::<Value>("activeProfile");
         let mut sorted: Vec<(usize, Value)> = profiles.into_iter().enumerate().collect();
         sorted.sort_by(|a, b| a.1["name"].as_str().unwrap_or("").cmp(b.1["name"].as_str().unwrap_or("")));
-        let account = match &pui.account {
+        let account = match &self.prefs_data.account {
             Some(Loaded::Ready(a)) => Some((a.name.clone(), a.email.clone())),
             _ => None,
         };
@@ -1088,11 +1138,11 @@ impl App {
         note(ui, "Connect your services to see pull requests and issues in the left panel and the Launchpad, clone your repositories, create pull requests, add SSH keys, and let Git push and pull over HTTPS with the same sign-in. Tokens are kept in the system's credential store.");
         self.want_statuses();
         self.want_account();
-        let statuses: Vec<gitcraft_core::hosting::ServiceStatus> = match &pui.statuses {
+        let statuses: Vec<gitcraft_core::hosting::ServiceStatus> = match &self.prefs_data.statuses {
             Some(Loaded::Ready(s)) => s.clone(),
             _ => Vec::new(),
         };
-        let loading = matches!(pui.statuses, Some(Loaded::Loading));
+        let loading = matches!(self.prefs_data.statuses, Some(Loaded::Loading));
         ui.horizontal_top(|ui| {
             let (list, _) = ui.allocate_exact_size(vec2(230.0, 520.0), Sense::hover());
             ui.painter().rect(list, CornerRadius::same(4), c.white(0.02), Stroke::new(1.0, c.white(0.08)), StrokeKind::Inside);
@@ -1150,12 +1200,12 @@ impl App {
                     row(ui, label, help, None, None, false, |ui| self.text(ui, pui, Target::Integration(k.to_string()), placeholder, false, false));
                 }
                 let connected = st.as_ref().is_some_and(|x| x.connected);
-                let busy = pui.busy.is_some();
+                let busy = self.prefs_data.busy.is_some();
                 if !connected && (svc.browser || svc.gh) {
                     row(ui, "Connect", if svc.browser { "Opens your browser to sign in (through Git Credential Manager, which Git uses too)." } else { "" }, None, None, false, |ui| {
                         let id = svc.id;
                         let label = svc.label;
-                        if svc.browser && pbutton(ui, &if pui.busy.as_deref() == Some("browser") { "Waiting for the browser…".to_owned() } else { format!("Connect {label}") }, Kind::Primary, !busy && ready) {
+                        if svc.browser && pbutton(ui, &if self.prefs_data.busy.as_deref() == Some("browser") { "Waiting for the browser…".to_owned() } else { format!("Connect {label}") }, Kind::Primary, !busy && ready) {
                             self.sign_in(id, "browser", label);
                         }
                         if svc.gh && pbutton(ui, "Use GitHub CLI sign-in", Kind::Default, !busy) {
@@ -1191,7 +1241,7 @@ impl App {
                     });
                 }
                 if svc.hosting {
-                    let key = self.public_key(pui);
+                    let key = self.public_key();
                     let help = match &key {
                         Some((path, _)) => format!("This computer's key: {path}"),
                         None => "No SSH settings detected. You can generate an SSH key in Preferences > SSH.".into(),
@@ -1218,8 +1268,8 @@ impl App {
         });
     }
 
-    fn public_key(&self, pui: &PrefsUi) -> Option<(String, String)> {
-        let Some(Loaded::Ready(acc)) = &pui.account else { return None };
+    fn public_key(&self) -> Option<(String, String)> {
+        let Some(Loaded::Ready(acc)) = &self.prefs_data.account else { return None };
         let chosen = self.settings.string("sshPublicKey", "");
         if !chosen.is_empty() {
             if let Ok(public) = gitcraft_core::accounts::read_public_key(&chosen) {
@@ -1240,9 +1290,7 @@ impl App {
             gitcraft_core::hosting::whoami_id(id)
         }, move |app, _| {
             app.toast(true, if method == "gh" { format!("Connected to {label} with the GitHub CLI sign-in") } else { format!("Connected to {label}") });
-            if let Some(p) = app.prefs.as_mut() {
-                p.statuses = None;
-            }
+            app.prefs_data.statuses = None;
             app.hosting_changed();
         });
     }
@@ -1256,9 +1304,7 @@ impl App {
             Ok(())
         }, move |app, ()| {
             app.toast(true, ok);
-            if let Some(p) = app.prefs.as_mut() {
-                p.statuses = None;
-            }
+            app.prefs_data.statuses = None;
             app.hosting_changed();
         });
     }
@@ -1277,7 +1323,7 @@ impl App {
         let ssh = val(self, "gpg.format") == "ssh";
         let program = Some(val(self, "gpg.program")).filter(|p| !p.is_empty()).unwrap_or_else(|| "gpg".into());
         let signing = val(self, "user.signingkey");
-        let acc = match &pui.account {
+        let acc = match &self.prefs_data.account {
             Some(Loaded::Ready(a)) => Some((a.gpg, a.name.clone(), a.email.clone(), a.gpg_keys.iter().map(|k| (k.id.clone(), k.fingerprint.clone(), k.uid.clone())).collect::<Vec<_>>())),
             _ => None,
         };
@@ -1322,7 +1368,7 @@ impl App {
                     self.set_pref(&g("user.signingkey"), json!(v));
                 }
                 if pbutton(ui, "Reload GPG keys", Kind::Default, true) {
-                    pui.account = None;
+                    self.prefs_data.account = None;
                 }
             });
             row(ui, "Copy GPG Public Key", "", None, None, false, |ui| {
@@ -1337,7 +1383,7 @@ impl App {
             row(ui, "Generate new GPG Key", "This will create a 4096 bit key with the name and email in your current profile that expires in 2 years.\nThis will also be set as your active signing key.", None, None, false, |ui| {
                 let buf = pui.buffers.entry("gpg_pass".into()).or_default();
                 field(ui, buf, "Passphrase (optional)", 200.0, true, FontId::proportional(13.0), "gpg_pass");
-                let busy = pui.busy.as_deref() == Some("gpg");
+                let busy = self.prefs_data.busy.as_deref() == Some("gpg");
                 if pbutton(ui, if busy { "Generating…" } else { "Generate" }, Kind::Default, !busy && acc.as_ref().is_some_and(|a| a.0)) {
                     let pass = pui.buffers.remove("gpg_pass").unwrap_or_default();
                     let (prog, name, email) = (program.clone(), acc.as_ref().map(|a| a.1.clone()).unwrap_or_default(), acc.as_ref().map(|a| a.2.clone()).unwrap_or_default());
@@ -1418,7 +1464,7 @@ impl App {
             row(ui, "Program", &help, None, err.as_deref(), true, |ui| {
                 let w = ui.available_width() - 150.0;
                 ui.allocate_ui(vec2(w, 28.0), |ui| self.path(ui, pui, a("cliPath"), "Program path", false, &format!("Choose the {cli_name} executable")));
-                let finding = pui.busy.as_deref() == Some("find");
+                let finding = self.prefs_data.busy.as_deref() == Some("find");
                 if pbutton(ui, if finding { "Finding…" } else { "Find Automatically" }, Kind::Default, !finding) {
                     let prov = provider.clone();
                     self.prefs_task("find", move || {
@@ -1447,7 +1493,7 @@ impl App {
                 let w = ui.available_width() - 190.0;
                 field(ui, buf, if optional { "optional key" } else { "paste key" }, w, true, FontId::proportional(13.0), "ai_key");
                 let key = buf.trim().to_owned();
-                let saving = pui.busy.as_deref() == Some("key");
+                let saving = self.prefs_data.busy.as_deref() == Some("key");
                 if pbutton(ui, "Save", Kind::Default, !key.is_empty() && !saving) {
                     pui.buffers.remove("ai_key");
                     self.save_ai_key(&provider, key);
@@ -1515,7 +1561,7 @@ impl App {
             _ => (if cli { "Checks your subscription sign-in and makes a short test request without repository data.".into() } else { "Tests the default model with the same connection and response mode used by AI features.".into() }, None),
         };
         row(ui, "Test Connection", &help, None, err, false, |ui| {
-            let testing = pui.busy.as_deref() == Some("test");
+            let testing = self.prefs_data.busy.as_deref() == Some("test");
             if pbutton(ui, if testing { "Testing…" } else { "Test Connection" }, Kind::Default, !testing && ai.enabled) {
                 let config = self.ai_config();
                 let sig = signature.clone();

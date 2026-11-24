@@ -45,7 +45,7 @@ pub enum Loaded<T> {
 }
 
 /// What the tab shows besides its data.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct TabUi {
     pub selection: Option<Selection>,
     pub multi: Vec<String>,
@@ -137,6 +137,15 @@ pub struct RepoTab {
     pub diff_ui: super::diff::DiffUi,
     pub history_ui: super::history::HistoryUi,
     pub conflict_ui: super::conflict::ConflictUi,
+    /// What the tab showed at the end of the last frame with unsaved editor text, to go back
+    /// to when a move away is held for the unsaved-changes prompt.
+    pub guard: Option<TabUi>,
+    /// After a full read: the selected commit and how many commits were loaded before, paged
+    /// back in before the selection is given up.
+    restore: Option<(String, usize)>,
+    /// The running full read and page read, by their cancellable read ids.
+    reading: Option<String>,
+    paging: Option<String>,
     pub pr_ui: super::hosting::PrUi,
     pub agents: super::agents::AgentsUi,
 }
@@ -176,8 +185,45 @@ impl RepoTab {
             diff_ui: Default::default(),
             history_ui: Default::default(),
             conflict_ui: Default::default(),
+            guard: None,
+            restore: None,
+            reading: None,
+            paging: None,
             pr_ui: Default::default(),
             agents: Default::default(),
+        }
+    }
+
+    /// Whether more history is to be paged in: the initial amount (or all), and back to the depth
+    /// a commit selected before a full read was found at.
+    fn wants_more(&self, show_all: bool, initial: usize) -> bool {
+        let Some(v) = &self.view else { return false };
+        let len = v.data.commits.len();
+        v.history_cursor.is_some() && (show_all || len < initial || self.restore.as_ref().is_some_and(|(_, depth)| len < *depth))
+    }
+
+    /// A selection being paged back to: kept once its commit is loaded, given up when the
+    /// history is loaded as far as before (or has no more, or paging failed) without it.
+    fn settle_restore(&mut self, failed: bool) {
+        let Some((sha, depth)) = self.restore.clone() else { return };
+        if self.ui.selection != Some(Selection::Commit(sha.clone())) {
+            self.restore = None;
+            return;
+        }
+        let (len, more) = self.view.as_ref().map_or((0, false), |v| (v.data.commits.len(), v.history_cursor.is_some()));
+        let found = self.index.contains_key(&sha);
+        if failed || len >= depth || !more {
+            self.restore = None;
+            if !found {
+                self.ui.selection = None;
+            }
+        }
+    }
+
+    /// Stop the tab's running reads (the tab is closing).
+    pub fn cancel_reads(&mut self) {
+        for id in [self.reading.take(), self.paging.take()].into_iter().flatten() {
+            gitcraft_core::read_jobs::cancel(&id);
         }
     }
 
@@ -343,6 +389,13 @@ impl App {
             return;
         }
         if r.loading {
+            // Another filter or set of branches: the running read is of no use any more. A
+            // refresh of the same view lets it finish, so steady file changes can't starve it.
+            if r.requested.as_ref() != Some(&view)
+                && let Some(id) = &r.reading
+            {
+                gitcraft_core::read_jobs::cancel(id);
+            }
             r.again = true;
             return;
         }
@@ -351,7 +404,13 @@ impl App {
         r.deferred = None;
         let (path, generation) = (r.path.clone(), r.generation);
         r.requested = Some(view.clone());
-        self.spawn(move || Msg::Repo { tab, generation, result: Box::new(session::open_repo(&engine, &path, Some(max), Some(view))) });
+        let id = format!("repo:{tab}:{generation}");
+        r.reading = Some(id.clone());
+        // A page read for the history being replaced is of no use either.
+        if let Some(page) = r.paging.take() {
+            gitcraft_core::read_jobs::cancel(&page);
+        }
+        self.spawn(move || Msg::Repo { tab, generation, result: Box::new(gitcraft_core::read_jobs::scope(Some(id), || session::open_repo(&engine, &path, Some(max), Some(view)))) });
     }
 
     pub(crate) fn repo_loaded(&mut self, tab: u64, generation: u64, result: Result<RepoView, String>) {
@@ -360,10 +419,13 @@ impl App {
         let start_watch = {
             let Some(r) = self.repo_mut(tab) else { return };
             r.loading = false;
+            r.reading = None;
             if r.generation == generation {
                 let query = r.requested.take();
                 match result {
                     Ok(mut next) => {
+                        let loaded_before = r.view.as_ref().map_or(0, |v| v.data.commits.len()).max(r.restore.as_ref().map_or(0, |x| x.1));
+                        r.restore = None;
                         if let Some(prev) = r.view.take() {
                             // Keep the pages already loaded when the history itself didn't change:
                             // the same branches, read the same way, and the new first page is
@@ -388,7 +450,10 @@ impl App {
                             && !r.index.contains_key(&sha)
                             && !r.view.as_ref().is_some_and(|v| v.data.stashes.iter().any(|s| s.sha == sha))
                         {
-                            r.ui.selection = None;
+                            // An older commit: page back to where the history was loaded to
+                            // before giving the selection up.
+                            r.restore = Some((sha, loaded_before));
+                            r.settle_restore(false);
                         }
                     }
                     Err(e) => r.error = Some(e),
@@ -408,11 +473,7 @@ impl App {
             self.watch(tab);
         }
         // Load the rest of the initial history, or all of it, a page at a time.
-        if let Some(r) = self.repo(tab)
-            && let Some(v) = &r.view
-            && v.history_cursor.is_some()
-            && (show_all || v.data.commits.len() < initial)
-        {
+        if self.repo(tab).is_some_and(|r| r.wants_more(show_all, initial)) {
             self.load_more(tab);
         }
     }
@@ -428,7 +489,9 @@ impl App {
         r.page_loading = true;
         r.page_error = None;
         let (path, generation) = (r.path.clone(), r.generation);
-        self.spawn(move || Msg::Page { tab, generation, result: Box::new(session::history_page(&path, cursor, Some(max))) });
+        let id = format!("page:{tab}:{generation}:{}", super::unique_id());
+        r.paging = Some(id.clone());
+        self.spawn(move || Msg::Page { tab, generation, result: Box::new(gitcraft_core::read_jobs::scope(Some(id), || session::history_page(&path, cursor, Some(max)))) });
     }
 
     pub(crate) fn page_loaded(&mut self, tab: u64, generation: u64, result: Result<HistoryPage, String>) {
@@ -436,10 +499,11 @@ impl App {
         let initial = self.initial_commits();
         let Some(r) = self.repo_mut(tab) else { return };
         r.page_loading = false;
+        r.paging = None;
         if r.generation != generation {
             // An outdated page is dropped; paging goes on from the history shown, unless a full
             // read is running (it starts paging itself when it's done).
-            let more = !r.loading && r.view.as_ref().is_some_and(|v| v.history_cursor.is_some() && (show_all || v.data.commits.len() < initial));
+            let more = !r.loading && r.wants_more(show_all, initial);
             if more {
                 self.load_more(tab);
             }
@@ -454,12 +518,15 @@ impl App {
                 v.data.has_more = page.has_more;
                 v.history_cursor = page.history_cursor;
                 r.reindex();
-                let more = r.view.as_ref().is_some_and(|v| v.history_cursor.is_some() && (show_all || v.data.commits.len() < initial));
-                if more {
+                r.settle_restore(false);
+                if r.wants_more(show_all, initial) {
                     self.load_more(tab);
                 }
             }
-            Err(e) => r.page_error = Some(e),
+            Err(e) => {
+                r.page_error = Some(e);
+                r.settle_restore(true);
+            }
         }
     }
 
@@ -712,6 +779,9 @@ impl App {
         use super::dialogs::Dialog;
         // What the commit was made from: only that is cleared, so edits made while it ran stay.
         let submitted = if let Action::Commit { .. } = action { self.repo_mut(tab).and_then(|r| r.work.submitted.take()) } else { None };
+        if !result.ok && matches!(action, Action::SaveResolved { .. }) {
+            self.left_saved(tab, super::guard::Editor::Conflict, false);
+        }
         if result.ok {
             if let Action::SaveResolved { file, .. } = action {
                 self.conflict_resolved(tab, file);

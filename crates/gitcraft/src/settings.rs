@@ -263,12 +263,22 @@ impl Store {
             ctx.request_repaint_after(due - now);
             return Ok(());
         }
-        self.flush()
+        // Waiting briefly: a lock another window holds is tried again later, quietly.
+        match self.flush_within(Some(std::time::Duration::from_millis(50))) {
+            Err(e) if e == gitcraft_core::settings_file::LOCK_BUSY => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Write what has not been written yet (before quitting or restarting), waiting a few
+    /// seconds at most for another window's lock.
+    pub fn flush(&mut self) -> Result<(), String> {
+        self.flush_within(Some(std::time::Duration::from_secs(3)))
     }
 
     /// Write what has not been written yet. A failed write stays pending and is tried again
     /// a little later.
-    pub fn flush(&mut self) -> Result<(), String> {
+    fn flush_within(&mut self, wait: Option<std::time::Duration>) -> Result<(), String> {
         if self.due.is_none() {
             return Ok(());
         }
@@ -277,7 +287,7 @@ impl Store {
             self.due = None;
             return Ok(());
         };
-        match gitcraft_core::settings_file::save_changes(&path, &self.changes) {
+        match gitcraft_core::settings_file::save_changes_within(&path, &self.changes, wait) {
             Ok(merged) => {
                 self.changes = Changes::default();
                 self.due = None;
@@ -291,7 +301,9 @@ impl Store {
                 Ok(())
             }
             Err(e) => {
-                self.due = Some(Instant::now() + RETRY_AFTER);
+                // Another window's save is brief: try again soon.
+                let after = if e == gitcraft_core::settings_file::LOCK_BUSY { Duration::from_millis(250) } else { RETRY_AFTER };
+                self.due = Some(Instant::now() + after);
                 Err(e)
             }
         }

@@ -33,6 +33,11 @@ pub struct DiffCache {
     pub comparison: Option<(bool, Comparison)>,
     pub hl: Option<(bool, Vec<Runs>, Vec<Runs>)>,
     pub hunk_hl: Option<(bool, HashMap<(usize, usize), Runs>)>,
+    /// The comparison being worked out away from the window (whitespace, editor revision,
+    /// dark): asked once, and an answer for an earlier request is dropped.
+    pub comparing: Option<(bool, Option<(u64, u64)>, bool)>,
+    /// The hunk highlighting being worked out (dark).
+    pub highlighting: Option<bool>,
     pub images: Option<(Option<Vec<u8>>, Option<Vec<u8>>)>,
 }
 
@@ -40,6 +45,8 @@ pub struct DiffCache {
 #[derive(Default)]
 pub struct DiffUi {
     pub key: String,
+    /// The file this view is of, which a save writes to.
+    pub target: Option<DiffTarget>,
     pub file_view: bool,
     pub editing: bool,
     pub draft: Option<String>,
@@ -106,12 +113,34 @@ impl App {
         entry.lines = lines.map(Loaded::Ready);
     }
 
-    /// Save the editor's text to the working-folder copy.
-    pub(crate) fn save_draft(&mut self, tab: u64, utf8: bool) {
-        let Some(r) = self.repo_mut(tab) else { return };
-        let (Some(target), Some(draft)) = (r.ui.diff.clone(), r.diff_ui.draft.clone()) else { return };
+    /// Compare the two texts for the Inline and Split views and highlight them, away from the
+    /// window. Only the latest request for the entry fills it.
+    fn compare_later(&mut self, tab: u64, key: String, file: String, old: String, new: String, wanted: (bool, Option<(u64, u64)>, bool)) {
+        let Some(e) = self.diffs.get_mut(&(tab, key.clone())) else { return };
+        e.comparing = Some(wanted);
+        let generation = e.generation;
+        self.spawn(move || {
+            let (ignore_ws, edits, dark) = wanted;
+            let cmp = textdiff::compare(&old, &new, ignore_ws);
+            let hl_old = highlight::whole(&file, &old, dark);
+            let hl_new = highlight::whole(&file, &new, dark);
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                if let Some(e) = app.diffs.get_mut(&(tab, key)).filter(|e| e.generation == generation && e.comparing == Some(wanted)) {
+                    e.comparison = Some((ignore_ws, cmp));
+                    e.compared_edits = edits;
+                    e.hl = Some((dark, hl_old, hl_new));
+                    e.comparing = None;
+                }
+            }))
+        });
+    }
+
+    /// Save the editor's text to the working-folder copy. Returns whether a save was started.
+    pub(crate) fn save_draft(&mut self, tab: u64, utf8: bool) -> bool {
+        let Some(r) = self.repo_mut(tab) else { return false };
+        let (Some(target), Some(draft)) = (r.diff_ui.target.clone(), r.diff_ui.draft.clone()) else { return false };
         if r.diff_ui.saving {
-            return;
+            return false;
         }
         r.diff_ui.saving = true;
         let (path, token, editor, edits) = (r.path.clone(), r.diff_ui.token.clone(), r.diff_ui.editor, r.diff_ui.edits);
@@ -122,6 +151,7 @@ impl App {
             let token = result.is_ok().then(|| gitcraft_core::files::content_token(std::fs::read(dir.join(&target.file)).ok().as_deref()));
             super::Msg::Saved { tab, file: target.file, editor, edits, token, result }
         });
+        true
     }
 
     /// A save finished. It ends editing only if the same editor still shows that file with the
@@ -129,16 +159,18 @@ impl App {
     /// repository is read again either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn saved(&mut self, tab: u64, file: String, editor: u64, edits: u64, token: Option<String>, result: Result<(), String>) {
-        let same_editor = self.repo(tab).is_some_and(|r| r.diff_ui.editor == editor && r.ui.diff.as_ref().is_some_and(|t| t.file == file));
+        let same_editor = self.repo(tab).is_some_and(|r| r.diff_ui.editor == editor && r.diff_ui.target.as_ref().is_some_and(|t| t.file == file));
         if same_editor && let Some(r) = self.repo_mut(tab) {
             r.diff_ui.saving = false;
         }
         match result {
             Ok(()) => {
+                let mut all_saved = false;
                 if same_editor && let Some(r) = self.repo_mut(tab) {
                     if r.diff_ui.edits == edits {
                         r.diff_ui.draft = None;
                         r.diff_ui.editing = false;
+                        all_saved = true;
                     } else if token.is_some() {
                         r.diff_ui.token = token;
                     }
@@ -147,17 +179,25 @@ impl App {
                 self.toast(true, format!("Saved {name}"));
                 self.diff_changed(tab);
                 self.load_repo(tab);
+                // Edits made while saving are still unsaved: whatever waited for the save stays put.
+                self.left_saved(tab, super::guard::Editor::File, all_saved);
             }
             Err(e) if e.contains("ENCODING_UNREPRESENTABLE") || e.contains("ENCODING_DECODE_LOSS") => {
+                self.left_saved(tab, super::guard::Editor::File, false);
                 self.dialog = Some(super::dialogs::Dialog::confirm_with(
                     "Save this file as UTF-8?",
                     "The current encoding cannot represent every character. The original file is unchanged. Convert this file to UTF-8 with a byte-order mark to preserve your text?",
                     "Save as UTF-8",
                     false,
-                    move |app, _| app.save_draft(tab, true),
+                    move |app, _| {
+                        app.save_draft(tab, true);
+                    },
                 ));
             }
-            Err(e) => self.toast(false, e),
+            Err(e) => {
+                self.left_saved(tab, super::guard::Editor::File, false);
+                self.toast(false, e);
+            }
         }
     }
 
@@ -165,7 +205,11 @@ impl App {
         let c = p();
         let key0 = diff_key(target, false);
         if r.diff_ui.key != key0 {
-            r.diff_ui = DiffUi { key: key0, editor: super::unique_id(), ..Default::default() };
+            // Unsaved text of another file waits for the unsaved-changes prompt (`guard`).
+            if super::guard::file_dirty(&r.diff_ui) {
+                return;
+            }
+            r.diff_ui = DiffUi { key: key0, target: Some(target.clone()), editor: super::unique_id(), ..Default::default() };
         }
         let key = diff_key(target, r.diff_ui.allow_large);
         let cache = self.diffs.get(&(tab, key.clone()));
@@ -283,7 +327,9 @@ impl App {
         }
         if r.diff_ui.editing {
             if widgets::button(&mut left_ui, Kind::Success, Some(Icon::Save), "Save Changes", 22.0, r.diff_ui.draft.is_some()).tip("Save (Ctrl+S)").clicked() {
-                later.push(Box::new(move |app| app.save_draft(tab, false)));
+                later.push(Box::new(move |app| {
+                    app.save_draft(tab, false);
+                }));
             }
             if widgets::button(&mut left_ui, Kind::Default, None, "Cancel", 22.0, true).clicked() {
                 r.diff_ui.draft = None;
@@ -346,7 +392,9 @@ impl App {
         if !super::dialog_open(ui.ctx()) {
             let (esc, s_key, u_key, save) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::S) && i.modifiers.is_none(), i.key_pressed(egui::Key::U) && i.modifiers.is_none(), i.key_pressed(egui::Key::S) && i.modifiers.command));
             if save && r.diff_ui.editing && r.diff_ui.draft.is_some() {
-                later.push(Box::new(move |app| app.save_draft(tab, false)));
+                later.push(Box::new(move |app| {
+                    app.save_draft(tab, false);
+                }));
             }
             if !typing {
                 if esc && !r.diff_ui.editing {
@@ -397,9 +445,10 @@ impl App {
         if r.diff_ui.file_view {
             let shown = r.diff_ui.draft.clone().unwrap_or_else(|| v.new.clone().or_else(|| v.old.clone()).unwrap_or_default());
             if r.diff_ui.editing && can_edit_locked {
-                return editor(ui, &target.file, &mut r.diff_ui, shown, wrap, dark, self.settings.flag("editorLineNumbers", true));
+                return editor(ui, &target.file, &mut r.diff_ui, shown, wrap, dark, &self.editor_prefs());
             }
-            return file_lines(ui, &target.file, &shown, wrap, dark);
+            let prefs = self.editor_prefs();
+            return file_lines(ui, &target.file, &shown, wrap, dark, prefs.syntax, prefs.numbers);
         }
         if mode != "hunk" {
             let old = v.old.clone().unwrap_or_default();
@@ -409,19 +458,13 @@ impl App {
             // file as read, so an edit or Cancel compares again.
             let edits = r.diff_ui.draft.is_some().then_some((r.diff_ui.editor, r.diff_ui.edits));
             let comparison = match &cache.comparison {
-                Some((ws, cmp)) if *ws == ignore_ws && cache.compared_edits == edits => cmp,
+                Some((ws, cmp)) if *ws == ignore_ws && cache.compared_edits == edits && cache.hl.as_ref().is_some_and(|h| h.0 == dark) => cmp,
                 _ => {
-                    let (o, n, t, f) = (old, new, key.clone(), target.file.clone());
-                    later.push(Box::new(move |app| {
-                        let cmp = textdiff::compare(&o, &n, ignore_ws);
-                        let hl_old = highlight::whole(&f, &o, dark);
-                        let hl_new = highlight::whole(&f, &n, dark);
-                        if let Some(e) = app.diffs.get_mut(&(tab, t.clone())) {
-                            e.comparison = Some((ignore_ws, cmp));
-                            e.compared_edits = edits;
-                            e.hl = Some((dark, hl_old, hl_new));
-                        }
-                    }));
+                    let wanted = (ignore_ws, edits, dark);
+                    if cache.comparing != Some(wanted) {
+                        let (t, f) = (key.clone(), target.file.clone());
+                        later.push(Box::new(move |app| app.compare_later(tab, t, f, old, new, wanted)));
+                    }
                     return note(ui, "Comparing…", false);
                 }
             };
@@ -435,13 +478,21 @@ impl App {
         }
         let actions = (can_stage || can_unstage || matches!(target.source, DiffSource::Commit(_))) && !ignore_ws;
         let hunk_hl = cache.and_then(|c| c.hunk_hl.as_ref()).filter(|h| h.0 == dark).map(|h| &h.1);
-        if hunk_hl.is_none() && highlight::syntax_for(&target.file).is_some() {
+        if hunk_hl.is_none() && cache.is_some_and(|c| c.highlighting != Some(dark)) && highlight::syntax_for(&target.file).is_some() {
             let (l, f, k) = (lines.clone(), target.file.clone(), key.clone());
             later.push(Box::new(move |app| {
-                let hl = hunk_highlights(&f, &l, dark);
-                if let Some(e) = app.diffs.get_mut(&(tab, k)) {
-                    e.hunk_hl = Some((dark, hl));
-                }
+                let Some(e) = app.diffs.get_mut(&(tab, k.clone())) else { return };
+                e.highlighting = Some(dark);
+                let generation = e.generation;
+                app.spawn(move || {
+                    let hl = hunk_highlights(&f, &l, dark);
+                    super::Msg::Apply(Box::new(move |app: &mut App| {
+                        if let Some(e) = app.diffs.get_mut(&(tab, k)).filter(|e| e.generation == generation && e.highlighting == Some(dark)) {
+                            e.hunk_hl = Some((dark, hl));
+                            e.highlighting = None;
+                        }
+                    }))
+                });
             }));
         }
         self.hunk_view(ui, tab, r, target, lines, hunk_hl, actions, wrap, next, prev, later);
@@ -805,12 +856,13 @@ pub fn compare_view(ui: &mut Ui, id: egui::Id, cmp: &Comparison, _file: &str, sp
 }
 
 /// The file, read-only, with line numbers and colours.
-fn file_lines(ui: &mut Ui, file: &str, text: &str, wrap: bool, dark: bool) {
+#[allow(clippy::too_many_arguments)]
+fn file_lines(ui: &mut Ui, file: &str, text: &str, wrap: bool, dark: bool, syntax: bool, numbers: bool) {
     let c = p();
     let font = FontId::monospace(12.0);
-    let id = ui.scope_id().with(("file_hl", file, text.len(), dark));
+    let id = ui.scope_id().with(("file_hl", file, text.len(), dark, syntax));
     let runs: std::sync::Arc<Vec<Runs>> = ui.data_mut(|d| d.get_temp(id)).unwrap_or_else(|| {
-        let r = std::sync::Arc::new(highlight::whole(file, text, dark));
+        let r = std::sync::Arc::new(if syntax { highlight::whole(file, text, dark) } else { Vec::new() });
         ui.data_mut(|d| d.insert_temp(id, r.clone()));
         r
     });
@@ -831,7 +883,9 @@ fn file_lines(ui: &mut Ui, file: &str, text: &str, wrap: bool, dark: bool) {
         let origin = ui.min_rect().min;
         for i in visible_rows(&tops, viewport.top(), viewport.bottom()) {
             let y = origin.y + tops[i];
-            ui.painter().text(pos2(origin.x + GUTTER - 8.0, y + LINE / 2.0), Align2::RIGHT_CENTER, (i + 1).to_string(), font.clone(), c.white(0.33));
+            if numbers {
+                ui.painter().text(pos2(origin.x + GUTTER - 8.0, y + LINE / 2.0), Align2::RIGHT_CENTER, (i + 1).to_string(), font.clone(), c.white(0.33));
+            }
             let mut job = highlight::job(lines[i], runs.get(i), c.white(0.85), font.clone(), &[]);
             if wrap {
                 job.wrap = egui::text::TextWrapping { max_width: columns as f32 * cw + 0.5, break_anywhere: true, ..Default::default() };
@@ -848,21 +902,99 @@ fn file_lines(ui: &mut Ui, file: &str, text: &str, wrap: bool, dark: bool) {
     });
 }
 
+/// Preferences > Editor, as the file editor uses them.
+pub struct EditorPrefs {
+    pub size: f32,
+    /// Tab inserts spaces up to the next multiple of this.
+    pub tab: usize,
+    /// New lines typed or pasted are CRLF.
+    pub crlf: bool,
+    pub syntax: bool,
+    pub numbers: bool,
+}
+
+impl App {
+    pub(crate) fn editor_prefs(&self) -> EditorPrefs {
+        EditorPrefs {
+            size: (self.settings.num("editorFontSize", 12.0) as f32).clamp(8.0, 32.0),
+            tab: (self.settings.num("editorTabSize", 4.0) as usize).clamp(1, 16),
+            crlf: self.settings.string("editorEol", if cfg!(windows) { "crlf" } else { "lf" }) == "crlf",
+            syntax: self.settings.flag("editorSyntax", true),
+            numbers: self.settings.flag("editorLineNumbers", true),
+        }
+    }
+}
+
+/// The byte where character `at` starts.
+fn byte_at(text: &str, at: usize) -> usize {
+    text.char_indices().nth(at).map_or(text.len(), |(b, _)| b)
+}
+
+/// Replace the characters `from..to` with `spaces` up to the next tab stop. Returns the text
+/// and the character the cursor moves to.
+pub fn insert_tab(text: &str, from: usize, to: usize, tab: usize) -> (String, usize) {
+    let (start, end) = (byte_at(text, from), byte_at(text, to));
+    let column = text[..start].rsplit('\n').next().map_or(0, |l| l.chars().count());
+    let n = tab - column % tab;
+    let mut out = String::with_capacity(text.len() + n);
+    out.push_str(&text[..start]);
+    out.extend(std::iter::repeat_n(' ', n));
+    out.push_str(&text[end..]);
+    (out, from + n)
+}
+
+/// After an edit from `before` to `after`: line breaks the edit added become CRLF. Returns the
+/// text and the cursor (a character index) moved past the `\r`s added before it.
+pub fn crlf_typed(before: &str, after: &str, cursor: usize) -> (String, usize) {
+    let prefix = before.bytes().zip(after.bytes()).take_while(|(a, b)| a == b).count();
+    let mut prefix = prefix;
+    while !after.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let room = before.len().min(after.len()) - prefix;
+    let mut suffix = before.bytes().rev().zip(after.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+    while !after.is_char_boundary(after.len() - suffix) {
+        suffix -= 1;
+    }
+    let added = &after[prefix..after.len() - suffix];
+    if !added.contains('\n') {
+        return (after.to_owned(), cursor);
+    }
+    let mut out = String::with_capacity(after.len() + 8);
+    out.push_str(&after[..prefix]);
+    let mut moved = 0;
+    let mut char_at = after[..prefix].chars().count();
+    let mut prev = after[..prefix].chars().next_back();
+    for ch in added.chars() {
+        if ch == '\n' && prev != Some('\r') {
+            out.push('\r');
+            if char_at < cursor {
+                moved += 1;
+            }
+        }
+        out.push(ch);
+        prev = Some(ch);
+        char_at += 1;
+    }
+    out.push_str(&after[after.len() - suffix..]);
+    (out, cursor + moved)
+}
+
 /// The editor: the working-folder copy with colours; Ctrl+S saves.
-fn editor(ui: &mut Ui, file: &str, d: &mut DiffUi, shown: String, wrap: bool, dark: bool, numbers: bool) {
+fn editor(ui: &mut Ui, file: &str, d: &mut DiffUi, shown: String, wrap: bool, dark: bool, prefs: &EditorPrefs) {
     let c = p();
     let mut text = shown;
     let hash = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut h);
+        (&text, prefs.syntax).hash(&mut h);
         h.finish()
     };
     if d.draft_hl.as_ref().is_none_or(|(h, dk, _)| *h != hash || *dk != dark) {
-        d.draft_hl = Some((hash, dark, highlight::whole(file, &text, dark)));
+        d.draft_hl = Some((hash, dark, if prefs.syntax { highlight::whole(file, &text, dark) } else { Vec::new() }));
     }
     let runs = d.draft_hl.as_ref().map(|h| h.2.clone()).unwrap_or_default();
-    let font = FontId::monospace(12.0);
+    let font = FontId::monospace(prefs.size);
     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, width: f32| {
         let s = buf.as_str();
         let mut job = egui::text::LayoutJob::default();
@@ -883,19 +1015,69 @@ fn editor(ui: &mut Ui, file: &str, d: &mut DiffUi, shown: String, wrap: bool, da
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let lines = text.lines().count().max(1);
+    let id = egui::Id::NULL.with(("file_editor", file));
+    // Tab indents with spaces (the field would type a tab character).
+    let tab = ui.memory(|m| m.has_focus(id)) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    let before = text.clone();
     egui::ScrollArea::both().id_salt(("editor", file)).auto_shrink([false, false]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            if numbers {
+            if prefs.numbers {
                 let gutter = (1..=lines).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
                 ui.add(egui::Label::new(egui::RichText::new(gutter).font(font.clone()).color(c.white(0.33))).selectable(false));
             }
-            let edit = egui::TextEdit::multiline(&mut text).code_editor().frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(lines).layouter(&mut layouter);
-            if ui.add(edit).changed() {
+            let edit = egui::TextEdit::multiline(&mut text).id(id).code_editor().font(font.clone()).frame(egui::Frame::NONE).desired_width(f32::INFINITY).desired_rows(lines).layouter(&mut layouter);
+            let mut out = edit.show(ui);
+            let mut changed = out.response.changed();
+            let mut cursor = out.cursor_range.map(|r| r.sorted_cursors());
+            if tab && let Some([from, to]) = cursor {
+                let (next, at) = insert_tab(&text, from.index.0, to.index.0, prefs.tab);
+                text = next;
+                cursor = Some([egui::text::CCursor::new(at); 2]);
+                changed = true;
+            }
+            if changed && prefs.crlf {
+                let at = cursor.map_or(0, |[_, to]| to.index.0);
+                let (next, at) = crlf_typed(&before, &text, at);
+                if next.len() != text.len() {
+                    text = next;
+                    cursor = Some([egui::text::CCursor::new(at); 2]);
+                }
+            }
+            if changed {
+                if let Some([from, to]) = cursor {
+                    out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(from, to)));
+                    out.state.store(ui.ctx(), id);
+                }
                 d.draft = Some(text.clone());
                 d.edits += 1;
             }
         });
     });
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::{crlf_typed, insert_tab};
+
+    #[test]
+    fn tab_inserts_spaces_to_the_next_stop() {
+        assert_eq!(insert_tab("ab", 2, 2, 4), ("ab  ".into(), 4));
+        assert_eq!(insert_tab("x\nab", 3, 3, 4), ("x\na   b".into(), 6));
+        // A selection is replaced.
+        assert_eq!(insert_tab("abcd", 1, 3, 2), ("a d".into(), 2));
+        assert_eq!(insert_tab("é", 1, 1, 4), ("é   ".into(), 4));
+    }
+
+    #[test]
+    fn typed_line_breaks_follow_crlf() {
+        // Enter in the middle of "a\r\nbc": "b\nc" becomes "b\r\nc", cursor after it.
+        assert_eq!(crlf_typed("a\r\nbc", "a\r\nb\nc", 5), ("a\r\nb\r\nc".into(), 6));
+        // A paste of two lines.
+        assert_eq!(crlf_typed("ab", "a1\n2\nb", 5), ("a1\r\n2\r\nb".into(), 7));
+        // Breaks already there, and edits without breaks, are left alone.
+        assert_eq!(crlf_typed("a\nb", "a\nbc", 4), ("a\nbc".into(), 4));
+        assert_eq!(crlf_typed("ab", "a\r\nb", 3), ("a\r\nb".into(), 3));
+    }
 }
 
 /// Before and after pictures side by side.

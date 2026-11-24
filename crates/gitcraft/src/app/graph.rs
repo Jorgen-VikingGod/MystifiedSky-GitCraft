@@ -385,15 +385,27 @@ impl App {
         let mut handle = |ui: &mut Ui, col: Col, right: f32, width: f32| {
             let rect = Rect::from_min_max(pos2(right - 3.0, head_rect.top()), pos2(right + 3.0, head_rect.bottom()));
             let id = ui.scope_id().with(("col_resize", col.key()));
-            let resp = ui.interact(rect, id, Sense::click_and_drag());
+            // A slider for keyboards and screen readers: Left / Right resize (Shift: by more),
+            // Delete or Backspace resets, as do double-clicks.
+            let resp = ui.interact(rect, id, Sense::click_and_drag() | Sense::FOCUSABLE);
+            let name = format!("{} column width", col.key());
+            resp.widget_info(|| egui::WidgetInfo::slider(true, f64::from(width.round()), &name));
+            ui.ctx().accesskit_node_builder(resp.id, |node| node.set_description("Drag, or use the Left and Right arrow keys, to resize. Double-click or press Delete to reset."));
+            let focused = resp.has_focus();
             if resp.hovered() || resp.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            }
+            if resp.hovered() || resp.dragged() || focused {
                 ui.painter().rect_filled(Rect::from_center_size(rect.center(), vec2(2.0, rect.height())), CornerRadius::ZERO, ACCENT);
             }
-            if resp.double_clicked() {
+            let keys = if focused { ui.input(|i| (i.key_pressed(egui::Key::ArrowLeft), i.key_pressed(egui::Key::ArrowRight), i.modifiers.shift, i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))) } else { (false, false, false, false) };
+            let step = if keys.2 { 50.0 } else { 10.0 };
+            if resp.double_clicked() || keys.3 {
                 resize = Some((col, None));
             } else if resp.dragged() && resp.drag_delta().x != 0.0 {
                 resize = Some((col, Some(width + resp.drag_delta().x)));
+            } else if keys.0 || keys.1 {
+                resize = Some((col, Some(width + if keys.1 { step } else { -step })));
             }
         };
         if cols.refs {

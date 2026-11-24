@@ -60,11 +60,36 @@ pub fn is_newer(current: &str, candidate: &str) -> bool {
     matches!((parse_version(current), parse_version(candidate)), (Some(a), Some(b)) if b > a)
 }
 
+/// How a Windows copy was installed, so an update comes as the same kind of installer and
+/// replaces it instead of installing a second copy beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsInstaller {
+    Nsis,
+    Msi,
+}
+
+/// The NSIS installer leaves `uninstall.exe` beside GitCraft (cargo-packager's and the earlier
+/// web-view release's alike); the MSI installs none.
+pub fn windows_installer_in(dir: &Path) -> WindowsInstaller {
+    if dir.join("uninstall.exe").is_file() { WindowsInstaller::Nsis } else { WindowsInstaller::Msi }
+}
+
+fn this_windows_installer() -> WindowsInstaller {
+    std::env::current_exe().ok().and_then(|exe| exe.parent().map(windows_installer_in)).unwrap_or(WindowsInstaller::Nsis)
+}
+
 /// The feed keys for this build, most specific first.
 pub fn platform_keys() -> Vec<&'static str> {
     let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
-    match (std::env::consts::OS, arch) {
+    let installer = if cfg!(windows) { this_windows_installer() } else { WindowsInstaller::Nsis };
+    keys_for(std::env::consts::OS, arch, installer)
+}
+
+fn keys_for(os: &str, arch: &str, installer: WindowsInstaller) -> Vec<&'static str> {
+    match (os, arch) {
+        // Only x64 ships an MSI; an ARM64 copy is always an NSIS install.
         ("windows", "aarch64") => vec!["windows-aarch64-nsis", "windows-aarch64"],
+        ("windows", _) if installer == WindowsInstaller::Msi => vec!["windows-x86_64-msi"],
         ("windows", _) => vec!["windows-x86_64-nsis", "windows-x86_64"],
         ("macos", "aarch64") => vec!["darwin-aarch64"],
         ("macos", _) => vec!["darwin-x86_64"],
@@ -200,6 +225,16 @@ pub fn download(update: &Update, progress: impl Fn(Option<u32>) + Send) -> Resul
 pub fn install(file: &Path) -> Result<bool, String> {
     #[cfg(windows)]
     {
+        if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("msi")) {
+            // msiexec doesn't start GitCraft again: a hidden PowerShell waits for it, then does.
+            let exe = std::env::current_exe().map_err(|e| format!("Could not find GitCraft: {e}"))?;
+            let script = msi_script(file, &exe);
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script.as_str()])
+                .spawn()
+                .map_err(|e| format!("Could not start the installer: {e}"))?;
+            return Ok(false);
+        }
         // Passive install with the progress bar only, then start GitCraft again.
         std::process::Command::new(file).args(["/P", "/R"]).spawn().map_err(|e| format!("Could not start the installer: {e}"))?;
         Ok(false)
@@ -221,6 +256,22 @@ pub fn install(file: &Path) -> Result<bool, String> {
         let _ = file;
         Err("Updates aren't available on this platform.".into())
     }
+}
+
+/// A PowerShell quoted string.
+fn ps_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// The PowerShell that installs an MSI update with only a progress bar, waits for it, and starts
+/// GitCraft again when it succeeded (or a restart is pending).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msi_script(file: &Path, exe: &Path) -> String {
+    let package = ps_quote(&format!("\"{}\"", file.display()));
+    format!(
+        "$p = Start-Process -FilePath msiexec.exe -ArgumentList '/i',{package},'/passive','/norestart' -Wait -PassThru; if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {{ Start-Process -FilePath {} }}",
+        ps_quote(&exe.display().to_string())
+    )
 }
 
 /// What to start after an update was installed.
@@ -311,6 +362,28 @@ fn install_bundle(file: &Path, bundle: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_copy_updates_with_the_installer_it_came_from() {
+        let nsis = tempfile::tempdir().unwrap();
+        std::fs::write(nsis.path().join("uninstall.exe"), b"").unwrap();
+        let msi = tempfile::tempdir().unwrap();
+        assert_eq!(windows_installer_in(nsis.path()), WindowsInstaller::Nsis);
+        assert_eq!(windows_installer_in(msi.path()), WindowsInstaller::Msi);
+        assert_eq!(keys_for("windows", "x86_64", WindowsInstaller::Msi), ["windows-x86_64-msi"]);
+        assert_eq!(keys_for("windows", "x86_64", WindowsInstaller::Nsis), ["windows-x86_64-nsis", "windows-x86_64"]);
+        // ARM64 ships no MSI.
+        assert_eq!(keys_for("windows", "aarch64", WindowsInstaller::Msi), ["windows-aarch64-nsis", "windows-aarch64"]);
+        assert_eq!(keys_for("linux", "x86_64", WindowsInstaller::Msi), ["linux-x86_64"]);
+    }
+
+    #[test]
+    fn the_msi_script_quotes_its_paths() {
+        let script = msi_script(Path::new("C:/Temp/it's/GitCraft.msi"), Path::new("C:/Program Files/GitCraft/gitcraft.exe"));
+        assert!(script.contains("'\"C:/Temp/it''s/GitCraft.msi\"'"), "{script}");
+        assert!(script.contains("Start-Process -FilePath 'C:/Program Files/GitCraft/gitcraft.exe'"), "{script}");
+        assert!(script.contains("'/passive','/norestart'"));
+    }
 
     #[test]
     fn versions_compare_by_number() {

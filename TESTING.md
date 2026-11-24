@@ -52,11 +52,11 @@ cargo run --locked
 
 The app is in [crates/gitcraft](crates/gitcraft) and its back end in [crates/gitcraft-core](crates/gitcraft-core). Take a picture of the window without touching your preferences with `cargo run --locked -- --screenshot shot.png --theme light`; `--shot-view` shows a particular view first (see `--help`).
 
-The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup.
+The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Fixtures must not depend on your Git configuration: to check, run the suite with `GIT_CONFIG_GLOBAL` pointing at a file that sets `core.autocrlf = true`, as many Windows machines do.
 
 Only one GitCraft window runs per user: a second launch hands its folder or `gitcraft://clone?url=` link to the running one and exits. To try that without touching your own preferences, start both launches with `HOME` (on Windows, `LOCALAPPDATA`) pointing at an empty folder, for example `HOME=/tmp/gc cargo run -- repo-a`, then `HOME=/tmp/gc cargo run -- repo-b`: the second command exits at once and `repo-b` opens as a tab in the first window. `--new-window` opens a separate window instead.
 
-To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>`: `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
+To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
 
 ## Choose the right checks
 
@@ -81,7 +81,9 @@ Use a disposable repository with a local bare remote. Record the app version, OS
 - Stash and restore work; fetch, pull, and push against the local remote.
 - Verify graph scrolling, author images, diffs, file watching, and multiple repository tabs.
 - Open the terminal, external editor, and native file dialogs. Verify preferences persist.
+- Edit a file without saving, then open another file, close the tab, close the window, and restart for an update: each asks to Save, Discard, or Cancel, and Cancel keeps the text. Do the same with conflict picks.
+- In the terminal, drag, double-click, and triple-click to select, copy with Ctrl+Shift+C (Cmd+C on macOS), and check that wide characters such as `漢字` and combined accents keep the caret and selection on their columns.
 - Check credential storage, notifications, and optional AI integrations in a real signed-in desktop session.
-- Install a previous published version, check for updates, restart into the new version, and verify the displayed version. Test Linux package upgrades separately from AppImage updates.
+- Install a previous published version, check for updates, restart into the new version, and verify the displayed version. On Windows x64 do this with the NSIS installer and with the MSI: each must update in place (one entry in Installed apps) and reopen with the earlier window size and position. Test Linux package upgrades separately from AppImage updates.
 
 Report failures with reproduction steps and sanitized logs. Keep platform validation marked as in progress until the packaged desktop flows have been exercised.

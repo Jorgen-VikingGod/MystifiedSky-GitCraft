@@ -152,7 +152,7 @@ impl App {
     }
 
     /// The app's mark, name and version, centred.
-    fn about_dialog(&mut self) {
+    pub(crate) fn about_dialog(&mut self) {
         let draw = |_: &mut super::App, ui: &mut egui::Ui| {
             let c = super::theme::p();
             ui.vertical_centered(|ui| {

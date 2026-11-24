@@ -146,18 +146,16 @@ impl App {
             return;
         }
         let Some(file) = self.update.file.clone() else { return };
-        if self.repos.values().any(|r| r.diff_ui.editing && r.diff_ui.draft.is_some()) {
-            self.dialog = Some(super::dialogs::Dialog::confirm_with("Discard unsaved changes?", "A file you are editing has unsaved changes. Restarting to install the update discards them.", "Discard and Restart", true, |app, _| {
-                for r in app.repos.values_mut() {
-                    r.diff_ui.draft = None;
-                    r.diff_ui.editing = false;
-                }
-                let ctx = app.ctx.clone();
-                app.install_update(&ctx);
-            }));
+        // Save or Discard first; Discard leaves the text in place until GitCraft has closed, so
+        // a failure below keeps it.
+        if self.ask_unsaved(Vec::new(), false, Box::new(|app: &mut App| {
+            let ctx = app.ctx.clone();
+            app.install_update(&ctx);
+        })) {
             return;
         }
         if let Err(e) = self.settings.flush() {
+            self.discarding = false;
             self.toast(false, format!("Could not save preferences before restarting: {e}"));
             return;
         }
@@ -168,6 +166,7 @@ impl App {
         match updates::install(&file) {
             Ok(true) => {
                 if let Err(e) = updates::relaunch() {
+                    self.discarding = false;
                     self.toast(false, e);
                     return;
                 }
@@ -175,7 +174,10 @@ impl App {
             }
             // The installer closes GitCraft and opens the new version itself.
             Ok(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Err(e) => self.toast(false, format!("The update could not be installed: {e}")),
+            Err(e) => {
+                self.discarding = false;
+                self.toast(false, format!("The update could not be installed: {e}"));
+            }
         }
     }
 }

@@ -55,6 +55,56 @@ pub struct PrUi {
     pub review_text: String,
     pub reviewers: String,
     pub review_note: Option<(bool, String)>,
+    /// File review: the changed file shown, the line picked for a comment and the comment.
+    pub review_file: String,
+    pub review_line: Option<ReviewLine>,
+    pub inline_text: String,
+}
+
+/// A line of a changed file's patch, as a review comment addresses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewLine {
+    /// "LEFT" (the old version) or "RIGHT" (the new one).
+    pub side: &'static str,
+    pub number: u64,
+    pub text: String,
+    /// A context line's number in the old version.
+    pub previous: Option<u64>,
+}
+
+/// The commentable lines of a unified patch: removed lines on the left, added and context lines
+/// on the right.
+pub fn review_lines(patch: &str) -> Vec<ReviewLine> {
+    let mut out = Vec::new();
+    let (mut left, mut right) = (0u64, 0u64);
+    for text in patch.split('\n') {
+        if let Some(rest) = text.strip_prefix("@@ -") {
+            let mut parts = rest.split(' ');
+            let num = |p: Option<&str>| p.and_then(|p| p.trim_start_matches(['-', '+']).split(',').next()).and_then(|n| n.parse::<u64>().ok());
+            if let (Some(l), Some(r)) = (num(parts.next()), num(parts.next())) {
+                (left, right) = (l, r);
+            }
+        } else if text.starts_with('+') {
+            out.push(ReviewLine { side: "RIGHT", number: right, text: text.to_owned(), previous: None });
+            right += 1;
+        } else if text.starts_with('-') {
+            out.push(ReviewLine { side: "LEFT", number: left, text: text.to_owned(), previous: None });
+            left += 1;
+        } else if text.starts_with(' ') {
+            out.push(ReviewLine { side: "RIGHT", number: right, text: text.to_owned(), previous: Some(left) });
+            right += 1;
+            left += 1;
+        }
+    }
+    out
+}
+
+/// What a review request was sent from: the review message or the reviewers field.
+pub enum Sent {
+    Message(String),
+    Reviewers(String),
+    /// An inline comment: its text, and the line it was on.
+    Inline(String, ReviewLine),
 }
 
 #[derive(Default)]
@@ -810,9 +860,8 @@ impl App {
                         widgets::field(ui, &mut pu.reviewers, "Comma-separated usernames", w, 26.0, 12.5);
                         if widgets::button(ui, Kind::Default, None, "Request review", 24.0, !pu.busy && !pu.reviewers.trim().is_empty()).clicked() {
                             let names: Vec<String> = pu.reviewers.split(',').map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).collect();
-                            pu.reviewers.clear();
-                            let sha2 = sha.clone();
-                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "requestReviewers", "reviewers": names}))));
+                            let (sha2, sent) = (sha.clone(), Sent::Reviewers(pu.reviewers.clone()));
+                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "requestReviewers", "reviewers": names}), sent)));
                         }
                     });
                     egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.line)).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
@@ -820,17 +869,95 @@ impl App {
                     });
                     ui.horizontal(|ui| {
                         if widgets::button(ui, Kind::Default, None, "Approve", 24.0, !pu.busy).clicked() {
-                            let body = std::mem::take(&mut pu.review_text);
-                            let sha2 = sha.clone();
-                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "approve", "body": body}))));
+                            let body = pu.review_text.clone();
+                            let (sha2, sent) = (sha.clone(), Sent::Message(body.clone()));
+                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "approve", "body": body}), sent)));
                         }
                         if widgets::button(ui, Kind::Default, None, "Request changes", 24.0, !pu.busy && !pu.review_text.trim().is_empty()).clicked() {
-                            let body = std::mem::take(&mut pu.review_text);
-                            let sha2 = sha.clone();
-                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "requestChanges", "body": body}))));
+                            let body = pu.review_text.clone();
+                            let (sha2, sent) = (sha.clone(), Sent::Message(body.clone()));
+                            later.push(Box::new(move |app| app.submit_review(tab, number, sha2, serde_json::json!({"kind": "requestChanges", "body": body}), sent)));
                         }
                     });
                 }
+                self.file_review(ui, tab, number, &sha, &s(pr, "url"), open, d, pu, later);
+            }
+        }
+    }
+
+    /// The changed files of a review: a file's patch lines, a line picked for an inline
+    /// comment, and the comments on the file.
+    #[allow(clippy::too_many_arguments)]
+    fn file_review(&self, ui: &mut Ui, tab: u64, number: u64, sha: &str, url: &str, open: bool, d: &Value, pu: &mut PrUi, later: &mut Vec<Later>) {
+        let c = p();
+        let files = d["files"].as_array().cloned().unwrap_or_default();
+        if !files.is_empty() {
+            ui.add_space(6.0);
+            let shown = if pu.review_file.is_empty() { "Choose a file".to_owned() } else { pu.review_file.clone() };
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Changed file").size(12.5).color(c.fg2));
+                egui::ComboBox::from_id_salt(("review_file", tab, number)).selected_text(shown).width(ui.available_width().min(420.0)).show_ui(ui, |ui| {
+                    for f in &files {
+                        let path = f["path"].as_str().unwrap_or("").to_owned();
+                        if ui.selectable_label(pu.review_file == path, &path).clicked() && pu.review_file != path {
+                            pu.review_file = path;
+                            pu.review_line = None;
+                            pu.inline_text.clear();
+                        }
+                    }
+                });
+            });
+        }
+        let patch = files.iter().find(|f| f["path"].as_str() == Some(pu.review_file.as_str())).and_then(|f| f["patch"].as_str());
+        if let Some(patch) = patch {
+            let lines = review_lines(patch);
+            const MAX: usize = 1500;
+            egui::Frame::new().stroke(Stroke::new(1.0, c.line)).show(ui, |ui| {
+                egui::ScrollArea::both().id_salt(("review_lines", tab, number, &pu.review_file)).max_height(210.0).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for line in lines.iter().take(MAX) {
+                        let picked = pu.review_line.as_ref() == Some(line);
+                        let color = match line.text.chars().next() {
+                            Some('+') => GOOD,
+                            Some('-') => REMOVED,
+                            _ => c.fg,
+                        };
+                        let text = egui::RichText::new(format!("{:>5} {}", line.number, line.text)).font(FontId::monospace(11.5)).color(color);
+                        let resp = ui.add_enabled(open, egui::Button::selectable(picked, text).frame_when_inactive(false));
+                        let resp = if open { resp.on_hover_text("Select this line for an inline comment") } else { resp };
+                        if resp.clicked() {
+                            pu.review_line = Some(line.clone());
+                        }
+                    }
+                    if lines.len() > MAX {
+                        ui.label(egui::RichText::new("Showing the first 1,500 diff lines. Open the pull request in your browser to review later lines.").size(12.0).color(c.fg3));
+                    }
+                });
+            });
+        }
+        if open && let Some(line) = pu.review_line.clone() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(format!("Comment on line {} ({})", line.number, if line.side == "RIGHT" { "new" } else { "old" })).size(12.5).color(c.fg2));
+            egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.line)).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(&mut pu.inline_text).frame(egui::Frame::NONE).hint_text("Inline comment").desired_rows(2).desired_width(f32::INFINITY));
+            });
+            if widgets::button(ui, Kind::Default, None, "Post inline comment", 24.0, !pu.busy && !pu.inline_text.trim().is_empty()).clicked() {
+                let body = pu.inline_text.clone();
+                let action = serde_json::json!({"kind": "inline", "path": pu.review_file, "side": line.side, "line": line.number, "body": body, "old_line": line.previous});
+                let (sha2, sent) = (sha.to_owned(), Sent::Inline(body, line));
+                later.push(Box::new(move |app| app.submit_review(tab, number, sha2, action, sent)));
+            }
+        }
+        for cm in d["comments"].as_array().cloned().unwrap_or_default() {
+            let path = cm["path"].as_str().unwrap_or("");
+            if !pu.review_file.is_empty() && path != pu.review_file {
+                continue;
+            }
+            let at = cm["line"].as_u64().map(|l| format!(" · line {l}")).unwrap_or_default();
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(format!("{} · {path}{at}", cm["author"].as_str().unwrap_or(""))).size(12.5).color(c.fg2));
+            if let Some(link) = super::markdown::show(ui, cm["body"].as_str().unwrap_or(""), url) {
+                later.push(Box::new(move |app| app.open_url(&link)));
             }
         }
     }
@@ -854,7 +981,9 @@ impl App {
         });
     }
 
-    fn submit_review(&mut self, tab: u64, number: u64, sha: String, action: Value) {
+    /// Send a review. The field it came from is cleared only once it was sent, and only if it
+    /// still holds what was sent, so a failure or newer typing keeps the text.
+    fn submit_review(&mut self, tab: u64, number: u64, sha: String, action: Value, sent: Sent) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let gitlab = self.gitlab();
         let Ok(action) = serde_json::from_value::<gitcraft_core::hosting::ReviewAction>(action) else { return };
@@ -866,6 +995,17 @@ impl App {
             super::Msg::Apply(Box::new(move |app: &mut App| {
                 if let Some(t) = app.repo_mut(tab) {
                     t.pr_ui.busy = false;
+                    if r.is_ok() && t.pr_ui.number == number {
+                        match &sent {
+                            Sent::Message(text) if t.pr_ui.review_text == *text => t.pr_ui.review_text.clear(),
+                            Sent::Reviewers(text) if t.pr_ui.reviewers == *text => t.pr_ui.reviewers.clear(),
+                            Sent::Inline(text, line) if t.pr_ui.inline_text == *text && t.pr_ui.review_line.as_ref() == Some(line) => {
+                                t.pr_ui.inline_text.clear();
+                                t.pr_ui.review_line = None;
+                            }
+                            _ => {}
+                        }
+                    }
                     t.pr_ui.review_note = Some(match &r {
                         Ok(()) => (true, "Review updated.".into()),
                         Err(e) => (false, e.clone()),
@@ -1419,5 +1559,18 @@ impl App {
         }
         let (prs, _, _) = self.launchpad_items();
         Some((prs.iter().find(|p| p["draft"].as_bool().unwrap_or(false)).map(|p| format!("{}#{} is in draft", s(p, "repo"), p["number"].as_u64().unwrap_or(0))).unwrap_or_else(|| "No Pull Requests".into()), true))
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::review_lines;
+
+    #[test]
+    fn patch_lines_get_their_side_and_number() {
+        let lines = review_lines("@@ -10,3 +20,4 @@ fn x\n keep\n-old\n+new\n+more\n\\ No newline at end of file");
+        let got: Vec<(&str, u64, Option<u64>)> = lines.iter().map(|l| (l.side, l.number, l.previous)).collect();
+        assert_eq!(got, [("RIGHT", 20, Some(10)), ("LEFT", 11, None), ("RIGHT", 21, None), ("RIGHT", 22, None)]);
+        assert!(review_lines("").is_empty());
     }
 }

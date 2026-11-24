@@ -212,12 +212,12 @@ impl App {
             }
             if ui.button("Close other tabs").clicked() {
                 let others: Vec<u64> = self.tabs.iter().filter(|t| t.id != id).map(|t| t.id).collect();
-                others.into_iter().for_each(|o| self.close_tab(o));
+                self.close_tabs(others);
             }
             if ui.button("Close tabs to the right").clicked() {
                 let at = self.tabs.iter().position(|t| t.id == id).unwrap_or(0);
                 let right: Vec<u64> = self.tabs[at + 1..].iter().map(|t| t.id).collect();
-                right.into_iter().for_each(|o| self.close_tab(o));
+                self.close_tabs(right);
             }
             ui.separator();
             ui.add_enabled(false, egui::Button::new("Rename tab"));

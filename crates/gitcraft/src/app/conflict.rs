@@ -176,17 +176,18 @@ impl App {
     }
 
     /// Save the output: resolved when no markers remain, otherwise just written.
-    fn save_conflict(&mut self, tab: u64, utf8: bool) {
-        let Some(r) = self.repo_mut(tab) else { return };
+    /// Returns whether a save was started.
+    pub(crate) fn save_conflict(&mut self, tab: u64, utf8: bool) -> bool {
+        let Some(r) = self.repo_mut(tab) else { return false };
         let cu = &mut r.conflict_ui;
         let Some(info) = cu.base.clone().or_else(|| match &cu.info {
             Some(Loaded::Ready(i)) => Some(i.clone()),
             _ => None,
         }) else {
-            return;
+            return false;
         };
         if cu.saving {
-            return;
+            return false;
         }
         if info.decoding_loss && !utf8 {
             self.dialog = Some(super::dialogs::Dialog::confirm_with(
@@ -194,9 +195,11 @@ impl App {
                 "Some original bytes could not be decoded. Choose the correct repository encoding to preserve them. Converting this output to UTF-8 saves the text shown and can replace undecodable bytes.",
                 "Convert output to UTF-8",
                 false,
-                move |app, _| app.save_conflict(tab, true),
+                move |app, _| {
+                    app.save_conflict(tab, true);
+                },
             ));
-            return;
+            return false;
         }
         let working = info.working.clone().unwrap_or_default();
         let segments = parse_conflicts(&working, info.marker_size);
@@ -218,6 +221,7 @@ impl App {
                 Err(e) => Msg::ConflictSaved { tab, result: Err(e) },
             });
         }
+        true
     }
 
     /// The file was saved and marked resolved: close its editor.
@@ -232,6 +236,7 @@ impl App {
                 r.ui.conflict = None;
             }
         }
+        self.left_saved(tab, super::guard::Editor::Conflict, true);
     }
 
     pub(crate) fn conflict_saved(&mut self, tab: u64, result: Result<String, String>) {
@@ -248,23 +253,34 @@ impl App {
                 }
                 self.toast(true, text);
                 self.load_repo(tab);
+                self.left_saved(tab, super::guard::Editor::Conflict, true);
             }
             Err(e) if e.contains("ENCODING_UNREPRESENTABLE") || e.contains("ENCODING_DECODE_LOSS") => {
+                self.left_saved(tab, super::guard::Editor::Conflict, false);
                 self.dialog = Some(super::dialogs::Dialog::confirm_with(
                     "Save this file as UTF-8?",
                     "The current encoding cannot preserve all characters. The original file is unchanged. Convert it to UTF-8 with a byte-order mark?",
                     "Save as UTF-8",
                     false,
-                    move |app, _| app.save_conflict(tab, true),
+                    move |app, _| {
+                        app.save_conflict(tab, true);
+                    },
                 ));
             }
-            Err(e) => self.toast(false, e),
+            Err(e) => {
+                self.left_saved(tab, super::guard::Editor::Conflict, false);
+                self.toast(false, e);
+            }
         }
     }
 
     pub(crate) fn conflict_view(&self, ui: &mut Ui, tab: u64, r: &mut RepoTab, file: &str, later: &mut Vec<Later>) {
         let c = p();
         if r.conflict_ui.file != file {
+            // Picks for another file wait for the unsaved-changes prompt (`guard`).
+            if super::guard::conflict_dirty(&r.conflict_ui) {
+                return;
+            }
             r.conflict_ui = ConflictUi { file: file.to_owned(), editor: super::unique_id(), ..Default::default() };
         }
         if r.conflict_ui.info.is_none() {
@@ -307,7 +323,9 @@ impl App {
             let f = file.to_owned();
             later.push(Box::new(move |app| {
                 app.act(tab, Action::TakeSide { paths: vec![f], side: "theirs".into() });
+                // Taking a side replaces the picks, so closing asks nothing.
                 if let Some(r) = app.repo_mut(tab) {
+                    super::guard::discard_conflict(&mut r.conflict_ui);
                     r.ui.conflict = None;
                 }
             }));
@@ -316,7 +334,9 @@ impl App {
             let f = file.to_owned();
             later.push(Box::new(move |app| {
                 app.act(tab, Action::TakeSide { paths: vec![f], side: "ours".into() });
+                // Taking a side replaces the picks, so closing asks nothing.
                 if let Some(r) = app.repo_mut(tab) {
+                    super::guard::discard_conflict(&mut r.conflict_ui);
                     r.ui.conflict = None;
                 }
             }));
@@ -497,7 +517,9 @@ impl App {
         let mut orow = oui.new_child(egui::UiBuilder::new().max_rect(ohead.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
         orow.spacing_mut().item_spacing.x = 6.0;
         if widgets::button(&mut orow, Kind::Success, None, if all_done { "Save Output" } else { "Create Conflict Chunks" }, 22.0, !saving).clicked() {
-            later.push(Box::new(move |app| app.save_conflict(tab, false)));
+            later.push(Box::new(move |app| {
+                app.save_conflict(tab, false);
+            }));
         }
         if widgets::button(&mut orow, Kind::Default, None, "Reset", 22.0, !saving).clicked() {
             cu.picks.clear();

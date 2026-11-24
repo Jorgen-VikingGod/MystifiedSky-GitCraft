@@ -37,7 +37,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Changed
 
 - In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
-- GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts and profiles, and installed copies update to it as usual. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`.
+- GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts, profiles and window size and position, and installed copies update to it as usual, a copy installed from the MSI with the MSI. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`.
 - Document source setup with dependency installation scripts disabled.
 - Build the desktop interface with a faster bundler.
 - Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.

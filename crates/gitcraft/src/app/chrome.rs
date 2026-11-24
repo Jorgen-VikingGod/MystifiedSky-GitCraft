@@ -212,7 +212,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Recent").size(12.0).color(c.fg));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled(false, egui::Label::new(RichText::new("Repository Management").size(12.0).color(c.link)));
+                if link(ui, "Repository Management", 12.0).clicked() {
+                    self.repo_management_dialog();
+                }
             });
         });
         let recents: Vec<String> = self.settings.recents().into_iter().filter(|r| r.to_lowercase().contains(&needle)).collect();
@@ -274,6 +276,18 @@ impl App {
         }
         if link(ui, "Release Notes", 12.0).clicked() {
             self.open_url(RELEASES_URL);
+        }
+        if link(ui, "Documentation ↗", 12.0).clicked() {
+            self.open_url("https://git-scm.com/docs");
+        }
+        if link(ui, "Keyboard Shortcuts", 12.0).clicked() {
+            self.shortcuts_dialog();
+        }
+        if link(ui, "Feature Plan", 12.0).clicked() {
+            self.plan_dialog();
+        }
+        if link(ui, "About GitCraft", 12.0).clicked() {
+            self.about_dialog();
         }
     }
 

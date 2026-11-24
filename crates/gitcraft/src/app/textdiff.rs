@@ -150,12 +150,24 @@ pub struct Comparison {
     pub removed: usize,
 }
 
+/// A text's lines as shown, and the keys they are compared by. A last line without a line
+/// break compares unlike the same line with one, so adding or removing the final newline shows
+/// as a change (`str::lines` gives the same lines either way).
+fn keyed_lines(text: &str, ignore_ws: bool) -> (Vec<String>, Vec<String>) {
+    let (mut shown, mut keys) = (Vec::new(), Vec::new());
+    for raw in text.split_inclusive('\n') {
+        let ended = raw.ends_with('\n');
+        let line = raw.strip_suffix('\n').map_or(raw, |l| l.strip_suffix('\r').unwrap_or(l));
+        let key = if ignore_ws { line.trim() } else { line };
+        keys.push(if ended { key.to_owned() } else { format!("{key}\0no newline") });
+        shown.push(line.to_owned());
+    }
+    (shown, keys)
+}
+
 pub fn compare(old: &str, new: &str, ignore_ws: bool) -> Comparison {
-    let old_lines: Vec<String> = old.lines().map(str::to_owned).collect();
-    let new_lines: Vec<String> = new.lines().map(str::to_owned).collect();
-    let key = |l: &String| if ignore_ws { l.trim().to_owned() } else { l.clone() };
-    let a: Vec<String> = old_lines.iter().map(key).collect();
-    let b: Vec<String> = new_lines.iter().map(key).collect();
+    let (old_lines, a) = keyed_lines(old, ignore_ws);
+    let (new_lines, b) = keyed_lines(new, ignore_ws);
     let ops = similar::capture_diff_slices_deadline(similar::Algorithm::Myers, &a, &b, Some(std::time::Instant::now() + std::time::Duration::from_secs(2)));
     let mut rows = Vec::new();
     let mut split = Vec::new();
@@ -242,5 +254,19 @@ mod tests {
         assert_eq!(c.changes.len(), 2);
         let ws = compare("  a\n", "a\n", true);
         assert_eq!(ws.added + ws.removed, 0);
+    }
+
+    #[test]
+    fn the_final_newline_counts_both_ways() {
+        for (old, new) in [("a\nb\n", "a\nb"), ("a\nb", "a\nb\n")] {
+            for ws in [false, true] {
+                let c = compare(old, new, ws);
+                assert_eq!((c.added, c.removed), (1, 1), "{old:?} -> {new:?}, ignore whitespace {ws}");
+                assert_eq!(c.new.last().map(String::as_str), Some("b"), "the line shows without its break");
+            }
+        }
+        let same = compare("a\r\nb\r\n", "a\r\nb\r\n", false);
+        assert_eq!(same.added + same.removed, 0);
+        assert_eq!(same.old, ["a", "b"]);
     }
 }

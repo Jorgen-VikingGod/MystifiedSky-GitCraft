@@ -32,25 +32,7 @@ impl App {
         let mut show_right = self.settings.flag("showRight", true) && r.view.is_some();
         let mut left_w = if show_left { self.settings.num("leftWidth", 381.0) as f32 } else { 28.0 };
         let mut right_w = if show_right { self.settings.num("rightWidth", 342.0) as f32 } else { 0.0 };
-        // Side panels give way on small windows, keeping room for the graph.
-        let centre_min = 440.0_f32.min(body.width() - 504.0).max(160.0);
-        let room = body.width() - centre_min - 4.0;
-        if left_w + right_w > room {
-            let over = left_w + right_w - room;
-            let shrink_left = if show_left { (left_w - 200.0).max(0.0).min(over / 2.0) } else { 0.0 };
-            left_w -= shrink_left;
-            right_w = (right_w - (over - shrink_left)).max(if show_right { 300.0_f32.min(right_w) } else { 0.0 });
-        }
-        // Still no room at their smallest: the right panel, then the left one, steps aside until
-        // the window is wide enough again (their saved widths stay as they are).
-        if left_w + right_w > room && show_right {
-            show_right = false;
-            right_w = 0.0;
-        }
-        if left_w + right_w > room && show_left {
-            show_left = false;
-            left_w = 28.0;
-        }
+        (left_w, right_w, show_left, show_right) = fit_panels(body.width(), left_w, right_w, show_left, show_right);
         let left = Rect::from_min_size(body.min, vec2(left_w, body.height()));
         {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -165,5 +147,65 @@ impl App {
         } else {
             self.graph_view(ui, tab, r, later);
         }
+    }
+}
+
+/// Side panel widths for a body this wide, as the earlier web interface laid them out: the
+/// centre keeps up to 440 px when it can, then gives way down to 160 px while both panels
+/// shrink towards their smallest (200 and 300 px) in proportion to what they can spare. Only a
+/// window too narrow for even that collapses a panel, the left one first, so staging and the
+/// commit box stay. Saved widths are left as they are.
+fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool, mut show_right: bool) -> (f32, f32, bool, bool) {
+    const COLLAPSED: f32 = 28.0;
+    const CENTRE_MIN: f32 = 160.0;
+    let min_l = if show_left { 200.0_f32.min(left_w) } else { left_w };
+    let min_r = if show_right { 300.0_f32.min(right_w) } else { 0.0 };
+    let preferred_centre = 440.0_f32.min(body - 504.0).max(CENTRE_MIN);
+    let most = body - CENTRE_MIN - 4.0;
+    let room = (body - preferred_centre - 4.0).max(most.min(min_l + min_r));
+    if left_w + right_w > room {
+        let (spare_l, spare_r) = ((left_w - min_l).max(0.0), (right_w - min_r).max(0.0));
+        let spare = spare_l + spare_r;
+        if spare > 0.0 {
+            let cut = (left_w + right_w - room).min(spare);
+            left_w -= cut * spare_l / spare;
+            right_w -= cut * spare_r / spare;
+        }
+    }
+    if left_w + right_w > most && show_left {
+        show_left = false;
+        left_w = COLLAPSED;
+    }
+    if left_w + right_w > most && show_right {
+        show_right = false;
+        right_w = 0.0;
+    }
+    (left_w, right_w, show_left, show_right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_panels;
+
+    #[test]
+    fn the_default_window_keeps_both_panels() {
+        // The default 930 px window with the default widths: both at their smallest.
+        let (l, r, show_l, show_r) = fit_panels(930.0, 381.0, 342.0, true, true);
+        assert!(show_l && show_r);
+        assert_eq!((l.round(), r.round()), (200.0, 300.0));
+        // Wide enough: the saved widths as they are.
+        assert_eq!(fit_panels(1600.0, 381.0, 342.0, true, true), (381.0, 342.0, true, true));
+    }
+
+    #[test]
+    fn a_narrow_window_collapses_the_left_panel_before_staging() {
+        let (_, r, show_l, show_r) = fit_panels(600.0, 381.0, 342.0, true, true);
+        assert!(!show_l && show_r);
+        assert!(r >= 300.0);
+        let (_, _, show_l, show_r) = fit_panels(400.0, 381.0, 342.0, true, true);
+        assert!(!show_l && !show_r);
+        // With the left panel hidden by the person, the right one gets the room.
+        let (l, r, _, show_r) = fit_panels(700.0, 28.0, 342.0, false, true);
+        assert!(show_r && l == 28.0 && r >= 300.0);
     }
 }

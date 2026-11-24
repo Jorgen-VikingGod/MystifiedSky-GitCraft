@@ -90,10 +90,8 @@ impl App {
         let theme = self.settings.theme();
         super::theme::choose(super::theme::Theme::from_id(&theme), &self.ctx);
         self.ctx.set_zoom_factor(self.settings.zoom());
-        if let Some(p) = self.prefs.as_mut() {
-            p.account = None;
-            p.config.clear();
-        }
+        self.prefs_data.account = None;
+        self.prefs_data.config.clear();
         self.reload_all();
         self.toast(true, format!("Switched to profile {}", target["name"].as_str().unwrap_or("")));
     }
@@ -210,9 +208,7 @@ impl App {
                             Some(e) => app.toast(false, e),
                             None => app.toast(true, "SSH key created and its public key copied"),
                         }
-                        if let Some(p) = app.prefs.as_mut() {
-                            p.account = None;
-                        }
+                        app.prefs_data.account = None;
                     }
                     Err(e) => app.toast(false, e),
                 }))

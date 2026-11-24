@@ -75,13 +75,15 @@ pub struct Session {
     cwd: String,
     env: Option<HashMap<String, String>>,
     error: Option<String>,
+    /// Why the last input could not be sent (the shell closed, its input is full).
+    input_error: Option<String>,
 }
 
 impl Session {
     fn new(title: String, cwd: String, run: Option<String>, env: Option<HashMap<String, String>>) -> Session {
         let listener = Listener { replies: Default::default(), title: Default::default() };
         let term = Term::new(Config { scrolling_history: 10_000, ..Config::default() }, &Size { cols: 80, rows: 24 }, listener.clone());
-        Session { id: None, title, term, parser: Processor::new(), listener, exited: false, cols: 80, rows: 24, run, cwd, env, error: None }
+        Session { id: None, title, term, parser: Processor::new(), listener, exited: false, cols: 80, rows: 24, run, cwd, env, error: None, input_error: None }
     }
 }
 
@@ -228,6 +230,22 @@ fn key_bytes(key: egui::Key, mods: egui::Modifiers, app_cursor: bool) -> Option<
 }
 
 /// A web address under column `col` of `line`, if any.
+/// A row's cells (column, whether it is drawn on its own) grouped into runs drawn as one piece of
+/// text: neighbouring ordinary cells. A wide character or one with combining marks is a run of
+/// its own, and a gap in the columns starts a new run.
+fn cell_runs(cells: &[(usize, bool)]) -> Vec<std::ops::Range<usize>> {
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, &(col, alone)) in cells.iter().enumerate() {
+        let joins = !alone && i > 0 && !cells[i - 1].1 && cells[i - 1].0 + 1 == col && runs.last().is_some_and(|r| r.end == i);
+        if joins {
+            runs.last_mut().expect("run").end = i + 1;
+        } else {
+            runs.push(i..i + 1);
+        }
+    }
+    runs
+}
+
 pub fn link_at(line: &str, col: usize) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let text: String = chars.iter().collect();
@@ -282,8 +300,10 @@ impl App {
         match result {
             Ok(id) => {
                 s.id = Some(id);
-                if let Some(cmd) = s.run.take() {
-                    let _ = self.terminals.write("main", id, &format!("{cmd}\r"));
+                if let Some(cmd) = s.run.take()
+                    && let Err(e) = self.terminals.write("main", id, &format!("{cmd}\r"))
+                {
+                    s.input_error = Some(e);
                 }
             }
             Err(e) => s.error = Some(e),
@@ -453,9 +473,19 @@ impl App {
                             out.push_str(&t.replace("\r\n", "\r").replace('\n', "\r"));
                         }
                     }
-                    egui::Event::Copy => {}
+                    // Cmd+C on macOS copies; elsewhere Ctrl+C goes to the shell (Ctrl+Shift+C copies).
+                    egui::Event::Copy => {
+                        if cfg!(target_os = "macos")
+                            && let Some(text) = s.term.selection_to_string()
+                        {
+                            ui.ctx().copy_text(text);
+                        }
+                    }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
                         if modifiers.ctrl && modifiers.shift && key == egui::Key::C {
+                            if let Some(text) = s.term.selection_to_string() {
+                                ui.ctx().copy_text(text);
+                            }
                             continue;
                         }
                         if modifiers.command && modifiers.shift && key == egui::Key::F {
@@ -471,7 +501,7 @@ impl App {
             }
             if !out.is_empty() {
                 s.term.scroll_display(Scroll::Bottom);
-                let _ = self.terminals.write("main", tid, &out);
+                s.input_error = self.terminals.write("main", tid, &out).err();
             }
         }
         // Scrollback.
@@ -484,6 +514,41 @@ impl App {
                 }
             }
         }
+        // Selecting with the pointer: drag for characters, double-click for a word, triple-click
+        // for lines; dragging past the top or bottom scrolls. Ctrl/Cmd+click is for links.
+        if !ui.input(|i| i.modifiers.command) {
+            let at = |pos: egui::Pos2, term: &Term<Listener>| -> (Point, Side) {
+                let offset = term.grid().display_offset() as i32;
+                let row = ((pos.y - screen.top()) / cell_h).floor().clamp(0.0, rows as f32 - 1.0) as i32;
+                let x = ((pos.x - screen.left()) / cell_w).max(0.0);
+                let col = (x.floor() as usize).min(cols - 1);
+                (Point::new(Line(row - offset), Column(col)), if x - col as f32 > 0.5 { Side::Right } else { Side::Left })
+            };
+            let pos = resp.interact_pointer_pos();
+            if let Some(pos) = pos {
+                let (point, side) = at(pos, &s.term);
+                if resp.triple_clicked() {
+                    s.term.selection = Some(Selection::new(SelectionType::Lines, point, side));
+                } else if resp.double_clicked() {
+                    s.term.selection = Some(Selection::new(SelectionType::Semantic, point, side));
+                } else if resp.drag_started_by(egui::PointerButton::Primary) {
+                    s.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                } else if resp.dragged_by(egui::PointerButton::Primary) {
+                    if pos.y < screen.top() {
+                        s.term.scroll_display(Scroll::Delta(1));
+                    } else if pos.y > screen.bottom() {
+                        s.term.scroll_display(Scroll::Delta(-1));
+                    }
+                    let (point, side) = at(pos, &s.term);
+                    if let Some(sel) = s.term.selection.as_mut() {
+                        sel.update(point, side);
+                    }
+                    ui.ctx().request_repaint();
+                } else if resp.clicked() {
+                    s.term.selection = None;
+                }
+            }
+        }
         // Draw.
         let dim = self.settings.flag("termDim", true) && !focused;
         let fade = if dim { 0.7 } else { 1.0 };
@@ -491,8 +556,10 @@ impl App {
         let painter = ui.painter().with_clip_rect(screen);
         let offset = content.display_offset as i32;
         let colors = content.colors;
-        let mut rows_text: Vec<String> = vec![String::new(); rows];
-        let mut jobs: Vec<egui::text::LayoutJob> = (0..rows).map(|_| egui::text::LayoutJob::default()).collect();
+        // Each row's characters by column (a wide character's second column is a space), for links.
+        let mut rows_text: Vec<Vec<char>> = vec![Vec::new(); rows];
+        // Each row's cells to draw: column, text, format and whether it needs a place of its own.
+        let mut cells: Vec<Vec<(usize, String, egui::TextFormat, bool)>> = vec![Vec::new(); rows];
         for cell in content.display_iter {
             let line = cell.point.line.0 + offset;
             if line < 0 || line as usize >= rows {
@@ -514,23 +581,26 @@ impl App {
             if selected {
                 bg = SELECTION;
             }
+            let wide = cell.flags.contains(Flags::WIDE_CHAR);
             let x0 = screen.left() + col as f32 * cell_w;
             let y0 = screen.top() + row as f32 * cell_h;
             if bg != BG {
-                let w = if cell.flags.contains(Flags::WIDE_CHAR) { cell_w * 2.0 } else { cell_w };
+                let w = if wide { cell_w * 2.0 } else { cell_w };
                 painter.rect_filled(Rect::from_min_size(pos2(x0, y0), vec2(w, cell_h)), CornerRadius::ZERO, bg.gamma_multiply(fade));
             }
             let ch = if cell.c == '\0' { ' ' } else { cell.c };
             let text = rows_text.get_mut(row).expect("row");
-            while text.chars().count() < col {
+            text.resize(text.len().max(col), ' ');
+            text.push(ch);
+            if wide {
                 text.push(' ');
             }
-            text.push(ch);
-            let job = jobs.get_mut(row).expect("row");
-            while job.text.chars().count() < col {
-                job.append(" ", 0.0, egui::TextFormat { font_id: font.clone(), color: FG, ..Default::default() });
+            let hidden = cell.flags.contains(Flags::HIDDEN);
+            let marks = cell.zerowidth().filter(|m| !m.is_empty());
+            let mut shown = if hidden { ' ' } else { ch }.to_string();
+            if !hidden && let Some(m) = marks {
+                shown.extend(m.iter());
             }
-            let shown = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { ch };
             let mut fmt = egui::TextFormat { font_id: font.clone(), color: fg.gamma_multiply(fade), ..Default::default() };
             if cell.flags.contains(Flags::UNDERLINE) {
                 fmt.underline = Stroke::new(1.0, fg.gamma_multiply(fade));
@@ -541,16 +611,28 @@ impl App {
             if cell.flags.contains(Flags::STRIKEOUT) {
                 fmt.strikethrough = Stroke::new(1.0, fg.gamma_multiply(fade));
             }
-            job.append(&shown.to_string(), 0.0, fmt);
+            cells[row].push((col, shown, fmt, wide || marks.is_some()));
         }
-        for (row, job) in jobs.into_iter().enumerate() {
-            if job.text.trim().is_empty() {
-                continue;
-            }
-            let g = ui.fonts_mut(|f| f.layout_job(job));
+        // Text is drawn in runs that start at their own column, so a wide character or one with
+        // combining marks (whose drawn width needn't match its columns) never shifts the rest of
+        // the row away from the grid the caret and selection use.
+        for (row, row_cells) in cells.into_iter().enumerate() {
             let y0 = screen.top() + row as f32 * cell_h;
-            painter.galley(pos2(screen.left(), y0 + (cell_h - g.size().y) / 2.0), g, FG);
+            let places: Vec<(usize, bool)> = row_cells.iter().map(|c| (c.0, c.3)).collect();
+            for run in cell_runs(&places) {
+                if row_cells[run.clone()].iter().all(|c| c.1.trim().is_empty()) {
+                    continue;
+                }
+                let mut job = egui::text::LayoutJob::default();
+                for (_, text, fmt, _) in &row_cells[run.clone()] {
+                    job.append(text, 0.0, fmt.clone());
+                }
+                let g = ui.fonts_mut(|f| f.layout_job(job));
+                let x0 = screen.left() + row_cells[run.start].0 as f32 * cell_w;
+                painter.galley(pos2(x0, y0 + (cell_h - g.size().y) / 2.0), g, FG);
+            }
         }
+        let rows_text: Vec<String> = rows_text.into_iter().map(|r| r.into_iter().collect()).collect();
         // Cursor.
         let cur = content.cursor;
         let cline = cur.point.line.0 + offset;
@@ -578,6 +660,8 @@ impl App {
             painter.text(screen.left_top() + vec2(4.0, 4.0), Align2::LEFT_TOP, format!("The terminal could not start: {e}"), FontId::proportional(12.0), super::widgets::REMOVED);
         } else if s.exited {
             painter.text(pos2(screen.left() + 4.0, screen.bottom() - 4.0), Align2::LEFT_BOTTOM, "The shell has exited. Open a new terminal with +.", FontId::proportional(12.0), c.fg3);
+        } else if let Some(e) = &s.input_error {
+            painter.text(pos2(screen.left() + 4.0, screen.bottom() - 4.0), Align2::LEFT_BOTTOM, format!("Input not sent: {e}"), FontId::proportional(12.0), super::widgets::REMOVED);
         }
         // Ctrl+click opens a link.
         if resp.clicked() && ui.input(|i| i.modifiers.command)
@@ -693,6 +777,29 @@ mod tests {
 
     fn shown(term: &Term<Listener>) -> Option<(i32, usize)> {
         term.selection.as_ref().and_then(|s| s.to_range(term)).map(|r| (r.start.line.0, r.start.column.0))
+    }
+
+    #[test]
+    fn wide_and_combining_characters_start_runs_at_their_columns() {
+        // "a", "b", a wide "漢" at 2 (3 is its spacer, not listed), "c" at 4, "e" with a mark at 5, "f".
+        let cells = [(0, false), (1, false), (2, true), (4, false), (5, true), (6, false)];
+        assert_eq!(cell_runs(&cells), vec![0..2, 2..3, 3..4, 4..5, 5..6]);
+        assert_eq!(cell_runs(&[(0, false), (1, false), (2, false)]), vec![0..3]);
+        // The grid gives every column a cell, so each run starts where its first cell is.
+        let term = term_with("a漢b\r\ne\u{301}x");
+        let content = term.renderable_content();
+        let mut wide = None;
+        let mut marked = None;
+        for cell in content.display_iter {
+            if cell.flags.contains(Flags::WIDE_CHAR) {
+                wide = Some((cell.point.line.0, cell.point.column.0));
+            }
+            if cell.zerowidth().is_some() {
+                marked = Some((cell.point.line.0, cell.point.column.0));
+            }
+        }
+        assert_eq!(wide, Some((0, 1)));
+        assert_eq!(marked, Some((1, 0)));
     }
 
     #[test]

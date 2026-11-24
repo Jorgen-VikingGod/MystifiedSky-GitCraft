@@ -14,6 +14,7 @@ mod diff;
 mod external_tools;
 mod fonts;
 mod graph;
+mod guard;
 mod highlight;
 mod history;
 mod keys;
@@ -199,6 +200,10 @@ pub struct App {
     pub(crate) drafts: HashMap<String, repo::Draft>,
     /// Drafts to set once the action that asked for them is queued.
     pub(crate) pending_drafts: Vec<(String, repo::Draft)>,
+    /// What waits for the saves chosen in the unsaved-changes prompt.
+    pub(crate) leaving: Option<guard::Leaving>,
+    /// Discard was chosen for a close or restart: unsaved text no longer holds it up.
+    pub(crate) discarding: bool,
     pub(crate) notices: Vec<Notice>,
     /// The left panel shown over an open file until the file closes.
     pub(crate) left_peek: bool,
@@ -230,6 +235,7 @@ pub struct App {
     /// The preferences revision the backend last heard about.
     pub(crate) synced: u64,
     pub(crate) prefs: Option<prefs_ui::PrefsUi>,
+    pub(crate) prefs_data: prefs_ui::PrefsData,
     pub(crate) terminals: gitcraft_core::terminal::Terminals,
     pub(crate) term_panels: HashMap<u64, terminal::Panel>,
     pub(crate) term_pending: terminal::Pending,
@@ -284,6 +290,8 @@ impl App {
             job: None,
             drafts: HashMap::new(),
             pending_drafts: Vec::new(),
+            leaving: None,
+            discarding: false,
             notices: Vec::new(),
             left_peek: false,
             focus_left_filter: std::cell::Cell::new(false),
@@ -304,6 +312,7 @@ impl App {
             ai_label: None,
             synced: 0,
             prefs: None,
+            prefs_data: Default::default(),
             terminals: Default::default(),
             term_panels: HashMap::new(),
             term_pending: Default::default(),
@@ -502,9 +511,28 @@ impl App {
     }
 
     pub(crate) fn close_tab(&mut self, id: u64) {
+        self.close_tabs(vec![id]);
+    }
+
+    /// Close tabs, asking first when one has unsaved editor text.
+    pub(crate) fn close_tabs(&mut self, ids: Vec<u64>) {
+        if self.ask_unsaved(ids.clone(), true, Box::new({
+            let ids = ids.clone();
+            move |app: &mut App| app.close_tabs(ids)
+        })) {
+            return;
+        }
+        for id in ids {
+            self.close_tab_now(id);
+        }
+    }
+
+    fn close_tab_now(&mut self, id: u64) {
         let Some(at) = self.tabs.iter().position(|t| t.id == id) else { return };
         let tab = self.tabs.remove(at);
-        self.repos.remove(&id);
+        if let Some(mut r) = self.repos.remove(&id) {
+            r.cancel_reads();
+        }
         if let Some(panel) = self.term_panels.remove(&id) {
             for s in panel.sessions {
                 if let Some(t) = s.id {
@@ -655,6 +683,7 @@ impl eframe::App for App {
 
     /// Closing the window quits the way the system expects.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.guard_close(ctx);
         craft_quit::on_close_request(ctx);
     }
 
@@ -701,12 +730,18 @@ impl eframe::App for App {
         frame::title_bar(ui, "GitCraft");
         self.menu_bar(ui);
         self.tabs_bar(ui);
-        self.status_bar(ui);
-        self.screen(ui);
+        // Preferences cover everything below the tabs: what they hide isn't drawn, so it can't
+        // take focus or be reached by screen readers.
+        if self.prefs.is_none() {
+            self.status_bar(ui);
+            self.screen(ui);
+        }
         self.draw_toasts(&ctx);
         self.draw_prefs(&ctx);
         self.draw_palette(&ctx);
         self.draw_shortcuts(&ctx);
+        // After everything that can open another file or close one, before the prompt it asks.
+        self.guard_unsaved_moves();
         self.draw_dialog(&ctx);
 
         frame::window_edges(&ctx);

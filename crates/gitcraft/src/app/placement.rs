@@ -22,6 +22,41 @@ struct Restore {
     store: Store,
     no_position: bool,
     changed: Option<Instant>,
+    /// The earlier web-view release's window, taken over on the first frame when this build
+    /// has none saved yet.
+    adopt: Option<WebViewWindow>,
+}
+
+/// A window as tauri-plugin-window-state saved it for the web-view release: inner size and
+/// outer position in physical pixels.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+struct WebViewWindow {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
+    #[serde(default)]
+    maximized: bool,
+}
+
+/// The web-view release's main window, from its `.window-state.json` in the system's
+/// configuration folder for `dev.gitcraft.desktop`.
+fn webview_window() -> Option<WebViewWindow> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(std::path::PathBuf::from)?
+    } else if cfg!(target_os = "macos") {
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library").join("Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?
+    };
+    parse_webview(&std::fs::read(base.join("dev.gitcraft.desktop").join(".window-state.json")).ok()?)
+}
+
+fn parse_webview(bytes: &[u8]) -> Option<WebViewWindow> {
+    let mut windows: std::collections::HashMap<String, WebViewWindow> = serde_json::from_slice(bytes).ok()?;
+    windows.remove("main").filter(|w| w.width > 0 && w.height > 0)
 }
 
 fn restore() -> &'static Mutex<Restore> {
@@ -35,7 +70,8 @@ fn restore() -> &'static Mutex<Restore> {
         if let Some(moved) = store.moved_aside() {
             eprintln!("The window file was damaged and was moved to {}.", moved.display());
         }
-        Mutex::new(Restore { store, no_position: Backend::from_env() == Backend::Wayland, changed: None })
+        let adopt = if std::env::var_os("GITCRAFT_NO_WINDOW_RESTORE").is_none() && store.get(MAIN).is_none() { webview_window() } else { None };
+        Mutex::new(Restore { store, no_position: Backend::from_env() == Backend::Wayland, changed: None, adopt })
     })
 }
 
@@ -78,6 +114,21 @@ pub fn track(ctx: &egui::Context) {
         return save_when_due(&mut r);
     }
     let scale = info.native_pixels_per_point.unwrap_or(1.0);
+    // First run after the web-view release: its window size, place and maximized state, now
+    // that the monitor's scale is known. They are noted from the next frames on.
+    if let Some(w) = r.adopt.take() {
+        let px = scale * zoom;
+        let size = egui::vec2((w.width as f32 / px).max(MIN[0]), (w.height as f32 / px).max(MIN[1]));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if !r.no_position {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(w.x as f32 / px, w.y as f32 / px)));
+        }
+        if w.maximized {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        ctx.request_repaint();
+        return;
+    }
     let maximized = info.maximized.unwrap_or(false);
     let fullscreen = info.fullscreen.unwrap_or(false);
     let mut p = r.store.get(MAIN).unwrap_or_else(|| Placement::new(SIZE, scale));
@@ -137,5 +188,19 @@ pub fn save() {
     let mut r = lock();
     if r.store.is_dirty() {
         save_now(&mut r);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_web_view_window_state_is_read() {
+        let file = br#"{"main":{"width":1395,"height":1003,"x":120,"y":-8,"prev_x":0,"prev_y":0,"maximized":true,"visible":true,"decorated":false,"fullscreen":false},"other":{"width":1,"height":1}}"#;
+        assert_eq!(parse_webview(file), Some(WebViewWindow { width: 1395, height: 1003, x: 120, y: -8, maximized: true }));
+        assert_eq!(parse_webview(br#"{"main":{"width":0,"height":0}}"#), None);
+        assert_eq!(parse_webview(b"{}"), None);
+        assert_eq!(parse_webview(b"damaged"), None);
     }
 }
