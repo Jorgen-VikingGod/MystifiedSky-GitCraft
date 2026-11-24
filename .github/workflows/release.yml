@@ -11,6 +11,10 @@ on:
         options:
           - preview
           - stable
+      highlights:
+        description: Optional Markdown overview for the GitHub release
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -211,6 +215,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.number }}
           CHANNEL: ${{ inputs.channel }}
+          RELEASE_HIGHLIGHTS: ${{ inputs.highlights }}
         shell: bash
         run: |
           case "$CHANNEL" in
@@ -252,17 +257,23 @@ jobs:
           fi
           previous=$(awk -v target="$tag" '$0 == target { print prev; exit } { prev = $0 }' <<<"$versions")
           baseline="$RUNNER_TEMP/previous-changelog.md"
+          generated="$RUNNER_TEMP/generated-release-notes.md"
+          note_fields=(-f "tag_name=$tag" -f "target_commitish=$GITHUB_SHA")
           : > "$baseline"
           if [[ -n "$previous" ]]; then
+            note_fields+=(-f "previous_tag_name=$previous")
             git rev-parse --verify "refs/tags/$previous^{commit}" >/dev/null
             if git cat-file -e "refs/tags/$previous:CHANGELOG.md"; then
               git show "refs/tags/$previous:CHANGELOG.md" > "$baseline"
             fi
           fi
-          node scripts/changelog-release.mjs notes CHANGELOG.md "$baseline" > release-notes.md
-          if [[ -n "$previous" ]]; then
-            printf '\n**Full changelog**: https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$previous" "$tag" >> release-notes.md
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${note_fields[@]}" \
+            --jq '.body // ""' > "$generated"; then
+            echo "::warning::Could not get GitHub contributor credits. Publishing the changelog and PR links."
+            : > "$generated"
           fi
+          node scripts/changelog-release.mjs publish-notes CHANGELOG.md "$baseline" \
+            "$GITHUB_REPOSITORY" "$tag" "$previous" "$generated" > release-notes.md
           if [[ -n "${release:-}" ]]; then
             gh release edit "$tag" --notes-file release-notes.md
           else

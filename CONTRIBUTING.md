@@ -36,7 +36,7 @@ See [TESTING.md](TESTING.md) for Ubuntu/WSL and macOS setup and the desktop smok
 - Keep the PR focused so reviewers can verify the change independently. Include the results of the checks you ran and flag any checks you could not run.
 - Include before and after screenshots for visible changes, using sample data.
 - For bug fixes, include a regression test or repeatable manual steps. Use the [test selection guide](TESTING.md#choose-the-right-checks) to find the closest coverage.
-- Document notable changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). Use the existing categories and leave published releases and comparison links alone.
+- Document notable changes under **Unreleased** in [CHANGELOG.md](CHANGELOG.md). Use the existing categories and describe what users will notice. After opening the PR, append its link to the relevant bullet so the GitHub release can link to the review and credit you. See the [release guide](RELEASING.md#changelog) for the format. Leave published release sections and comparison links alone.
 - Keep dependency lockfiles in sync and explain dependency changes.
 
 Contributions are distributed under the project's [GPL-3.0-only license](LICENSE). For third-party code, icons, fonts, or other assets, include the source and license and retain the original notices. Use original work, public specifications, or suitably licensed material. AI assistance is allowed and must be disclosed in every pull request. Select the applicable option in the PR template. If you used AI, name the tools and any known models, explain what they helped with, and describe how you verified the result. You are responsible for the submitted changes.

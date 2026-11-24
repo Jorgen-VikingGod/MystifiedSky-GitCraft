@@ -12,7 +12,23 @@ Use **Re-run failed jobs** in Actions to retry a failed release with the same ve
 
 ## Changelog
 
-Write new entries under `## [Unreleased]` in `CHANGELOG.md`. At publication, the workflow reads `CHANGELOG.md` from the release commit and the previous published tag. It posts only new entries, followed by a link to the full comparison. When there are no new entries, the release notes show just the comparison link. This also works when several releases queue up before the changelog is archived.
+Write new entries under `## [Unreleased]` in `CHANGELOG.md`. At publication, the workflow reads the changelog from the release commit and the previous published stable tag. The GitHub release page groups new entries under **What's Changed** and ends with **Full Changelog**, which compares those tags. This also works when several releases queue up before the changelog is archived. A preview and its eventual stable release can show the same changes because both compare against the last stable version.
+
+For a larger release, enter an optional Markdown overview in the **highlights** field of the Release workflow. Use it to explain the release's theme, point readers to a feature guide, or give a short preview of upcoming work. Keep the overview brief and leave the detailed bullets in the changelog. Enter the overview again when dispatching the stable run if you want it on both releases.
+
+Keep each bullet focused on the change users will notice. Once a pull request has a number, append its link to the relevant bullet. Use a separate parenthesized link for each PR if several shipped the same change. Leave direct commits without a PR unlinked.
+
+```markdown
+- Install the Linux RPM on Fedora and RHEL. ([#42](https://github.com/MystifiedSky/GitCraft/pull/42))
+```
+
+These links go into release notes with the bullet. GitHub supplies author credit and a **New Contributors** section when it identifies the linked PRs and first contributions in the release range. The release keeps its curated entries and links if GitHub's credit lookup fails. Adding a link to an already shipped bullet does not publish it again. If the link is added after publication but before archiving, the dated section keeps it.
+
+To review the formatted page locally, save `CHANGELOG.md` from the previous stable tag as a UTF-8 file and run the following command with the real tag names. The optional sixth argument is a file containing GitHub-generated release Markdown for the same range. Set the `RELEASE_HIGHLIGHTS` environment variable to include your overview.
+
+```sh
+node scripts/changelog-release.mjs publish-notes CHANGELOG.md previous-changelog.md MystifiedSky/GitCraft vNEXT vPREVIOUS
+```
 
 Archive dated sections in a changelog pull request, oldest release first. Save `CHANGELOG.md` from the released tag and its previous published tag as UTF-8 files, then run `node scripts/changelog-release.mjs record <version> MystifiedSky/GitCraft <released-changelog> --previous <previous-changelog> --date <publication-date>`. Entries added after the released commit stay under Unreleased. Leave already published bullets as written until they are archived so the workflow can recognize them in the next release. Describe distinct changes with specific wording so two different changes do not look like duplicate entries.
 

@@ -47,7 +47,9 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
 - Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
 - In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
-- GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts, profiles and window size and position, and installed copies update to it as usual, a copy installed from the MSI with the MSI. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`.
+- GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts, profiles and window size and position, and installed copies update to it as usual, a copy installed from the MSI with the MSI. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- GitHub release notes group new changes, link to their pull requests, and credit contributors when GitHub identifies them. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- The GitHub bug form asks which operating system is affected and labels reports by platform. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Document source setup with dependency installation scripts disabled.
 - Build the desktop interface with a faster bundler.
 - Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
@@ -68,7 +70,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Restore the Windows title-bar icon and toolbar spacing. Keep the empty Staged Files section visible while unstaged files scroll.
 - Apply installed font choices in the file editor and terminal.
 - Ask before discarding an unsaved file draft from the editor's Cancel button.
-- Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts.
+- Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts. ([#42](https://github.com/MystifiedSky/GitCraft/pull/42))
 - In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
 - Give the working-changes line its own lane above the checked-out commit so it stays clear of other commits.
 - Show the first bad bisect commit on newer Git versions.
@@ -81,7 +83,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
 - Poll file changes on network folders that lack reliable file notifications.
 
-- Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.
+- Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived. ([#5](https://github.com/MystifiedSky/GitCraft/pull/5))
 
 - Ask whether to save, discard or keep editing before leaving an unsaved file or conflict resolution.
 
