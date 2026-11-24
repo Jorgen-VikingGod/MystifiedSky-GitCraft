@@ -92,6 +92,7 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() {
+    app::bench::mark("main");
     if gitcraft_core::accounts::handle_ssh_askpass() {
         return;
     }
@@ -138,15 +139,56 @@ fn main() {
     if opts.screenshot.is_none() {
         macos::handle_links();
     }
-    let mut wgpu_options = egui_wgpu::WgpuConfiguration::default();
-    if opts.screenshot.is_some() {
-        // A picture-taking run must not wait on the display.
-        wgpu_options.surface.present_mode = egui_wgpu::wgpu::PresentMode::AutoNoVsync;
+    let no_vsync = opts.screenshot.is_some() || app::bench::scrolling();
+    if opts.theme.clone().unwrap_or_else(|| store.theme()) == "system" {
+        app::theme::prestart();
     }
-    let native = eframe::NativeOptions { renderer: eframe::Renderer::Wgpu, wgpu_options, viewport, ..Default::default() };
-    let run = eframe::run_native("GitCraft", native, Box::new(move |cc| Ok(Box::new(App::new(cc, opts, store)))));
-    if let Err(e) = run {
+    // The first repository is read while the window and the graphics are set up.
+    let engine = std::sync::Arc::new(gitcraft_core::actions::Engine::default());
+    app::repo::prefetch(&engine, &store, &opts.launch, !opts.new_window && opts.screenshot.is_none());
+    opts.engine = Some(engine);
+    app::bench::mark("window");
+    // Vulkan, Metal or DirectX 12 first, which leaves the OpenGL drivers unloaded; OpenGL when
+    // none of them works. The app is made only once a window could be set up, so it is still
+    // here for the second try.
+    let start = std::rc::Rc::new(std::cell::RefCell::new(Some((opts, store))));
+    let mut failure = None;
+    for backends in [egui_wgpu::wgpu::Backends::PRIMARY, egui_wgpu::wgpu::Backends::GL] {
+        if start.borrow().is_none() {
+            break;
+        }
+        let native = eframe::NativeOptions { renderer: eframe::Renderer::Wgpu, wgpu_options: graphics(backends, no_vsync), viewport: viewport.clone(), ..Default::default() };
+        let take = start.clone();
+        let run = eframe::run_native("GitCraft", native, Box::new(move |cc| {
+            let (opts, store) = take.borrow_mut().take().ok_or("GitCraft already started")?;
+            Ok(Box::new(App::new(cc, opts, store)))
+        }));
+        match run {
+            Ok(()) => return,
+            Err(e) => failure = Some(e),
+        }
+    }
+    if let Some(e) = failure {
         eprintln!("GitCraft could not open its window: {e}\nIt needs a graphics driver with Vulkan, Metal, DirectX 12 or OpenGL.");
         std::process::exit(1);
     }
+}
+
+/// How the window draws: on `backends` (unless `WGPU_BACKEND` says otherwise), on the
+/// power-saving GPU (`WGPU_POWER_PREF` overrides it; a Git client has no use for waking a
+/// laptop's discrete GPU), and with GPU memory allocated as needed rather than in large blocks
+/// up front.
+fn graphics(backends: egui_wgpu::wgpu::Backends, no_vsync: bool) -> egui_wgpu::WgpuConfiguration {
+    use egui_wgpu::wgpu;
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::from_env().unwrap_or(backends);
+    setup.power_preference = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::LowPower);
+    let device = setup.device_descriptor.clone();
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| wgpu::DeviceDescriptor { memory_hints: wgpu::MemoryHints::MemoryUsage, ..device(adapter) });
+    let mut options = egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup), ..Default::default() };
+    if no_vsync {
+        // A picture-taking run, or the scroll benchmark, must not wait on the display.
+        options.surface.present_mode = wgpu::PresentMode::AutoNoVsync;
+    }
+    options
 }

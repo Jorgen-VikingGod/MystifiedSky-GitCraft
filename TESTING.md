@@ -58,6 +58,19 @@ Only one GitCraft window runs per user: a second launch hands its folder or `git
 
 To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
 
+### Benchmarks
+
+`GITCRAFT_BENCH=<file>` turns on a probe that writes when the first populated graph is drawn, and `GITCRAFT_BENCH_SCROLL=<frames>` then scrolls the graph and writes frame times ([bench.rs](crates/gitcraft/src/app/bench.rs)). [scripts/benchmark.py](scripts/benchmark.py) runs a build against a repository made with [scripts/benchmark-repo.py](scripts/benchmark-repo.py), each launch with an empty `HOME`:
+
+```sh
+python3 scripts/benchmark-repo.py /tmp/gc-large 50000
+cargo build --release --locked -p gitcraft
+python3 scripts/benchmark.py native 7 /tmp/gc-large -- target/release/gitcraft
+python3 scripts/benchmark.py scroll native 1500 /tmp/gc-large -- target/release/gitcraft
+```
+
+To compare with another build, give the runner that build's command; it needs the same probe lines. Compare builds on the same machine, with the same repository, after a warm-up launch.
+
 ## Choose the right checks
 
 | Change | Start with | Evidence to include in the PR |

@@ -30,6 +30,16 @@ pub struct HistoryCursor {
     /// Stashes made on commits further down, placed when their page loads.
     #[serde(default)]
     pub stashes: Vec<git::Stash>,
+    /// The order the first page was read in (`--date-order`, or Git's plain order).
+    #[serde(default = "date_order")]
+    pub date_order: bool,
+    /// The start of every commit id listed so far, to check Git's plain order with.
+    #[serde(skip)]
+    pub seen: std::collections::HashSet<u64>,
+}
+
+fn date_order() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -49,12 +59,25 @@ pub fn open_repo(engine: &Engine, path: &str, max: Option<usize>, view: Option<g
         return Err(format!("The folder {path} doesn't exist"));
     }
     let root = git::repo_root(&p).ok_or_else(|| format!("{path} is not a Git repository"))?;
-    let operation = operation::lock_for(&root);
-    if let Ok(_guard) = operation.try_lock() {
-        rewrite::cleanup_replay_files(&root);
-    }
+    // Housekeeping that the history doesn't wait for.
+    let cleanup_root = root.clone();
+    std::thread::spawn(move || {
+        let operation = operation::lock_for(&cleanup_root);
+        if let Ok(_guard) = operation.try_lock() {
+            rewrite::cleanup_replay_files(&cleanup_root);
+        };
+    });
     let view = view.unwrap_or_default();
-    let mut data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view)?;
+    // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
+    let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
+    // The undo history is found beside the repository's Git folder: looked up while the
+    // history is read.
+    let (data, undo) = std::thread::scope(|s| {
+        let undo = s.spawn(crate::read_jobs::inherit(|| engine.undo_info(&root_s)));
+        let data = git::load_view_checked(&root, max.unwrap_or(INITIAL_COMMITS).clamp(prefs::MIN_INITIAL_COMMITS, 5000), &view);
+        (data, undo.join().unwrap_or_default())
+    });
+    let mut data = data?;
     let pinned_sha = view.pinned.as_ref().and_then(|p| data.refs.iter().find(|r| &r.full == p)).map(|r| r.sha.clone());
     let mut layout = graph::LayoutCursor::new(pinned_sha.as_deref());
     // Stashes are rows of the graph too, unless the history is filtered.
@@ -64,15 +87,18 @@ pub fn open_repo(engine: &Engine, path: &str, max: Option<usize>, view: Option<g
         data.index_of = data.commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect();
     }
     let graph = layout.append(&data.commits);
-    let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: loaded, layout, filter: view.filter.clone(), stashes: pending });
-    // Windows paths use backslashes; on macOS/Linux the path must stay as-is (a blanket replace turns /Users/x into \Users\x).
-    let root_s = if cfg!(windows) { root.to_string_lossy().replace('/', "\\") } else { root.to_string_lossy().into_owned() };
-    Ok(RepoView { name: git::repo_name(&root), undo: engine.undo_info(&root_s), path: root_s, data, graph, history_cursor })
+    let seen = if data.history_date_order { Default::default() } else {
+        let mut seen = std::collections::HashSet::new();
+        git::plain_order_holds(&data.commits, &mut seen);
+        seen
+    };
+    let history_cursor = data.has_more.then(|| HistoryCursor { revs: data.history_revs.clone(), offset: loaded, layout, filter: view.filter.clone(), stashes: pending, date_order: data.history_date_order, seen });
+    Ok(RepoView { name: git::repo_name(&root), undo, path: root_s, data, graph, history_cursor })
 }
 
 /// The next page of history after `cursor`.
 pub fn history_page(path: &str, mut cursor: HistoryCursor, max: Option<usize>) -> Result<HistoryPage, String> {
-    let (mut commits, has_more) = git::history_page(Path::new(path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000), &cursor.filter)?;
+    let (mut commits, has_more) = git::history_page_in(Path::new(path), &cursor.revs, cursor.offset, max.unwrap_or(2000).clamp(100, 5000), &cursor.filter, cursor.date_order, &mut cursor.seen)?;
     cursor.offset += commits.len();
     cursor.stashes = place_stashes(&mut commits, std::mem::take(&mut cursor.stashes));
     let graph = cursor.layout.append(&commits);

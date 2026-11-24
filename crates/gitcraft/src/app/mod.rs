@@ -5,6 +5,7 @@ pub mod frame;
 mod agents;
 mod ai;
 mod avatars;
+pub mod bench;
 mod chrome;
 mod commands;
 mod conflict;
@@ -30,7 +31,7 @@ mod platform;
 mod prefs;
 mod prefs_ui;
 mod rebase;
-mod repo;
+pub mod repo;
 mod right;
 mod screen;
 mod tabs;
@@ -168,6 +169,8 @@ pub struct StartOptions {
     pub primary: Option<Box<crate::instance::Primary>>,
     /// Picture-taking runs: which view to show (diff, inline, split, history, blame, palette).
     pub shot_view: Option<String>,
+    /// The engine, when `main` started reading the first repository with it.
+    pub engine: Option<Arc<Engine>>,
 }
 
 pub struct App {
@@ -204,6 +207,8 @@ pub struct App {
     pub(crate) leaving: Option<guard::Leaving>,
     /// Discard was chosen for a close or restart: unsaved text no longer holds it up.
     pub(crate) discarding: bool,
+    /// The benchmark probe (`GITCRAFT_BENCH`).
+    bench: Option<bench::Bench>,
     pub(crate) notices: Vec<Notice>,
     /// The left panel shown over an open file until the file closes.
     pub(crate) left_peek: bool,
@@ -257,9 +262,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions, settings: Store) -> App {
+        bench::mark("app");
         egui_extras::install_image_loaders(&cc.egui_ctx);
         fonts::install(&cc.egui_ctx);
-        let engine = Arc::new(Engine::default());
+        let engine = opts.engine.clone().unwrap_or_default();
         let ctx = cc.egui_ctx.clone();
         let mut app = App {
             settings,
@@ -292,6 +298,7 @@ impl App {
             pending_drafts: Vec::new(),
             leaving: None,
             discarding: false,
+            bench: bench::Bench::from_env(),
             notices: Vec::new(),
             left_peek: false,
             focus_left_filter: std::cell::Cell::new(false),
@@ -660,6 +667,9 @@ impl App {
 impl eframe::App for App {
     /// Pictures are taken without a mouse pointer, so no hover shows in them.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(b) = self.bench.as_mut() {
+            b.input(_ctx, raw_input);
+        }
         if self.screenshot.is_some() {
             raw_input.events.retain(|e| !matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. }));
             raw_input.events.push(egui::Event::PointerGone);
@@ -693,6 +703,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let built = Instant::now();
+        if self.frames == 0 {
+            bench::mark("first-frame");
+        }
         self.frames += 1;
         theme::follow_system(&ctx);
         // UI Customization > Display author initials … instead of avatars.
@@ -758,6 +772,10 @@ impl eframe::App for App {
             ctx.set_zoom_factor(self.settings.zoom());
         }
         self.drive_screenshot(&ctx);
+        if let Some(b) = self.bench.as_mut() {
+            let has_graph = self.repos.get(&self.active).and_then(|r| r.view.as_ref()).is_some_and(|v| !v.data.commits.is_empty());
+            b.frame(&ctx, has_graph, built, _frame.info().cpu_usage);
+        }
         // Last, so a file dialog asked for anywhere this frame shows now, over this window.
         self.pickers.show_pending(Some(&*_frame));
     }

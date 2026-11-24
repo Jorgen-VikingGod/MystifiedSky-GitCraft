@@ -351,18 +351,11 @@ impl App {
     /// What the graph is asked to show: hidden, soloed and pinned refs and the history filters.
     fn ref_view(&self, tab: u64) -> RefView {
         let Some(r) = self.repo(tab) else { return RefView::default() };
-        let per = |key: &str| -> Vec<String> { self.settings.get::<HashMap<String, Vec<String>>>(key).and_then(|m| m.get(&r.path).cloned()).unwrap_or_default() };
-        RefView {
-            hidden: per("hidden"),
-            solo: per("solo"),
-            pinned: self.settings.get::<HashMap<String, String>>("pinned").and_then(|m| m.get(&r.path).cloned()),
-            smart: self.settings.flag("smartBranches", false),
-            filter: r.ui.history_filter.clone().unwrap_or_default(),
-        }
+        RefView { filter: r.ui.history_filter.clone().unwrap_or_default(), ..saved_view(&self.settings, &r.path) }
     }
 
     fn initial_commits(&self) -> usize {
-        (self.settings.num("initialCommits", 2000.0) as usize).clamp(500, 5000)
+        initial_commits(&self.settings)
     }
 
     /// Run `job` away from the window; what it returns comes back as a message.
@@ -410,10 +403,15 @@ impl App {
         if let Some(page) = r.paging.take() {
             gitcraft_core::read_jobs::cancel(&page);
         }
+        super::bench::mark("repo-read");
+        if let Some(early) = take_prefetch(&path, &view, max) {
+            return self.spawn(move || Msg::Repo { tab, generation, result: Box::new(early.recv().unwrap_or_else(|_| Err("The repository read stopped unexpectedly.".into()))) });
+        }
         self.spawn(move || Msg::Repo { tab, generation, result: Box::new(gitcraft_core::read_jobs::scope(Some(id), || session::open_repo(&engine, &path, Some(max), Some(view)))) });
     }
 
     pub(crate) fn repo_loaded(&mut self, tab: u64, generation: u64, result: Result<RepoView, String>) {
+        super::bench::mark("repo-loaded");
         let show_all = self.settings.flag("showAllCommits", false);
         let initial = self.initial_commits();
         let start_watch = {
@@ -523,6 +521,9 @@ impl App {
                     self.load_more(tab);
                 }
             }
+            // Git's plain order put a parent before its child: read it all again in date order,
+            // keeping the selection and how far it was loaded.
+            Err(e) if e == gitcraft_core::git::HISTORY_REORDERED => self.load_repo(tab),
             Err(e) => {
                 r.page_error = Some(e);
                 r.settle_restore(true);
@@ -944,4 +945,61 @@ impl App {
     pub(crate) fn ensure_repo(&mut self, tab: u64, path: &str) {
         self.repos.entry(tab).or_insert_with(|| RepoTab::new(path));
     }
+}
+
+fn initial_commits(settings: &crate::settings::Store) -> usize {
+    (settings.num("initialCommits", 2000.0) as usize).clamp(500, 5000)
+}
+
+/// The refs a repository's graph shows by its saved preferences: hidden, soloed and pinned.
+fn saved_view(settings: &crate::settings::Store, path: &str) -> RefView {
+    let per = |key: &str| -> Vec<String> { settings.get::<HashMap<String, Vec<String>>>(key).and_then(|m| m.get(path).cloned()).unwrap_or_default() };
+    RefView {
+        hidden: per("hidden"),
+        solo: per("solo"),
+        pinned: settings.get::<HashMap<String, String>>("pinned").and_then(|m| m.get(path).cloned()),
+        smart: settings.flag("smartBranches", false),
+        filter: Default::default(),
+    }
+}
+
+/// A read of the first repository shown, started before the window opens.
+struct Prefetch {
+    path: String,
+    view: RefView,
+    max: usize,
+    result: std::sync::mpsc::Receiver<Result<RepoView, String>>,
+}
+
+static PREFETCH: std::sync::Mutex<Option<Prefetch>> = std::sync::Mutex::new(None);
+
+/// Start reading the repository GitCraft will show first (the last one asked for at launch,
+/// otherwise the saved tab in front), so the read runs while the window and the graphics are
+/// set up. The first read of that tab takes it if it asks for the same history.
+pub fn prefetch(engine: &Arc<gitcraft_core::actions::Engine>, settings: &crate::settings::Store, launch: &[session::LaunchIntent], saved_tabs: bool) {
+    let launched = launch.iter().rev().find_map(|l| match l {
+        session::LaunchIntent::Repository { path } => Some(path.clone()),
+        _ => None,
+    });
+    let path = launched.or_else(|| {
+        if !saved_tabs || !settings.flag("rememberTabs", true) {
+            return None;
+        }
+        let (tabs, active) = settings.tabs();
+        tabs.get(active.min(tabs.len().saturating_sub(1))).cloned()
+    });
+    let Some(path) = path else { return };
+    let (view, max, engine) = (saved_view(settings, &path), initial_commits(settings), engine.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (p, v) = (path.clone(), view.clone());
+    gitcraft_core::runtime().spawn_blocking(move || {
+        let _ = tx.send(session::open_repo(&engine, &p, Some(max), Some(v)));
+    });
+    *PREFETCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(Prefetch { path, view, max, result: rx });
+}
+
+/// The early read, when it is of this repository, view and history size. Any other read drops it.
+fn take_prefetch(path: &str, view: &RefView, max: usize) -> Option<std::sync::mpsc::Receiver<Result<RepoView, String>>> {
+    let p = PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+    (super::same_folder(&p.path, path) && p.view == *view && p.max == max).then_some(p.result)
 }

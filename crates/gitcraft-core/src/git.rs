@@ -77,6 +77,9 @@ pub struct Worktree {
 pub struct RepoData {
     #[serde(skip)]
     pub history_revs: Vec<String>,
+    /// The history was read in `--date-order` (see [`plain_order_holds`]); later pages are too.
+    #[serde(skip)]
+    pub history_date_order: bool,
     pub commits: Vec<Commit>,
     pub refs: Vec<GitRef>,
     pub stashes: Vec<Stash>,
@@ -546,22 +549,39 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
     // One more than asked for tells us whether there is more history to load.
     let n = format!("-n{}", max_commits + 1);
     let requested_revs = log_revs(view);
-    let mut resolve_args = vec!["rev-parse", "--revs-only"];
-    resolve_args.extend(requested_revs.iter().map(String::as_str));
-    let resolved = run(dir, &resolve_args);
-    let revs: Vec<String> = if resolved.ok {
-        resolved.stdout.lines().map(str::to_owned).collect()
-    } else { requested_revs };
-    d.history_revs = revs.clone();
-    let mut log_args: Vec<&str> = vec!["--literal-pathspecs", "log"];
-    log_args.extend(filters.iter().map(String::as_str));
-    log_args.extend(revs.iter().map(|s| s.as_str()));
-    log_args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
-    log_args.extend(path);
 
     // The ten reads don't depend on each other, and on Windows each Git process costs 20-50 ms just to start,
-    // so they run at the same time instead of one after another.
-    let (refs, head, head_sha, log, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
+    // so they run at the same time instead of one after another. The history (resolving its
+    // branches first) and the status take longest, so they start first.
+    let ((revs, log, date_order), refs, head, head_sha, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
+        let log = s.spawn(crate::read_jobs::inherit(|| {
+            let mut resolve_args = vec!["rev-parse", "--revs-only"];
+            resolve_args.extend(requested_revs.iter().map(String::as_str));
+            let resolved = run(dir, &resolve_args);
+            if resolved.ok {
+                let revs: Vec<String> = resolved.stdout.lines().map(str::to_owned).collect();
+                // Git's plain order, which doesn't have to walk the whole history first, unless
+                // it put a parent before its child here (or did before in this repository).
+                if !needs_date_order(dir) {
+                    let log = history_log(dir, &revs, 0, max_commits, &filters, path, false);
+                    let mut seen = std::collections::HashSet::new();
+                    if !log.ok || plain_order_holds(&parse_commits(&log.stdout), &mut seen) {
+                        return (revs, log, false);
+                    }
+                    mark_date_order(dir);
+                }
+                let log = history_log(dir, &revs, 0, max_commits, &filters, path, true);
+                (revs, log, true)
+            } else {
+                let mut log_args: Vec<&str> = vec!["--literal-pathspecs", "log"];
+                log_args.extend(filters.iter().map(String::as_str));
+                log_args.extend(requested_revs.iter().map(|s| s.as_str()));
+                log_args.extend(["--date-order", n.as_str(), "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
+                log_args.extend(path);
+                (requested_revs.clone(), run(dir, &log_args), true)
+            }
+        }));
+        let work = s.spawn(crate::read_jobs::inherit(|| try_status(dir)));
         // Refs (branches, remote branches, tags) with ahead/behind info.
         let refs = s.spawn(crate::read_jobs::inherit(|| {
             run(
@@ -577,16 +597,17 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         }));
         let head = s.spawn(crate::read_jobs::inherit(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])));
         let head_sha = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "HEAD"])));
-        let log = s.spawn(crate::read_jobs::inherit(|| if resolved.ok { history_log(dir, &revs, 0, max_commits, &filters, path) } else { run(dir, &log_args) }));
         let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs%x1f%P%x1f%aN%x1f%aE%x1f%at"])));
         let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain"])));
         let sm = s.spawn(crate::read_jobs::inherit(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"])));
         let remotes = s.spawn(crate::read_jobs::inherit(|| run(dir, &["remote"])));
-        let work = s.spawn(crate::read_jobs::inherit(|| try_status(dir)));
         let gitdir = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "--git-dir"])));
         let j = |h: std::thread::ScopedJoinHandle<'_, GitOut>| h.join().unwrap_or_else(|_| GitOut::failed("a Git read stopped unexpectedly"));
-        (j(refs), j(head), j(head_sha), j(log), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_else(|_| Err("Git status read stopped unexpectedly".into())), j(gitdir))
+        let log = log.join().unwrap_or_else(|_| (Vec::new(), GitOut::failed("a Git read stopped unexpectedly"), true));
+        (log, j(refs), j(head), j(head_sha), j(st), j(wt), j(sm), j(remotes), work.join().unwrap_or_else(|_| Err("Git status read stopped unexpectedly".into())), j(gitdir))
     });
+    d.history_revs = revs;
+    d.history_date_order = date_order;
     for line in refs.stdout.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
         if f.len() < 5 {
@@ -1036,28 +1057,83 @@ pub fn parse_commits(text: &str) -> Vec<Commit> {
     fields.chunks_exact(7).filter_map(parse_commit_fields).collect()
 }
 
-fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize, filters: &[String], path: Option<&str>) -> GitOut {
+/// Repositories whose history Git's plain order printed a parent before its child in (clock skew,
+/// or equal times across merges): read in `--date-order` from then on.
+fn date_order_repos() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static REPOS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    REPOS.get_or_init(Default::default)
+}
+
+fn needs_date_order(dir: &Path) -> bool {
+    date_order_repos().lock().unwrap_or_else(|e| e.into_inner()).contains(dir)
+}
+
+fn mark_date_order(dir: &Path) {
+    date_order_repos().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf());
+}
+
+/// Whether every commit comes before its parents, as the graph needs, given the commits listed
+/// earlier (`seen`, by the start of their id), which these are added to. `--date-order`
+/// guarantees it but first walks the whole history unless the repository has a commit-graph
+/// file; Git's plain order, by commit date, keeps it whenever children aren't dated before
+/// their parents.
+pub fn plain_order_holds(commits: &[Commit], seen: &mut std::collections::HashSet<u64>) -> bool {
+    let key = |sha: &str| u64::from_str_radix(sha.get(..16).unwrap_or(sha), 16).unwrap_or(0);
+    let mut ok = true;
+    for c in commits {
+        // A commit whose parent was listed already: the parent came first.
+        if c.parents.iter().any(|p| seen.contains(&key(p))) {
+            ok = false;
+        }
+        seen.insert(key(&c.sha));
+    }
+    ok
+}
+
+/// What a history page gives when Git's plain order turned out wrong for the repository: it is
+/// read again from the start in `--date-order`.
+pub const HISTORY_REORDERED: &str = "The history is read again in date order.";
+
+#[allow(clippy::too_many_arguments)]
+fn history_log(dir: &Path, revs: &[String], offset: usize, max: usize, filters: &[String], path: Option<&str>, date_order: bool) -> GitOut {
     let skip = format!("--skip={offset}");
     let limit = format!("-n{}", max + 1);
     let mut args = vec!["--literal-pathspecs", "log"];
     args.extend(filters.iter().map(String::as_str));
-    args.extend(["--stdin", "--date-order", &skip, &limit, "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
+    args.push("--stdin");
+    if date_order {
+        args.push("--date-order");
+    }
+    args.extend([&skip, &limit, "--format=%H%x00%P%x00%aN%x00%aE%x00%at%x00%s%x00%b%x00", "--"]);
     args.extend(path);
     let command = git_command(dir, &args);
     crate::read_jobs::run(command, 64 * 1024 * 1024, Some((revs.join("\n") + "\n").into_bytes()))
 }
 
-pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize, filter: &HistoryFilter) -> Result<(Vec<Commit>, bool), String> {
+/// The next page of history, in the order the first page was read in (`date_order`). In
+/// Git's plain order the page is checked against the ids listed so far (`seen`); when a parent
+/// came before its child, the repository switches to `--date-order` and this gives
+/// [`HISTORY_REORDERED`].
+#[allow(clippy::too_many_arguments)]
+pub fn history_page_in(dir: &Path, revs: &[String], offset: usize, max: usize, filter: &HistoryFilter, date_order: bool, seen: &mut std::collections::HashSet<u64>) -> Result<(Vec<Commit>, bool), String> {
     if revs.is_empty() || revs.iter().any(|r| !matches!(r.len(), 40 | 64) || !r.bytes().all(|b| b.is_ascii_hexdigit())) {
         return Err("History changed; reload the repository to continue.".into());
     }
     let (filters, path) = filter.arguments()?;
-    let output = history_log(dir, revs, offset, max, &filters, path);
+    let output = history_log(dir, revs, offset, max, &filters, path, date_order);
     if !output.ok { return Err(output.message()); }
     let mut commits = parse_commits(&output.stdout);
+    if !date_order && !plain_order_holds(&commits, seen) {
+        mark_date_order(dir);
+        return Err(HISTORY_REORDERED.into());
+    }
     let has_more = commits.len() > max;
     commits.truncate(max);
     Ok((commits, has_more))
+}
+
+pub fn history_page(dir: &Path, revs: &[String], offset: usize, max: usize, filter: &HistoryFilter) -> Result<(Vec<Commit>, bool), String> {
+    history_page_in(dir, revs, offset, max, filter, true, &mut Default::default())
 }
 
 #[cfg(test)]
@@ -1094,6 +1170,74 @@ mod paging_tests {
         let actual: Vec<_> = original.commits.iter().chain(page.iter()).map(|c| &c.sha).collect();
         assert_eq!(actual, all.commits.iter().map(|c| &c.sha).collect::<Vec<_>>());
         assert!(history_page(dir, &["--all".into()], 0, 2, &HistoryFilter::default()).is_err());
+    }
+
+    /// main: A then C; branch x: B on A but dated before A (clock skew). Git's
+    /// plain order lists A before its child B.
+    fn skewed_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.name", "Test"], &["config", "user.email", "test@example.com"], &["config", "commit.gpgsign", "false"]] {
+            assert!(run(dir, args).ok);
+        }
+        let commit = |msg: &str, at: &str| {
+            let date = format!("{at} +0000");
+            assert!(run_env(dir, &["commit", "-q", "--allow-empty", "-m", msg], &[("GIT_AUTHOR_DATE", &date), ("GIT_COMMITTER_DATE", &date)]).ok);
+        };
+        commit("A", "1600001000");
+        assert!(run(dir, &["checkout", "-q", "-b", "x"]).ok);
+        commit("B", "1600000500");
+        assert!(run(dir, &["checkout", "-q", "main"]).ok);
+        commit("C", "1600002000");
+        temp
+    }
+
+    fn children_first(commits: &[Commit]) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        plain_order_holds(commits, &mut seen)
+    }
+
+    #[test]
+    fn history_is_read_in_plain_order_unless_a_parent_would_come_first() {
+        // Ordinary history: the plain order, which needn't walk everything first.
+        let plain = tempfile::tempdir().unwrap();
+        let dir = plain.path();
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.name", "Test"], &["config", "user.email", "test@example.com"]] {
+            assert!(run(dir, args).ok);
+        }
+        for name in ["one", "two", "three"] {
+            assert!(run(dir, &["commit", "-q", "--allow-empty", "-m", name]).ok);
+        }
+        let data = load_view(dir, 10, &RefView::default());
+        assert!(!data.history_date_order);
+        assert_eq!(data.commits.len(), 3);
+        // Clock skew on the first page: read again in date order, children before parents.
+        let skewed = skewed_repo();
+        let data = load_view(skewed.path(), 10, &RefView::default());
+        assert!(data.history_date_order);
+        assert_eq!(data.commits.len(), 3);
+        assert!(children_first(&data.commits));
+        let mut seen = std::collections::HashSet::new();
+        let plain_log = parse_commits(&history_log(skewed.path(), &data.history_revs, 0, 10, &[], None, false).stdout);
+        assert!(!plain_order_holds(&plain_log, &mut seen), "the fixture must trip the plain order");
+    }
+
+    #[test]
+    fn a_later_page_in_the_wrong_order_switches_to_date_order() {
+        let skewed = skewed_repo();
+        let dir = skewed.path();
+        // One commit per page: the first page alone is in order.
+        let first = load_view(dir, 1, &RefView::default());
+        assert!(!first.history_date_order);
+        assert!(first.has_more);
+        let mut seen = std::collections::HashSet::new();
+        plain_order_holds(&first.commits, &mut seen);
+        let next = history_page_in(dir, &first.history_revs, 1, 2, &HistoryFilter::default(), false, &mut seen);
+        assert_eq!(next.unwrap_err(), HISTORY_REORDERED);
+        // Read again: date order from the start.
+        let again = load_view(dir, 10, &RefView::default());
+        assert!(again.history_date_order);
+        assert!(children_first(&again.commits));
     }
 }
 

@@ -36,6 +36,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
+- Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
 - In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
 - GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts, profiles and window size and position, and installed copies update to it as usual, a copy installed from the MSI with the MSI. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`.
 - Document source setup with dependency installation scripts disabled.

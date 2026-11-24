@@ -11,6 +11,13 @@ version = "0.1.0"
 [profile.dev]
 opt-level = 1
 
+# Release builds: one optimisation unit across all crates makes a smaller, faster program. Debug
+# information is left out, but the symbol names stay so crash reports still name functions.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+
 [profile.dev.package."*"]
 opt-level = 2
 

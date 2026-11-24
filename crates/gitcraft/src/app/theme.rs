@@ -229,30 +229,45 @@ fn install(palette: Palette, ctx: &egui::Context) {
     apply_style(ctx);
 }
 
+type Watched = Option<(craft_platform::appearance::Watcher, std::sync::Arc<std::sync::OnceLock<egui::Context>>)>;
+
+thread_local! {
+    static WATCHED: std::cell::OnceCell<Watched> = const { std::cell::OnceCell::new() };
+    /// Whether the first answer was waited for.
+    static WAITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Ask the desktop for its dark or light setting before the window opens, on the thread that
+/// draws it, so the answer arrives while the window is created rather than holding up the
+/// first frame.
+pub fn prestart() {
+    WATCHED.with(|w| {
+        w.get_or_init(start_watcher);
+    });
+}
+
+fn start_watcher() -> Watched {
+    use std::sync::{Arc, OnceLock};
+    let wake = Arc::new(OnceLock::<egui::Context>::new());
+    let target = Arc::clone(&wake);
+    let watcher = craft_platform::appearance::Watcher::start(move || {
+        if let Some(ctx) = target.get() {
+            ctx.request_repaint();
+        }
+    })?;
+    Some((watcher, wake))
+}
+
 /// The desktop's dark or light setting, watched through the XDG Settings portal so a change shows
 /// at once. `None` where there is no portal (macOS and Windows, where the window library tells).
 fn desktop_theme(ctx: &egui::Context) -> Option<egui::Theme> {
-    use craft_platform::appearance::{Theme as Desktop, Watcher, sync_native_window_theme};
-    use std::sync::{Arc, OnceLock};
-    type Watched = Option<(Watcher, Arc<OnceLock<egui::Context>>)>;
-    thread_local! {
-        static WATCHED: std::cell::OnceCell<Watched> = const { std::cell::OnceCell::new() };
-    }
+    use craft_platform::appearance::{Theme as Desktop, sync_native_window_theme};
     WATCHED.with(|w| {
-        let (watcher, wake) = w
-            .get_or_init(|| {
-                let wake = Arc::new(OnceLock::<egui::Context>::new());
-                let target = Arc::clone(&wake);
-                let watcher = Watcher::start(move || {
-                    if let Some(ctx) = target.get() {
-                        ctx.request_repaint();
-                    }
-                })?;
-                // So the first frame already has the desktop's look.
-                watcher.wait_first(std::time::Duration::from_millis(250));
-                Some((watcher, wake))
-            })
-            .as_ref()?;
+        let (watcher, wake) = w.get_or_init(start_watcher).as_ref()?;
+        // So the first frame already has the desktop's look (the answer is usually in by now).
+        if !WAITED.replace(true) {
+            watcher.wait_first(std::time::Duration::from_millis(250));
+        }
         let _ = wake.set(ctx.clone());
         let observed = watcher.current();
         sync_native_window_theme(ctx, observed);
