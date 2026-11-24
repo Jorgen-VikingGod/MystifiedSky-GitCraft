@@ -227,6 +227,15 @@ impl RepoTab {
         }
     }
 
+    fn finish_page(&mut self, request: &str) -> bool {
+        if self.paging.as_deref() != Some(request) {
+            return false;
+        }
+        self.paging = None;
+        self.page_loading = false;
+        true
+    }
+
     pub fn commit(&self, sha: &str) -> Option<&Commit> {
         let v = self.view.as_ref()?;
         self.index.get(sha).and_then(|i| v.data.commits.get(*i))
@@ -403,6 +412,7 @@ impl App {
         if let Some(page) = r.paging.take() {
             gitcraft_core::read_jobs::cancel(&page);
         }
+        r.page_loading = false;
         super::bench::mark("repo-read");
         if let Some(early) = take_prefetch(&path, &view, max) {
             return self.spawn(move || Msg::Repo { tab, generation, result: Box::new(early.recv().unwrap_or_else(|_| Err("The repository read stopped unexpectedly.".into()))) });
@@ -489,15 +499,19 @@ impl App {
         let (path, generation) = (r.path.clone(), r.generation);
         let id = format!("page:{tab}:{generation}:{}", super::unique_id());
         r.paging = Some(id.clone());
-        self.spawn(move || Msg::Page { tab, generation, result: Box::new(gitcraft_core::read_jobs::scope(Some(id), || session::history_page(&path, cursor, Some(max)))) });
+        self.spawn(move || {
+            let result = gitcraft_core::read_jobs::scope(Some(id.clone()), || session::history_page(&path, cursor, Some(max)));
+            Msg::Page { tab, generation, request: id, result: Box::new(result) }
+        });
     }
 
-    pub(crate) fn page_loaded(&mut self, tab: u64, generation: u64, result: Result<HistoryPage, String>) {
+    pub(crate) fn page_loaded(&mut self, tab: u64, generation: u64, request: &str, result: Result<HistoryPage, String>) {
         let show_all = self.settings.flag("showAllCommits", false);
         let initial = self.initial_commits();
         let Some(r) = self.repo_mut(tab) else { return };
-        r.page_loading = false;
-        r.paging = None;
+        if !r.finish_page(request) {
+            return;
+        }
         if r.generation != generation {
             // An outdated page is dropped; paging goes on from the history shown, unless a full
             // read is running (it starts paging itself when it's done).
@@ -1002,4 +1016,17 @@ pub fn prefetch(engine: &Arc<gitcraft_core::actions::Engine>, settings: &crate::
 fn take_prefetch(path: &str, view: &RefView, max: usize) -> Option<std::sync::mpsc::Receiver<Result<RepoView, String>>> {
     let p = PREFETCH.lock().unwrap_or_else(|e| e.into_inner()).take()?;
     (super::same_folder(&p.path, path) && p.view == *view && p.max == max).then_some(p.result)
+}
+
+#[cfg(test)]
+#[test]
+fn headless_superseded_page_cannot_clear_the_active_request() {
+    let mut tab = RepoTab::new("fixture");
+    tab.page_loading = true;
+    tab.paging = Some("new request".into());
+    assert!(!tab.finish_page("previous request"));
+    assert!(tab.page_loading);
+    assert_eq!(tab.paging.as_deref(), Some("new request"));
+    assert!(tab.finish_page("new request"));
+    assert!(!tab.page_loading);
 }

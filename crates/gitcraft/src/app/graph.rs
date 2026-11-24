@@ -29,6 +29,47 @@ const REF_MARGIN: f32 = (m::REF_ZONE_MARGIN_LEFT + m::LEFT_PANEL_TO_GRAPH_GAP) a
 const SUMMARY_MARGIN: f32 = m::INLINE_SUMMARY_MARGIN_LEFT as f32;
 const MIN_ALPHA: f32 = m::NODE_MIN_ALPHA_PERCENT as f32 / 100.0;
 
+fn commit_row_target(ui: &Ui, rect: Rect, id: egui::Id, summary: &str, selected: bool) -> egui::Response {
+    let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, summary));
+    if response.has_focus() {
+        ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::ZERO, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+    }
+    response
+}
+
+#[cfg(test)]
+#[test]
+fn headless_graph_row_has_a_name_and_keyboard_activation() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let id = egui::Id::NULL.with("test commit");
+    let label = "Keep local changes intact";
+    let mut activated = false;
+    let mut draw = |ui: &mut Ui| {
+        let rect = ui.allocate_space(vec2(220.0, ROW)).1;
+        let response = commit_row_target(ui, rect, id, label, true);
+        activated = response.clicked();
+    };
+    let mut output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+    output.textures_delta.clear();
+    let tree = output.platform_output.accesskit_update.expect("Accessibility tree").nodes;
+    let (_, row) = tree.iter().find(|(_, node)| node.label() == Some(label)).expect("Named commit row");
+    assert_eq!(row.role(), egui::accesskit::Role::Button);
+    assert!(row.supports_action(egui::accesskit::Action::Click));
+
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    let event = egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    ctx.run_ui(egui::RawInput { events: vec![event], ..Default::default() }, &mut draw).textures_delta.clear();
+    assert!(activated);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Col {
     Refs,
@@ -764,7 +805,6 @@ impl App {
                 let sel = (selected_idx == Some(d) && r.ui.multi.is_empty()) || multi.contains(commit.sha.as_str());
                 let dim = !q.is_empty() && !match_set.contains(&i);
                 let fade = if dim { MIN_ALPHA } else { 1.0 };
-                let resp = ui.interact(rect, ui.scope_id().with(("row", tab, &commit.sha)), Sense::click());
                 // Hovered anywhere on the row, its labels included.
                 let hovered = ui.rect_contains_pointer(rect);
                 if sel {
@@ -772,6 +812,7 @@ impl App {
                 } else if hovered {
                     painter.rect_filled(rect, CornerRadius::ZERO, c.hoverrow);
                 }
+                let resp = commit_row_target(ui, rect, ui.scope_id().with(("row", tab, &commit.sha)), &commit.summary, sel);
                 if resp.clicked() {
                     clicked_row = Some((d, ui.input(|i| i.modifiers)));
                 }

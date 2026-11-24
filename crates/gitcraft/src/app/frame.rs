@@ -15,7 +15,7 @@ use craft_window::{Button, Layout, Prefix};
 use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, ResizeDirection, Sense, Stroke, StrokeKind, Ui, ViewportCommand, vec2};
 use std::sync::OnceLock;
 
-const HEIGHT: f32 = 36.0;
+const HEIGHT: f32 = if cfg!(windows) { 32.0 } else { 36.0 };
 pub const RADIUS: u8 = 10;
 /// How far in from the window's border the resize handles reach (corners twice as far).
 const EDGE: f32 = 9.0;
@@ -211,9 +211,8 @@ fn window_button(ui: &mut Ui, bar: Rect, x: f32, family: CaptionFamily, kind: Bu
     }
 }
 
-/// The top row of the window, when the app draws it: the title in the middle and the window
-/// buttons where the desktop puts them (or room for the traffic lights on macOS). Dragging the
-/// empty part moves the window; a double click does what the system does.
+/// Draw the title and controls in the desktop's usual positions. Dragging the empty part moves
+/// the window. A double click does what the system does.
 pub fn title_bar(ui: &mut Ui, title: &str) {
     let height = match current() {
         Frame::Native => return,
@@ -236,7 +235,19 @@ pub fn title_bar(ui: &mut Ui, title: &str) {
             ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, p().black(0.3)));
             // Before the buttons, so they sit on top and take their own clicks.
             craft_window::title_bar::empty_area(ui, rect);
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(13.5), p().fg);
+            let font = egui::FontId::proportional(13.5);
+            if cfg!(windows) {
+                let icon = Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
+                egui::Image::from_bytes("bytes://gitcraft-caption.png", &include_bytes!("../../../../icons/128x128.png")[..])
+                    .paint_at(ui, icon);
+                let caption_width = captions().map_or(0.0, |c| c.layout.right.len() as f32 * slot(c.family));
+                let width = (rect.width() - caption_width - 40.0).max(0.0);
+                let title = super::widgets::fit(ui, title, font, p().fg, width);
+                let pos = egui::pos2(rect.left() + 32.0, rect.center().y - title.size().y / 2.0);
+                ui.painter().galley(pos, title, p().fg);
+            } else {
+                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, title, font, p().fg);
+            }
             if let Some(c) = captions() {
                 for (x, kind) in button_xs(c, rect) {
                     window_button(ui, rect, x, c.family, kind, is_max);

@@ -132,7 +132,9 @@ impl App {
             });
         }
         // Centre: Undo, Redo, Pull, Push, Branch, Stash, Pop | Terminal.
-        let ideal = rect.center().x - group_w / 2.0 + 20.0;
+        let picker_column = (rect.width() - gitcraft_core::metrics::TOOLBAR_CENTER_WIDTH as f32 - right_w)
+            .clamp(300.0, gitcraft_core::metrics::TOOLBAR_LEFT_MAX as f32);
+        let ideal = (rect.center().x - group_w / 2.0).max(rect.left() + picker_column) + 20.0;
         let min_x = branch_rect.right() + 20.0;
         let max_x = rect.right() - right_w - group_w;
         let mut x = ideal.max(min_x).min(max_x.max(min_x));

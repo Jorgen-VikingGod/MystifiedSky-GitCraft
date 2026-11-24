@@ -6,6 +6,14 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Find and navigate matches in File View, including while editing a file. Show syntax errors when editing JSON.
+- Fold code, edit multiple selections, match brackets, and copy code with syntax colors. Find and Replace supports case, whole-word, and regular-expression matching. Folding and multiple selections also work in large files.
+- Select and copy text from a large read-only file preview or either side of a full diff.
+- Highlight invisible Unicode characters and lookalike letters in the file editor and full-file diffs. Accented text and regular emoji sequences keep their normal appearance.
+- Undo cursor and selection moves with Ctrl+U or Command+U. The editor menu also lets you redo those moves.
+- See additions and deletions in the split diff overview ruler. Click or drag it to navigate the file.
+- Edit the same draft from File, Split, and Inline views. Use the split divider to resize the original and modified panes while editing.
+- Check the English or Spanish spelling of commit summaries and descriptions, with corrections available from the right-click menu.
 - Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
 
 - Show stashes in the commit graph, each as a dashed box just above the commit it was made on and joined to it by a dashed line. Select one to see its changes, or right-click it for the stash actions.
@@ -49,6 +57,17 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Draw joined emoji and keycaps in the Windows editor using the installed emoji font.
+- Open the full comparison automatically when a file exceeds the hunk diff limit.
+- Keep the original and modified panes in sync when scrolling large or wrapped split diffs.
+- Wait for the comparison to finish before taking a diff screenshot.
+- Wrap long lines in Hunk View while keeping line-level staging available.
+- Preserve the Windows MSI upgrade identity when moving from the web-view build to the native app.
+- Keep ignored files safe when checking out a newly created branch or a pull request, or undoing or redoing a checkout.
+- Keep history loading when a previous page request finishes late. Give commit rows accessible names and a visible keyboard focus indicator.
+- Restore the Windows title-bar icon and toolbar spacing. Keep the empty Staged Files section visible while unstaged files scroll.
+- Apply installed font choices in the file editor and terminal.
+- Ask before discarding an unsaved file draft from the editor's Cancel button.
 - Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts.
 - In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
 - Give the working-changes line its own lane above the checked-out commit so it stays clear of other commits.

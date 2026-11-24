@@ -817,7 +817,7 @@ impl Engine {
                 if let Err(error) = crate::manage::require_lfs_for_checkout(dir, &expected) {
                     return done(git::GitOut::failed(&error), "");
                 }
-                let result = self.git(dir, &["checkout", "--detach", "-q", &expected]);
+                let result = self.git(dir, &["checkout", "--detach", "-q", "--no-overwrite-ignore", &expected, "--"]);
                 if result.ok { self.push_undo(repo, UndoRec::Checkout { from, to: expected }); }
                 done(result, "Checked out the pull request's source commit")
             }
@@ -843,7 +843,10 @@ impl Engine {
                 let sha = self.rev(dir, &format!("refs/heads/{name}"));
                 self.push_undo(repo, UndoRec::CreateBranch { name: name.clone(), sha });
                 if checkout {
-                    let o = self.git(dir, &["checkout", "-q", &name]);
+                    let o = self.git(dir, &["switch", "-q", "--no-guess", "--no-overwrite-ignore", "--", &name]);
+                    if !o.ok {
+                        return ActionResult { ok: false, message: format!("Created branch {name}, but could not check it out.\n\n{}", o.message()) };
+                    }
                     return done(o, &format!("Created and checked out {name}"));
                 }
                 ActionResult { ok: true, message: format!("Created branch {name}") }
@@ -1700,8 +1703,8 @@ impl Engine {
             (UndoRec::InitialCommit { after, branch, .. }, false) => self.git(dir, &["update-ref", branch, after, &"0".repeat(after.len())]),
             (UndoRec::Commit { before, .. }, true) => self.git(dir, &["reset", "-q", "--soft", before]),
             (UndoRec::Commit { after, .. }, false) => self.git(dir, &["reset", "-q", "--soft", after]),
-            (UndoRec::Checkout { from, .. }, true) => self.git(dir, &["checkout", "-q", from]),
-            (UndoRec::Checkout { to, .. }, false) => self.git(dir, &["checkout", "-q", to]),
+            (UndoRec::Checkout { from, .. }, true) => self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", from, "--"]),
+            (UndoRec::Checkout { to, .. }, false) => self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", to, "--"]),
             (UndoRec::DeleteBranch { name, sha, config }, false) => {
                 if self.rev(dir,&format!("refs/heads/{name}"))!=*sha || branch_config(dir,name).ok().as_ref()!=Some(config) {
                     return git::GitOut::failed("This branch or its settings changed after Undo; refusing to delete it.");

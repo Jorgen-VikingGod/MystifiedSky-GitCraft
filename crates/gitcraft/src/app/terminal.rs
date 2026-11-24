@@ -426,7 +426,8 @@ impl App {
         let screen = Rect::from_min_max(pos2(rect.left() + 6.0, bar.bottom() + 4.0), pos2(rect.right() - 6.0, rect.bottom() - 4.0));
         let size = self.settings.num("termFontSize", 12.0) as f32;
         let line_height = (self.settings.num("termLineHeight", 1.2) as f32).clamp(1.0, 2.0);
-        let font = FontId::monospace(size);
+        let family = self.settings.string("termFontFamily", "");
+        let font = super::fonts::preferred(ui.ctx(), &family, size);
         let cell_w = ui.fonts_mut(|f| f.glyph_width(&font, 'M')).max(1.0);
         let cell_h = (size * line_height).round().max(1.0);
         let cols = ((screen.width() / cell_w).floor() as usize).max(10);

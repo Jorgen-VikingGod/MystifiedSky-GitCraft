@@ -46,9 +46,13 @@ From the directory containing `Cargo.toml` on each OS:
 
 ```bash
 cargo test --locked --workspace -- --test-threads=1
+cargo test --locked -p gitcraft headless_ -- --test-threads=1
 node --test scripts/changelog-release.test.mjs
 cargo run --locked
 ```
+
+The `headless_` filter runs the native UI regressions used by the required GitHub check named
+`Headless browser regressions`.
 
 The app is in [crates/gitcraft](crates/gitcraft) and its back end in [crates/gitcraft-core](crates/gitcraft-core). Take a picture of the window without touching your preferences with `cargo run --locked -- --screenshot shot.png --theme light`; `--shot-view` shows a particular view first (see `--help`).
 
@@ -57,6 +61,11 @@ The Rust suite uses disposable repositories. Run it serially because some tests 
 Only one GitCraft window runs per user: a second launch hands its folder or `gitcraft://clone?url=` link to the running one and exits. To try that without touching your own preferences, start both launches with `HOME` (on Windows, `LOCALAPPDATA`) pointing at an empty folder, for example `HOME=/tmp/gc cargo run -- repo-a`, then `HOME=/tmp/gc cargo run -- repo-b`: the second command exits at once and `repo-b` opens as a tab in the first window. `--new-window` opens a separate window instead.
 
 To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
+
+On Windows, run `./scripts/check-msi-upgrade.ps1 -Directory <msi-output-directory>` to verify
+that a newly packaged MSI recognizes the existing GitCraft MSI. In a disposable Windows VM,
+install the previous public MSI, then run the new MSI with a higher version and verify that
+GitCraft launches and Windows lists one installation.
 
 ### Benchmarks
 
@@ -85,6 +94,13 @@ For a bug fix, reproduce the original failure when practical and keep the fixtur
 ## Desktop smoke test
 
 Use a disposable repository with a local bare remote. Record the app version, OS version, architecture, package format, and results.
+
+- Edit a tracked file with CRLF line endings and repeated identifiers. Fold a function, find text inside it, edit repeated selections, and undo once. Switch among File, Inline, and Split views, then save and check that the file contains only the intended edits.
+- In a split diff with insertions and deletions, scroll from each pane and drag or keyboard-navigate the overview ruler. Repeat with a file over 512 KiB, Word Wrap enabled, and the divider off center. In edit mode, use Ctrl+U (Command+U on macOS) after a selection change, then verify regular text undo still works.
+- Turn on Word Wrap in Hunk View for a long changed line. Verify its continuation is visible and clicking it selects the same logical line for staging. For a patch beyond the hunk limit, confirm that the full comparison opens and file-level actions are available.
+- In a read-only split diff, drag across several original lines and copy them. Use Ctrl+A and Ctrl+C in the modified pane and verify that each copy preserves its side's line endings and Unicode characters.
+- Open a UTF-8 file in File, Inline, and Split views with a Cyrillic lookalike (U+0430 in a Latin identifier), a zero-width space (U+200B), and a bidirectional control (U+202E). Check the markers and hover labels. Verify that café, decomposed accents, and emoji such as 👩🏽‍💻 and 1️⃣ have no markers. Repeat with syntax colors off and a file over 512 KiB.
+- Type a misspelling in the commit summary and description. Check the underlines, apply a suggestion, and undo it. Toggle spellcheck off in Preferences and verify that the fields continue to accept edits.
 
 - Install, launch, close, and reopen the packaged app. Launch it again with a folder while it runs: the folder opens as a tab.
 - Open a `gitcraft://clone?url=` link and "Open in GitCraft" from Explorer or the Finder.

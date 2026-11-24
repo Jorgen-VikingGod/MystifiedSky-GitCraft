@@ -1336,6 +1336,63 @@ fn conflict_side_checkout_failure_does_not_stage_a_deletion() {
 }
 
 #[test]
+fn checkout_history_and_branch_creation_preserve_ignored_files() {
+    let folder = fixture("gitcraft-checkout-ignore-");
+    let path = folder.path();
+    let collision = path.join("machine.txt");
+    std::fs::write(&collision, "tracked settings\n").unwrap();
+    assert!(git::run(path, &["add", "machine.txt"]).ok);
+    assert!(git::run(path, &["commit", "-qm", "shared settings"]).ok);
+    let tracked = head(path);
+    assert!(git::run(path, &["switch", "-qc", "personal"]).ok);
+    assert!(git::run(path, &["rm", "-q", "machine.txt"]).ok);
+    std::fs::write(path.join(".gitignore"), "/machine.txt\n").unwrap();
+    assert!(git::run(path, &["add", ".gitignore"]).ok);
+    assert!(git::run(path, &["commit", "-qm", "local settings"]).ok);
+    assert!(git::run(path, &["switch", "-q", "main"]).ok);
+
+    let engine = Engine::default();
+    let repo = path.to_string_lossy();
+    let switched = engine.perform(&repo, Action::Checkout { target: "personal".into(), changes: Default::default() });
+    assert!(switched.ok, "{}", switched.message);
+    std::fs::write(&collision, "private settings\n").unwrap();
+    assert!(git::run(path, &["check-ignore", "machine.txt"]).ok);
+
+    let undo = engine.perform(&repo, Action::Undo);
+    assert!(!undo.ok, "{}", undo.message);
+    assert_eq!(current_branch(path), "personal");
+    assert_eq!(std::fs::read_to_string(&collision).unwrap(), "private settings\n");
+
+    let create = engine.perform(&repo, Action::CreateBranch {
+        name: "from-main".into(),
+        at: Some(tracked.clone()),
+        checkout: true,
+    });
+    assert!(!create.ok, "{}", create.message);
+    assert_eq!(git::run(path, &["rev-parse", "refs/heads/from-main"]).stdout.trim(), tracked);
+    assert_eq!(current_branch(path), "personal");
+    assert_eq!(std::fs::read_to_string(&collision).unwrap(), "private settings\n");
+
+    let checkout_pr = engine.perform(&repo, Action::CheckoutPullRequest {
+        url: repo.to_string(),
+        reference: "refs/heads/main".into(),
+        expected: tracked,
+    });
+    assert!(!checkout_pr.ok, "{}", checkout_pr.message);
+    assert_eq!(current_branch(path), "personal");
+    assert_eq!(std::fs::read_to_string(&collision).unwrap(), "private settings\n");
+
+    std::fs::remove_file(&collision).unwrap();
+    assert!(engine.perform(&repo, Action::Checkout { target: "main".into(), changes: Default::default() }).ok);
+    assert!(engine.perform(&repo, Action::Undo).ok);
+    std::fs::write(&collision, "private settings\n").unwrap();
+    let redo = engine.perform(&repo, Action::Redo);
+    assert!(!redo.ok, "{}", redo.message);
+    assert_eq!(current_branch(path), "personal");
+    assert_eq!(std::fs::read_to_string(&collision).unwrap(), "private settings\n");
+}
+
+#[test]
 fn branch_creation_undo_uses_its_branch_ref_when_a_tag_has_the_same_name() {
     for annotated in [false,true] {for checkout in [false,true] {
         let folder=fixture("gitcraft-create-ref-");let d=folder.path();let base=head(d);let args=if annotated {vec!["tag","-a","topic","-m","tag"]} else {vec!["tag","topic"]};assert!(git::run(d,&args).ok);

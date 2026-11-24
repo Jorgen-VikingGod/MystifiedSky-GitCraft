@@ -2,10 +2,11 @@
 //! app has always used (Dark+ and Light+).
 
 use egui::Color32;
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyntaxColor, ScopeSelectors, StyleModifier, Theme, ThemeItem, ThemeSettings};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 /// Files with more lines than this are shown without colours.
 pub const LINE_LIMIT: usize = 20_000;
@@ -109,11 +110,103 @@ impl Lines {
 /// Colours for every line of `text`, or nothing when the file is too long or plain.
 pub fn whole(path: &str, text: &str, dark: bool) -> Vec<Runs> {
     let Some(syntax) = syntax_for(path) else { return Vec::new() };
-    if text.lines().count() > LINE_LIMIT {
+    if text.lines().take(LINE_LIMIT + 1).count() > LINE_LIMIT {
         return Vec::new();
     }
     let mut h = Lines::new(syntax, dark);
     text.lines().map(|l| h.line(l)).collect()
+}
+
+/// Visit comment byte ranges only as far as the last Unicode mark, with the usual
+/// syntax work limits. Beyond those limits there is no syntax context to hide decorations.
+pub(super) fn comment_spans(path: &str, text: &str, last: usize, mut mark: impl FnMut(usize, std::ops::Range<usize>)) {
+    static COMMENT: LazyLock<ScopeSelectors> =
+        LazyLock::new(|| "comment".parse().expect("valid scope selector"));
+    let Some(syntax) = syntax_for(path) else { return };
+    let mut parser = ParseState::new(syntax);
+    let mut scopes = ScopeStack::new();
+    for (row, line) in text.split_inclusive('\n').take((last + 1).min(LINE_LIMIT)).enumerate() {
+        if line.len() > LENGTH_LIMIT {
+            break;
+        }
+        let Ok(operations) = parser.parse_line(line, &SYNTAXES) else { break };
+        let mut start = 0;
+        for (end, operation) in operations {
+            if end > start && COMMENT.does_match(scopes.as_slice()).is_some() {
+                mark(row, start..end);
+            }
+            if scopes.apply(&operation).is_err() {
+                return;
+            }
+            start = end;
+        }
+        if start < line.len() && COMMENT.does_match(scopes.as_slice()).is_some() {
+            mark(row, start..line.len());
+        }
+    }
+}
+
+/// Byte offsets of matching delimiters, using the language grammar to ignore strings and comments.
+pub fn brackets(path: &str, text: &str) -> BTreeMap<usize, usize> {
+    static IGNORED: LazyLock<ScopeSelectors> =
+        LazyLock::new(|| "comment, string".parse().expect("valid scope selector"));
+    let syntax = syntax_for(path).unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
+    let mut parser = ParseState::new(syntax);
+    let mut scopes = ScopeStack::new();
+    let mut stack = Vec::new();
+    let mut pairs = BTreeMap::new();
+    let mut offset = 0;
+    for (row, line) in text.split_inclusive('\n').enumerate() {
+        if row >= LINE_LIMIT || line.len() > LENGTH_LIMIT {
+            break;
+        }
+        let Ok(operations) = parser.parse_line(line, &SYNTAXES) else { break };
+        let mut from = 0;
+        for (to, operation) in operations.into_iter().map(Some).chain(std::iter::once(None))
+            .map(|event| event.map_or((line.len(), None), |(at, op)| (at, Some(op))))
+        {
+            if IGNORED.does_match(scopes.as_slice()).is_none() {
+                for (i, byte) in line.as_bytes()[from..to].iter().copied().enumerate() {
+                    let at = offset + from + i;
+                    match byte {
+                        b'(' | b'[' | b'{' => stack.push((byte, at)),
+                        b')' | b']' | b'}' => {
+                            let open = match byte { b')' => b'(', b']' => b'[', _ => b'{' };
+                            if let Some((kind, first)) = stack.pop() && open == kind {
+                                pairs.insert(first, at);
+                                pairs.insert(at, first);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(op) = operation && scopes.apply(&op).is_err() {
+                return pairs;
+            }
+            from = to;
+        }
+        offset += line.len();
+    }
+    pairs
+}
+
+pub fn bracket_at(pairs: &BTreeMap<usize, usize>, caret: usize) -> Option<(usize, usize)> {
+    pairs.get(&caret).map(|&other| (caret, other)).or_else(|| {
+        let previous = caret.checked_sub(1)?;
+        pairs.get(&previous).map(|&other| (previous, other))
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn headless_bracket_matching_skips_comments_and_strings() {
+    let text = "fn café() { // {\n  let _ = \"[)]\";\n  run([1]);\n}\n";
+    let pairs = brackets("code.rs", text);
+    let block = text.find('{').unwrap();
+    assert_eq!(bracket_at(&pairs, block), Some((block, text.rfind('}').unwrap())));
+    assert!(!pairs.contains_key(&text.rfind('{').unwrap()));
+    assert!(!pairs.contains_key(&text.find('[').unwrap()));
 }
 
 /// A layout job for one line: its colours, or `base` where it has none; `marks` gets a background.

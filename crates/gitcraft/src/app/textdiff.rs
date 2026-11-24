@@ -138,11 +138,83 @@ pub struct SplitRow {
     pub changed: bool,
 }
 
+/// Rows in the split comparison occupied by each side of a changed block.
+#[derive(Default)]
+pub struct SplitIndex {
+    pub lines: [SplitLines; 2],
+    pub marks: [Vec<Range<usize>>; 2],
+    pub changed: [Vec<bool>; 2],
+}
+
+/// Each start maps a consecutive run of document lines to the combined diff rows.
+/// Equal files need just one entry per side, regardless of their length.
+#[derive(Default)]
+pub struct SplitLines {
+    runs: Vec<(usize, usize)>,
+    len: usize,
+}
+
+impl SplitLines {
+    fn push(&mut self, row: usize) {
+        if self.runs.last().is_none_or(|&(line, start)| start + self.len - line != row) {
+            self.runs.push((self.len, row));
+        }
+        self.len += 1;
+    }
+
+    pub fn row(&self, line: usize) -> Option<usize> {
+        if line >= self.len {
+            return None;
+        }
+        let at = self.runs.partition_point(|&(start, _)| start <= line) - 1;
+        let (start, row) = self.runs[at];
+        Some(row + line - start)
+    }
+
+    /// Returns the first document line on or after the given split row, and whether it matches.
+    pub fn line_at_or_after(&self, row: usize) -> Option<(usize, bool)> {
+        let next = self.runs.partition_point(|&(_, start)| start <= row);
+        if let Some(&(line, start)) = next.checked_sub(1).and_then(|i| self.runs.get(i)) {
+            let candidate = line + row - start;
+            let end = self.runs.get(next).map_or(self.len, |&(line, _)| line);
+            if candidate < end {
+                return Some((candidate, true));
+            }
+        }
+        self.runs.get(next).map(|&(line, _)| (line, false))
+    }
+}
+
+impl SplitIndex {
+    fn new(rows: &[SplitRow]) -> Self {
+        let mut index = Self::default();
+        for (row, pair) in rows.iter().enumerate() {
+            for (side, line) in [pair.left, pair.right].into_iter().enumerate() {
+                if line.is_some() {
+                    index.lines[side].push(row);
+                    index.changed[side].push(pair.changed);
+                    if pair.changed {
+                        let marks = &mut index.marks[side];
+                        if let Some(last) = marks.last_mut().filter(|last| last.end == row) {
+                            last.end += 1;
+                        } else {
+                            marks.push(row..row + 1);
+                        }
+                    }
+                }
+            }
+        }
+        index
+    }
+}
+
 pub struct Comparison {
     pub old: Vec<String>,
     pub new: Vec<String>,
     pub rows: Vec<Row>,
     pub split: Vec<SplitRow>,
+    pub split_index: SplitIndex,
+    pub longest: [usize; 2],
     /// Rows (inline) where a block of changes starts.
     pub changes: Vec<usize>,
     pub split_changes: Vec<usize>,
@@ -219,7 +291,9 @@ pub fn compare(old: &str, new: &str, ignore_ws: bool) -> Comparison {
             }
         }
     }
-    Comparison { old: old_lines, new: new_lines, rows, split, changes, split_changes, added, removed }
+    let split_index = SplitIndex::new(&split);
+    let longest = [&old_lines, &new_lines].map(|lines| lines.iter().map(String::len).max().unwrap_or(0));
+    Comparison { old: old_lines, new: new_lines, rows, split, split_index, longest, changes, split_changes, added, removed }
 }
 
 #[cfg(test)]

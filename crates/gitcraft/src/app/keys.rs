@@ -393,6 +393,15 @@ impl App {
                 .collect()
         });
         for (key, mods) in pressed {
+            if self.file_editor_shortcut(ctx, key, mods) {
+                continue;
+            }
+            if key == egui::Key::H && mods.matches_exact(egui::Modifiers::COMMAND)
+                && self.dialog.is_none() && self.open_file_find(true)
+            {
+                ctx.input_mut(|input| input.consume_key(mods, key));
+                continue;
+            }
             let Some(combo) = combo_of(key, mods) else { continue };
             if !is_shortcut(&combo) {
                 continue;
@@ -407,6 +416,9 @@ impl App {
                 continue;
             }
             ctx.input_mut(|i| i.consume_key(mods, key));
+            if cmd.id == "repo:searchCommits" && self.open_file_find(false) {
+                continue;
+            }
             self.run_command(cmd.id);
         }
     }

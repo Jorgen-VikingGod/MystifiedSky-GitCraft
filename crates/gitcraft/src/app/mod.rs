@@ -108,7 +108,7 @@ pub enum Msg {
     /// A missing repository's tab was pointed at this repository: replace the tab with it.
     Located { tab: u64, path: String },
     Repo { tab: u64, generation: u64, result: Box<Result<RepoView, String>> },
-    Page { tab: u64, generation: u64, result: Box<Result<HistoryPage, String>> },
+    Page { tab: u64, generation: u64, request: String, result: Box<Result<HistoryPage, String>> },
     Status { tab: u64, generation: u64, result: Result<gitcraft_core::git::WorkStatus, String> },
     Changed { path: String, full: bool },
     Watching { tab: u64, result: Result<Arc<gitcraft_core::watch::RepoWatch>, String> },
@@ -186,6 +186,7 @@ pub struct App {
     screenshot: Option<PathBuf>,
     shot_view: Option<String>,
     shot_at: u64,
+    shot_since: Instant,
     shot_wait: u64,
     screenshot_sent: bool,
     frames: u64,
@@ -279,6 +280,7 @@ impl App {
             screenshot: opts.screenshot,
             shot_view: opts.shot_view,
             shot_at: 0,
+            shot_since: Instant::now(),
             shot_wait: 40,
             screenshot_sent: false,
             frames: 0,
@@ -631,19 +633,25 @@ impl App {
 
     fn drive_screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.screenshot.clone() else { return };
-        ctx.request_repaint();
-        // A few frames for the icons and the theme to settle.
+        if self.screenshot_sent {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(16));
+        // Reserve a little time for rendering and bound the wait for each load in wall time.
+        let timeout = Duration::from_secs(8);
         let reading = self.repos.values().any(|r| r.loading || r.page_loading || (r.view.is_none() && r.error.is_none()) || r.running.is_some());
-        if self.frames < 30 || self.screenshot_sent || (reading && self.frames < 1200) {
+        if self.frames < 30 || (reading && self.shot_since.elapsed() < timeout) {
             return;
         }
         if let Some(view) = self.shot_view.take() {
             self.show_for_picture(&view);
             self.shot_at = self.frames;
+            self.shot_since = Instant::now();
             return;
         }
-        let busy = self.diffs.values().any(|d| matches!(d.versions, Some(repo::Loaded::Loading))) || self.repos.values().any(|r| r.history_ui.loading || matches!(r.conflict_ui.info, Some(repo::Loaded::Loading)));
-        if self.shot_at > 0 && (self.frames < self.shot_at + self.shot_wait || (busy && self.frames < self.shot_at + 600)) {
+        let busy = self.diffs.values().any(|d| matches!(d.versions, Some(repo::Loaded::Loading)) || d.comparing.is_some())
+            || self.repos.values().any(|r| r.history_ui.loading || matches!(r.conflict_ui.info, Some(repo::Loaded::Loading)));
+        if self.shot_at > 0 && (self.frames < self.shot_at + self.shot_wait || (busy && self.shot_since.elapsed() < timeout)) {
             return;
         }
         self.screenshot_sent = true;
@@ -856,7 +864,7 @@ impl App {
                 self.open_repo(&path);
             }
             Msg::Repo { tab, generation, result } => self.repo_loaded(tab, generation, *result),
-            Msg::Page { tab, generation, result } => self.page_loaded(tab, generation, *result),
+            Msg::Page { tab, generation, request, result } => self.page_loaded(tab, generation, &request, *result),
             Msg::Status { tab, generation, result } => self.status_loaded(tab, generation, result),
             Msg::Changed { path, full } => self.changed(&path, full),
             Msg::Watching { tab, result } => self.watching(tab, result),

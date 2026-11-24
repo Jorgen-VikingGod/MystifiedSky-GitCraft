@@ -14,6 +14,8 @@ use gitcraft_core::actions::Action;
 use gitcraft_core::git::{DiffSource, FileChange, WORKDIR, WorkStatus};
 use std::collections::BTreeMap;
 
+mod spelling;
+
 /// The working-changes panel's own state.
 #[derive(Default)]
 pub struct WorkUi {
@@ -31,6 +33,8 @@ pub struct WorkUi {
     /// Folders closed in the tree view.
     pub closed: std::collections::HashSet<String>,
     pub template_applied: bool,
+    summary_spelling: spelling::State,
+    description_spelling: spelling::State,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -415,7 +419,10 @@ impl App {
             WorkTab::Stash => 220.0,
             WorkTab::Patch => 230.0,
         };
-        let lists_h = (ui.available_height() - box_h).max(60.0);
+        const FILE_SECTION_HEIGHT: f32 = 30.0;
+        // When there are no staged files, keep the staging area visible as unstaged files scroll.
+        let staged_footer = if staged.is_empty() { FILE_SECTION_HEIGHT } else { 0.0 };
+        let lists_h = (ui.available_height() - box_h - staged_footer).max(60.0 - staged_footer);
         let mut events: Vec<(bool, FileEvent)> = Vec::new();
         let active_unstaged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Unstaged).map(|d| d.file.clone());
         let active_staged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Staged).map(|d| d.file.clone());
@@ -503,7 +510,7 @@ impl App {
                     }
                 });
             }
-            let resp = widgets::section_head(ui, !wu.unstaged_closed, 34.0, &format!("Unstaged Files ({})", unstaged.len()), |ui| {
+            let resp = widgets::section_head(ui, !wu.unstaged_closed, FILE_SECTION_HEIGHT, &format!("Unstaged Files ({})", unstaged.len()), |ui| {
                 if !unstaged.is_empty() && widgets::small(ui, Kind::Success, "Stage All Changes").tip(format!("{}+Shift+S", super::menu::MOD)).clicked() {
                     later.push(Box::new(move |app| app.act_quiet(tab, Action::StageAll, true)));
                 }
@@ -524,8 +531,11 @@ impl App {
                     events.push((false, e));
                 }
             }
-            let resp = widgets::section_head(ui, !wu.staged_closed, 34.0, &format!("Staged Files ({})", staged.len()), |ui| {
-                if !staged.is_empty() && widgets::small(ui, Kind::Danger, "Unstage All Changes").tip(format!("{}+Shift+U", super::menu::MOD)).clicked() {
+            if staged.is_empty() {
+                return;
+            }
+            let resp = widgets::section_head(ui, !wu.staged_closed, FILE_SECTION_HEIGHT, &format!("Staged Files ({})", staged.len()), |ui| {
+                if widgets::small(ui, Kind::Danger, "Unstage All Changes").tip(format!("{}+Shift+U", super::menu::MOD)).clicked() {
                     later.push(Box::new(move |app| app.act_quiet(tab, Action::UnstageAll, true)));
                 }
             });
@@ -533,19 +543,18 @@ impl App {
                 wu.staged_closed = !wu.staged_closed;
             }
             if !wu.staged_closed {
-                if staged.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Stage files above to prepare a commit.").size(12.0).color(c.fg3));
-                    });
-                    ui.add_space(8.0);
-                }
                 let menu = |f: &FileChange| self.file_menu(tab, v, &f.path, true, false, None, None);
                 if let Some(e) = self.file_list(ui, ui.scope_id().with("staged"), FileRows { files: &staged, active: active_staged.as_deref(), button: Some(("Unstage File", Kind::Danger)) }, &mut wu.closed, &menu, later) {
                     events.push((true, e));
                 }
             }
         });
+        if staged.is_empty() {
+            let header = widgets::section_head(ui, !wu.staged_closed, FILE_SECTION_HEIGHT, "Staged Files (0)", |_| {});
+            if header.clicked() {
+                wu.staged_closed = !wu.staged_closed;
+            }
+        }
         for (is_staged, e) in events {
             match e {
                 FileEvent::Open(f) => {
@@ -607,13 +616,20 @@ impl App {
                     // The box takes the accent colour while either field has the focus.
                     let (summary_id, description_id) = (egui::Id::NULL.with(("summary", tab)), egui::Id::NULL.with(("description", tab)));
                     let focused = ui.memory(|m| m.has_focus(summary_id) || m.has_focus(description_id));
+                    let language = self.settings.flag("spellcheck", true).then(|| {
+                        if self.settings.string("language", "en") == "es" {
+                            spelling::Language::Spanish
+                        } else {
+                            spelling::Language::English
+                        }
+                    });
                     let border = if focused { ACCENT.gamma_multiply(0.7) } else { c.white(0.1) };
                     egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, border)).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         ui.horizontal(|ui| {
                             ui.add_space(10.0);
                             let w = ui.available_width() - 26.0 - 6.0 - 40.0;
-                            let sresp = ui.add_sized([w, 30.0], egui::TextEdit::singleline(&mut draft.summary).id(summary_id).frame(egui::Frame::NONE).font(FontId::proportional(15.0)).hint_text(egui::RichText::new("Commit summary").color(c.white(0.7))).align(Align2::LEFT_CENTER));
+                            let sresp = spelling::edit(ui, &mut draft.summary, summary_id, spelling::Field::Summary(w), language, &mut wu.summary_spelling);
                             if sresp.changed() {
                                 draft_changed = true;
                             }
@@ -625,7 +641,7 @@ impl App {
                                 later.push(Box::new(move |app| app.ai_commit_message(tab)));
                             }
                         });
-                        let dresp = ui.add(egui::TextEdit::multiline(&mut draft.description).id(description_id).frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6))).font(FontId::proportional(13.5)).hint_text(egui::RichText::new("Description").color(c.white(0.7))).desired_rows(4).desired_width(f32::INFINITY));
+                        let dresp = spelling::edit(ui, &mut draft.description, description_id, spelling::Field::Description, language, &mut wu.description_spelling);
                         if dresp.changed() {
                             draft_changed = true;
                         }

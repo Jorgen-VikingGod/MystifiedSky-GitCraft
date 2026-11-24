@@ -331,23 +331,24 @@ impl App {
         let ignore_ws = self.settings.flag("ignoreWhitespace", false);
         let dark = c.dark;
         match &cache.comparison {
-            Some((ws, cmp)) if *ws == ignore_ws => {
+            Some((ws, cmp)) if *ws == ignore_ws && cache.compared_edits.is_none() && cache.hl.as_ref().is_some_and(|h| h.0 == dark) => {
                 let empty = (dark, Vec::new(), Vec::new());
                 let hl = cache.hl.as_ref().filter(|h| h.0 == dark).unwrap_or(&empty);
                 let split = self.settings.string("diffMode", "hunk") == "split";
                 let wrap = self.settings.flag("wordWrap", false);
-                super::diff::compare_view(ui, ui.scope_id().with(("hist_cmp", &key)), cmp, &target.file, split, wrap, hl, false, false, &mut r.diff_ui.jump);
+                let prefs = self.editor_prefs(ui.ctx());
+                let source = super::diff::ComparisonSource {
+                    texts: [v.old.as_deref().unwrap_or(""), v.new.as_deref().unwrap_or("")],
+                    unicode: cache.unicode.as_ref(),
+                };
+                super::diff::compare_view(ui, ui.scope_id().with(("hist_cmp", &key)), (cache.generation, ignore_ws), cmp, &prefs, split, wrap, hl, source, false, false, &mut r.diff_ui.jump, None);
             }
             _ => {
-                let (o, n, f) = (v.old.clone().unwrap_or_default(), v.new.clone().unwrap_or_default(), target.file.clone());
-                later.push(Box::new(move |app| {
-                    let cmp = super::textdiff::compare(&o, &n, ignore_ws);
-                    let (ho, hn) = (super::highlight::whole(&f, &o, dark), super::highlight::whole(&f, &n, dark));
-                    if let Some(e) = app.diffs.get_mut(&(tab, key)) {
-                        e.comparison = Some((ignore_ws, cmp));
-                        e.hl = Some((dark, ho, hn));
-                    }
-                }));
+                let wanted = (ignore_ws, None, dark);
+                if cache.comparing.is_none() {
+                    let (old, new, file) = (v.old.clone().unwrap_or_default(), v.new.clone().unwrap_or_default(), target.file.clone());
+                    later.push(Box::new(move |app| app.compare_later(tab, key, file, old, new, wanted)));
+                }
             }
         }
     }
