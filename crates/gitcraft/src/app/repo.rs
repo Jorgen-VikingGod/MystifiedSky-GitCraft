@@ -606,6 +606,59 @@ impl App {
         }
     }
 
+    /// A checkout that stopped for uncommitted changes (it asked first, or they block it): bring
+    /// them along, stash them, commit first, or discard them after confirming. Returns whether
+    /// it asked.
+    fn checkout_changes_dialog(&mut self, tab: u64, action: &Action, msg: &str) -> bool {
+        use super::dialogs::{Body, Dialog};
+        use super::widgets::Kind;
+        use gitcraft_core::actions::CheckoutChanges;
+        let (target, changes, remote_stash) = match action {
+            Action::Checkout { target, changes } => (target.clone(), *changes, false),
+            Action::CheckoutRemote { remote_branch, stash_if_needed, changes } => (remote_branch.clone(), *changes, *stash_if_needed),
+            _ => return false,
+        };
+        let choose = changes == CheckoutChanges::Ask && msg == "Choose how to handle your uncommitted changes before checkout.";
+        let blocked = !matches!(changes, CheckoutChanges::Stash | CheckoutChanges::Discard) && !remote_stash && msg.starts_with("Local changes block this checkout.");
+        if !choose && !blocked {
+            return false;
+        }
+        let with = |changes: CheckoutChanges| match action.clone() {
+            Action::Checkout { target, .. } => Action::Checkout { target, changes },
+            Action::CheckoutRemote { remote_branch, stash_if_needed, .. } => Action::CheckoutRemote { remote_branch, stash_if_needed, changes },
+            other => other,
+        };
+        let stash = match action {
+            // A remote branch blocked while updating: stash only if needed, then retry.
+            Action::CheckoutRemote { remote_branch, .. } if blocked => Action::CheckoutRemote { remote_branch: remote_branch.clone(), stash_if_needed: true, changes: CheckoutChanges::Carry },
+            _ => with(CheckoutChanges::Stash),
+        };
+        let (carry, discard) = (with(CheckoutChanges::Carry), with(CheckoutChanges::Discard));
+        let mut text = if choose { format!("Choose what to do with your uncommitted changes before checking out {target}.") } else { msg.to_owned() };
+        if choose {
+            text.push_str("\n\nBring changes: carry compatible edits over and keep staged files staged.");
+        }
+        text.push_str("\n\nStash: save staged, unstaged, and untracked work in a named stash.\n\nCommit first: stay on the current branch and open the commit panel.\n\nDiscard: clear uncommitted changes after confirming.");
+        let mut d = Dialog::new(if choose { "Switch with uncommitted changes?" } else { "Local changes block checkout" }, Body::Text(text)).width(520.0);
+        if choose {
+            d = d.choice("Bring changes", Kind::Primary, move |app, _| app.act(tab, carry));
+        }
+        d = d
+            .choice(if choose { "Stash and switch" } else { "Stash and continue" }, Kind::Default, move |app, _| app.act(tab, stash))
+            .choice("Commit first", Kind::Default, move |app, _| app.focus_commit_summary(tab))
+            .choice("Discard and switch", Kind::Danger, move |app, _| {
+                app.dialog = Some(Dialog::confirm_with(
+                    "Discard changes and switch?",
+                    &format!("Staged, unstaged, and untracked changes will be discarded before checking out {target}. GitCraft keeps a recovery backup."),
+                    "Discard and switch",
+                    true,
+                    move |app, _| app.act(tab, discard),
+                ));
+            });
+        self.dialog = Some(d);
+        true
+    }
+
     fn next_action(&mut self, tab: u64) {
         let engine = self.engine.clone();
         let Some(r) = self.repo_mut(tab) else { return };
@@ -636,8 +689,8 @@ impl App {
     pub(crate) fn acted(&mut self, tab: u64, action: Action, quiet: bool, result: ActionResult) {
         let notify = self.settings.flag("notifySuccess", true);
         let handled = self.after_action(tab, &action, &result, quiet);
-        // A checkout that stashed local changes always says so, and where they went.
-        let stashed = matches!(action, Action::CheckoutRemote { stash_if_needed: true, .. }) && result.message.contains("Your local changes are saved in the stash");
+        // A checkout that stashed or discarded local changes always says so (and where they went).
+        let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
         if !handled && (!result.ok || (!quiet && (notify || stashed))) {
             self.toast(result.ok, result.message.clone());
             if !result.ok {
@@ -690,16 +743,7 @@ impl App {
         }
         let msg = result.message.as_str();
         match action {
-            Action::CheckoutRemote { remote_branch, stash_if_needed: false, .. } if !quiet && msg.starts_with("Local changes block this checkout.") => {
-                self.dialog = Some(Dialog::confirm(
-                    "Stash changes and continue?",
-                    &format!("Git needs to replace files that have local changes. Save your staged, unstaged, and untracked changes in a named stash, then retry checking out {remote_branch}. You can restore the stash when you're ready.\n\n{msg}"),
-                    "Stash and continue",
-                    false,
-                    super::dialogs::Then::Act(tab, Action::CheckoutRemote { remote_branch: remote_branch.clone(), stash_if_needed: true, changes: Default::default() }),
-                ));
-                true
-            }
+            Action::Checkout { .. } | Action::CheckoutRemote { .. } if !quiet && self.checkout_changes_dialog(tab, action, msg) => true,
             Action::Push { force: false, .. } if msg == "This repository has no remote to push to. Add one first." => {
                 self.dialog = Some(Dialog::confirm(
                     "No remote to push to",

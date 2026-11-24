@@ -278,16 +278,7 @@ impl App {
             "repo:discardAll" => self.confirm_act(tab, "Discard all changes?", "All uncommitted changes will be discarded. You can bring them back with Undo.", "Discard All", Action::DiscardAll),
             "repo:undo" => self.act(tab, Action::Undo),
             "repo:redo" => self.act(tab, Action::Redo),
-            "repo:focusCommit" => {
-                if let Some(r) = self.repo_mut(tab) {
-                    r.ui.select(Selection::Wip);
-                    r.ui.rebase = None;
-                    r.ui.conflict = None;
-                    r.work.tab = super::right::WorkTab::Commit;
-                }
-                ctx.memory_mut(|m| m.request_focus(egui::Id::NULL.with(("summary", tab))));
-                self.focus_summary = Some(tab);
-            }
+            "repo:focusCommit" => self.focus_commit_summary(tab),
             "repo:searchCommits" => self.open_search(tab),
             "repo:openInEditor" => self.open_in_editor(tab, None),
             "repo:terminal" => self.open_terminal(tab),
@@ -641,7 +632,7 @@ impl App {
                 }
                 PaletteAction::Command(id) => self.run_command(id),
                 PaletteAction::Open(path) => self.open_repo(&path),
-                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: Default::default() } } else { Action::Checkout { target: name, changes: Default::default() } }),
+                PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask } }),
                 PaletteAction::History(file, blame) => self.open_history(tab, &file, if blame { super::repo::HistoryMode::Blame } else { super::repo::HistoryMode::History }),
                 PaletteAction::Theme(id) => self.set_theme(id),
                 PaletteAction::Profile(i) => self.switch_profile(i),
@@ -896,5 +887,23 @@ mod tests {
         let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
         assert_eq!(combo_of(egui::Key::Minus, ctrl).as_deref(), Some("Ctrl+-"));
         assert_eq!(combo_of(egui::Key::Plus, egui::Modifiers { shift: true, ..ctrl }).as_deref(), Some("Ctrl+="));
+    }
+}
+
+impl App {
+    /// Show the working changes with the commit box, the cursor in its summary.
+    pub(crate) fn focus_commit_summary(&mut self, tab: u64) {
+        self.activate(tab);
+        self.settings.set("showRight", true);
+        if let Some(r) = self.repo_mut(tab) {
+            r.ui.select(Selection::Wip);
+            r.ui.rebase = None;
+            r.ui.conflict = None;
+            r.ui.pr = None;
+            r.ui.issue = None;
+            r.work.tab = super::right::WorkTab::Commit;
+        }
+        self.ctx.memory_mut(|m| m.request_focus(egui::Id::NULL.with(("summary", tab))));
+        self.focus_summary = Some(tab);
     }
 }

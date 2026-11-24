@@ -122,7 +122,7 @@ impl App {
                     let name = b.name.clone();
                     entries.push(item(format!("{}{}", if is_head { "✓ " } else { "   " }, b.name), move |app| {
                         if !is_head {
-                            app.act(tab, Action::Checkout { target: name, changes: Default::default() });
+                            app.act(tab, Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask });
                         }
                     }));
                 }

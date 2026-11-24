@@ -1233,8 +1233,8 @@ impl App {
     pub(crate) fn checkout_ref(&mut self, tab: u64, r: &GitRef) {
         let head = self.repo(tab).and_then(|t| t.view.as_ref()).and_then(|v| v.data.head_branch.clone());
         match r.kind {
-            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone(), changes: Default::default() }),
-            RefKind::Remote => self.act(tab, Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: Default::default() }),
+            RefKind::Local if Some(&r.name) != head.as_ref() => self.act(tab, Action::Checkout { target: r.name.clone(), changes: gitcraft_core::actions::CheckoutChanges::Ask }),
+            RefKind::Remote => self.act(tab, Action::CheckoutRemote { remote_branch: r.name.clone(), stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask }),
             _ => {}
         }
     }
