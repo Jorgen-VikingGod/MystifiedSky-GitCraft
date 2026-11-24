@@ -38,6 +38,7 @@ async function until(condition:()=>boolean,label:string){for(let i=0;i<250;i++){
 let root=createRoot(document.getElementById("test-root")!);
 const mount=(node:React.ReactNode)=>flushSync(()=>root.render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>));
 const button=(text:string)=>[...document.querySelectorAll<HTMLButtonElement>("button")].find(button=>button.textContent?.trim()===text);
+const checkoutChoice=(label:string)=>document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${label}"]`);
 function input(element:HTMLInputElement,value:string){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value")!.set!.call(element,value);element.dispatchEvent(new Event("input",{bubbles:true}));}
 const sha=(c:string)=>c.repeat(40);
 const commit=(id:string)=>({sha:sha(id),parents:[],author:"Fixture",email:"fixture@example.invalid",time:1,summary:`Commit ${id}`,body:""});
@@ -82,6 +83,47 @@ await test("B025 empty upstream submission",async()=>{
   await until(()=>calls.some(call=>call.command==="run_action"&&call.args.action.type==="setUpstream"),"upstream action");
   assert(calls.find(call=>call.command==="run_action")!.args.action.upstream==="","Empty upstream was rejected");
 });
+await test("Local branch checkout offers carry, stash, commit, and confirmed discard", async () => {
+  handlers.run_action = ({ action }) => action.changes === "ask"
+    ? { ok: false, message: "Choose how to handle your uncommitted changes before checkout." }
+    : { ok: true, message: "Checked out topic" };
+  repo.status.staged = [{path:"work.txt",status:"M"}];
+  mount(<><div data-active-repository="true"><RightPanel repo={repo} tabId={tabId}/></div><Dialogs /></>);
+  const checkout = async () => {
+    void act(repo.path, { type: "checkout", target: "topic" });
+    await until(() => !!checkoutChoice("Bring changes") && !!checkoutChoice("Stash and switch"), "checkout choices");
+  };
+  const choices = () => calls.filter(call => call.command === "run_action").map(call => call.args.action.changes);
+  await checkout();
+  button("Cancel")!.click();
+  await until(() => !useStore.getState().dialog && useStore.getState().busy === null, "cancelled branch switch");
+  assert(choices().join(",") === "ask", "Cancel sent a mutation");
+
+  for (const [label, mode] of [["Bring changes", "carry"], ["Stash and switch", "stash"]]) {
+    await checkout();
+    checkoutChoice(label)!.click();
+    await until(() => choices().at(-1) === mode && useStore.getState().busy === null, `submitted ${mode} checkout`);
+  }
+  await checkout();
+  checkoutChoice("Commit first")!.click();
+  await until(() => document.activeElement?.hasAttribute("data-commit-summary") === true, "commit summary focus");
+  assert(choices().at(-1) === "ask", "Commit first must leave checkout and committing to the user");
+
+  await checkout();
+  checkoutChoice("Discard and switch")!.click();
+  await until(() => !!button("Discard and switch"), "discard confirmation");
+  assert(!choices().includes("discard"), "Discard ran before confirmation");
+  button("Cancel")!.click();
+  await until(() => !useStore.getState().dialog, "cancelled discard");
+  assert(!choices().includes("discard"), "Cancelling discard sent a mutation");
+
+  await checkout();
+  checkoutChoice("Discard and switch")!.click();
+  await until(() => !!button("Discard and switch"), "second discard confirmation");
+  button("Discard and switch")!.click();
+  await until(() => choices().at(-1) === "discard" && useStore.getState().busy === null, "confirmed discard checkout");
+});
+
 await test("Remote branch double-click offers a stash only after Git reports blocking edits", async () => {
   repo.refs = [{ name: "origin/topic", full: "refs/remotes/origin/topic", kind: "Remote", sha: sha("b"), upstream: null, ahead: 0, behind: 0 }];
   handlers.run_action = ({ action }) => action.stashIfNeeded
@@ -96,14 +138,14 @@ await test("Remote branch double-click offers a stash only after Git reports blo
   const doubleClick = () => row()!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
   const actions = () => calls.filter(call => call.command === "run_action").map(call => call.args.action);
   doubleClick();
-  await until(() => !!button("Stash and continue"), "stash confirmation");
+  await until(() => !!checkoutChoice("Stash and continue"), "stash confirmation");
   assert(actions().length === 1 && !actions()[0].stashIfNeeded, "Checkout attempted to stash before confirmation");
   button("Cancel")!.click();
-  await until(() => !button("Stash and continue") && useStore.getState().busy === null, "cancelled checkout");
+  await until(() => !checkoutChoice("Stash and continue") && useStore.getState().busy === null, "cancelled checkout");
   assert(actions().length === 1, "Cancel retried the checkout");
   doubleClick();
-  await until(() => !!button("Stash and continue"), "second stash confirmation");
-  button("Stash and continue")!.click();
+  await until(() => !!checkoutChoice("Stash and continue"), "second stash confirmation");
+  checkoutChoice("Stash and continue")!.click();
   await until(() => actions().length === 3 && useStore.getState().busy === null, "confirmed checkout retry");
   const retry = actions()[2];
   assert(retry.type === "checkoutRemote" && retry.remoteBranch === "origin/topic" && retry.stashIfNeeded, "Retry did not use the confirmed remote branch and stash mode");
@@ -504,6 +546,45 @@ await test("B099 URL fetch retry retains the newly added remote",async()=>{
   assert(calls.filter(c=>c.command==="run_action"&&c.args.action.type==="addRemote").length===1,"Fetch retry tried to recreate the remote");
   assert(fetches===2,"Fetch was not retried");
 });
+await test("Working changes have a clear lane to the checked-out commit", async () => {
+  const metrics = useStore.getState().metrics;
+  useStore.getState().setSettings({graphColumnWidths:{refs:200, graph:120, message:450}});
+  const view = (data: typeof repo) => <div style={{height:300,width:900}}><GraphView repo={data} tabId={tabId}/></div>;
+  const node = (summary: string) => document.querySelector(`[aria-label="${summary}"]`)?.parentElement?.querySelector("[data-commit-avatar]");
+  const left = (summary: string) => (node(summary) as HTMLElement).getBoundingClientRect().left;
+  const history = Array.from({length:30}, (_, i) => ({...commit("a"), sha: i.toString(16).padStart(40,"0"), summary: i === 0 ? "master tip" : i === 20 ? "test tip" : `commit ${i}`}));
+  repo.commits = history;
+  repo.head_sha = history[20].sha;
+  repo.head_branch = "test";
+  repo.graph = {width:1, rows:history.map((_,i) => ({col:0, color:0, up:[], down:[], up_runs:i > 0 ? [[0,0]] : [], down_runs:i < history.length - 1 ? [[0,0]] : [], merge:false}))};
+  mount(view(repo));
+  await until(() => !!node("master tip"), "clean commit graph");
+  const originalLane = left("master tip");
+  const dirty = {...repo, status:{...repo.status, unstaged:[{path:"test.txt",status:"M"}]}};
+  mount(view(dirty));
+  await until(() => left("master tip") === originalLane + metrics.lane, "clear lane above the checked-out branch");
+
+  const scroll = document.querySelector<HTMLElement>("[data-graph-scroll]")!;
+  scroll.scrollTop = metrics.row * 11;
+  scroll.dispatchEvent(new Event("scroll"));
+  await until(() => !node("master tip") && !!node("test tip"), "scrolled past the working changes row");
+  assert(left("test tip") === originalLane, "The checked-out tip moved away from the working changes lane");
+  const canvas = scroll.querySelector("canvas")!;
+  const ratio = window.devicePixelRatio || 1;
+  const x = Math.round((originalLane + metrics.node / 2 - canvas.getBoundingClientRect().left) * ratio);
+  const alpha = canvas.getContext("2d")!.getImageData(x, 0, 1, Math.round(metrics.row * ratio)).data.filter((_,i) => i % 4 === 3);
+  assert(alpha.some(v => v > 0) && alpha.some(v => v === 0), "The dashed line disappeared when the working changes row scrolled offscreen");
+
+  scroll.scrollTop = 0;
+  scroll.dispatchEvent(new Event("scroll"));
+  const testTip = {...history[1], summary:"test tip"};
+  const sideLane = {...dirty.graph.rows[1], col:1, color:1, up_runs:[], down_runs:[]};
+  const diverged = {...dirty, commits:[history[0],testTip], head_sha:testTip.sha, graph:{width:2, rows:[dirty.graph.rows[0],sideLane]}};
+  mount(view(diverged));
+  await until(() => !!node("master tip") && !!node("test tip"), "diverged branches in the viewport");
+  assert(left("test tip") === originalLane && left("master tip") === originalLane + metrics.lane, "Working changes should lead to the checked-out side branch in the left lane");
+});
+
 await test("Graph canvas redraws when display scale changes", async () => {
   mount(<div style={{height:300,width:900}}><GraphView repo={repo} tabId={tabId}/></div>);
   await until(() => (document.querySelector("canvas")?.width ?? 0) > 1, "initial canvas");

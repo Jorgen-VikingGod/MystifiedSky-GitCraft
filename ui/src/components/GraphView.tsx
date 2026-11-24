@@ -35,6 +35,7 @@ export function GraphView({ repo, tabId }: Props) {
   const lazyLoad = useStore((s) => s.settings.lazyLoad);
   const hidden = useStore((s) => s.settings.hidden[repo.path]) ?? NO_REFS;
   const solo = useStore((s) => s.settings.solo[repo.path]) ?? NO_REFS;
+  const hasPinnedBranch = useStore((s) => !!s.settings.pinned?.[repo.path]);
   const setSettings = useStore((s) => s.setSettings);
   const commitIndex = useMemo(() => new Map(repo.commits.map((c, i) => [c.sha, i])), [repo.commits]);
   const ROW = m.row;
@@ -116,6 +117,9 @@ export function GraphView({ repo, tabId }: Props) {
   }, [showMarkers]);
   const rects = useMemo(() => markerRects(DEFAULT_MARKERS, { ...markerRows.rows, selection: selectedIdx >= 0 ? [selectedIdx + off] : [] }, markerRows.upstream, total, stripH, MARKER_STRIP_WIDTH), [markerRows, total, stripH, selectedIdx, off]);
   const headLane = headIdx >= 0 ? repo.graph.rows[headIdx]?.col ?? 0 : 0;
+  // Give the working changes the left lane while respecting an explicitly pinned branch.
+  const wipLane = hasPinnedBranch ? headLane : 0;
+  const wipLaneEnd = wip ? (headIdx >= 0 ? headIdx : repo.commits.length) : 0;
 
   // Search (Ctrl+F)
   const q = ui.search.trim().toLowerCase();
@@ -152,7 +156,7 @@ export function GraphView({ repo, tabId }: Props) {
 
   // Zone widths: default widths when the pane has room, otherwise the branch/tag zone gives way
   // first (down to REF_ZONE_MIN_WIDTH) and the message zone keeps COMMIT_MESSAGE_ZONE_MIN_WIDTH.
-  const lanesW = GUTTER + Math.max(1, repo.graph.width) * LANE + PAD * 2;
+  const lanesW = GUTTER + (Math.max(1, repo.graph.width) + Number(wipLaneEnd > 0)) * LANE + PAD * 2;
   const minimum: Record<GraphColumn, number> = { refs: m.ref_zone_min, graph: lanesW, message: m.message_min, author: 80, date: 100, sha: 60, changes: 80 };
   const maxWidth = (key: GraphColumn) => Math.max(minimum[key], key === "message" ? 10000 : 1600);
   const sized = (key: GraphColumn, fallback: number) => {
@@ -192,6 +196,10 @@ export function GraphView({ repo, tabId }: Props) {
   };
   const handle = (key: GraphColumn, label: string, width: number) => <ColumnResize label={label} width={width} min={minimum[key]} max={maxWidth(key)} onResize={value => resizeColumn(key, value)} onReset={() => resizeColumn(key)}/>;
   const laneX = (l: number) => refW + GUTTER + l * LANE + LANE / 2;
+  const shiftedLaneX = (lane: number) => laneX(lane >= wipLane ? lane + 1 : lane);
+  const headFirstLaneX = (lane: number) => laneX(lane === headLane ? 0 : lane < headLane ? lane + 1 : lane);
+  const historyLaneX = wip && !hasPinnedBranch && headLane > 0 ? headFirstLaneX : laneX;
+  const commitLaneX = (lane: number, index: number) => index < wipLaneEnd ? shiftedLaneX(lane) : historyLaneX(lane);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -308,34 +316,44 @@ export function GraphView({ repo, tabId }: Props) {
       g.stroke();
     };
 
-    for (let d = first; d <= last; d++) {
+    const wipX = laneX(wipLane);
+    if (wip) {
+      const wipY = ROW / 2 - scrollTop;
+      const headY = (headIdx + off) * ROW - scrollTop + ROW / 2;
+      g.setLineDash([3, 3]);
+      g.strokeStyle = laneColor(headLane);
+      if (wipY + NODE / 2 > 0 && wipY - NODE / 2 < viewH) {
+        g.beginPath();
+        g.arc(wipX, wipY, NODE / 2 - 1, 0, Math.PI * 2);
+        g.stroke();
+      }
+      // Keep drawing the dashed connection when the WIP row has scrolled away.
+      const lineStart = wipY + NODE / 2;
+      if (headIdx >= 0 && lineStart < viewH && headY > 0) {
+        const top = Math.max(0, lineStart);
+        g.lineDashOffset = (top - lineStart) % 6;
+        g.beginPath();
+        g.moveTo(wipX, top);
+        g.lineTo(wipX, Math.min(viewH, headY));
+        g.stroke();
+        g.lineDashOffset = 0;
+      }
+      g.setLineDash([]);
+    }
+
+    for (let d = Math.max(first, off); d <= last; d++) {
       const y0 = d * ROW - scrollTop;
       const yc = y0 + ROW / 2;
       const y1 = y0 + ROW;
-      if (d < off) {
-        // WIP row: dashed node joined to the checked-out commit.
-        const x = laneX(headLane);
-        g.setLineDash([3, 3]);
-        g.strokeStyle = laneColor(headLane);
-        g.beginPath();
-        g.arc(x, yc, NODE / 2 - 1, 0, Math.PI * 2);
-        g.stroke();
-        if (headIdx >= 0) {
-          g.beginPath();
-          g.moveTo(x, yc + NODE / 2);
-          g.lineTo(x, Math.min(viewH, (headIdx + off) * ROW - scrollTop + ROW / 2));
-          g.stroke();
-        }
-        g.setLineDash([]);
-        continue;
-      }
       const i = d - off;
       const row = repo.graph.rows[i];
       if (!row) continue;
-      for (const [from, to] of row.up_runs ?? []) for (let lane = from; lane <= to; lane++) curve(laneX(lane), y0, laneX(lane), yc, laneColor(lane), false);
-      for (const [from, to] of row.down_runs ?? []) for (let lane = from; lane <= to; lane++) curve(laneX(lane), yc, laneX(lane), y1, laneColor(lane), true);
-      for (const s of row.up) curve(laneX(s.from), y0, laneX(s.to), yc, laneColor(s.color), false);
-      for (const s of row.down) curve(laneX(s.from), yc, laneX(s.to), y1, laneColor(s.color), true);
+      const topX = wipLaneEnd > 0 && i <= wipLaneEnd ? shiftedLaneX : historyLaneX;
+      const rowX = i < wipLaneEnd ? shiftedLaneX : historyLaneX;
+      for (const [from, to] of row.up_runs ?? []) for (let lane = from; lane <= to; lane++) curve(topX(lane), y0, rowX(lane), yc, laneColor(lane), false);
+      for (const [from, to] of row.down_runs ?? []) for (let lane = from; lane <= to; lane++) curve(rowX(lane), yc, rowX(lane), y1, laneColor(lane), true);
+      for (const s of row.up) curve(topX(s.from), y0, rowX(s.to), yc, laneColor(s.color), false);
+      for (const s of row.down) curve(rowX(s.from), yc, rowX(s.to), y1, laneColor(s.color), true);
     }
     g.restore();
     // Nodes on top of the lines; connector from the branch label to its node.
@@ -345,7 +363,7 @@ export function GraphView({ repo, tabId }: Props) {
       const c = repo.commits[i];
       if (!row || !c) continue;
       const yc = d * ROW - scrollTop + ROW / 2;
-      const x = laneX(row.col);
+      const x = commitLaneX(row.col, i);
       if (x > refW + graphW) continue;
       const col = laneColor(row.color);
       g.globalAlpha = q && !matchSet.has(i) ? m.min_alpha / 100 : 1;
@@ -354,6 +372,10 @@ export function GraphView({ repo, tabId }: Props) {
         g.lineWidth = 2;
         g.beginPath();
         g.moveTo(refW, yc);
+        if (i < wipLaneEnd && row.col >= wipLane) {
+          g.lineTo(wipX - LANE / 4, yc);
+          g.moveTo(wipX + LANE / 4, yc);
+        }
         g.lineTo(x - NODE / 2, yc);
         g.stroke();
       }
@@ -365,7 +387,7 @@ export function GraphView({ repo, tabId }: Props) {
       }
       g.globalAlpha = 1;
     }
-  }, [repo.graph, repo.commits, first, last, scrollTop, viewH, refW, graphW, off, headLane, headIdx, refsBySha, m, cols.graph, cols.refs, q, matchSet, dpr]);
+  }, [repo.graph, repo.commits, first, last, scrollTop, viewH, refW, graphW, wip, off, headLane, headIdx, hasPinnedBranch, wipLane, wipLaneEnd, refsBySha, m, cols.graph, cols.refs, q, matchSet, dpr]);
 
   const select = (sel: { type: "wip" } | { type: "commit"; sha: string }) => setUi(tabId, { selection: sel, diff: null, multi: [], compareWorkdir: null, history: null });
 
@@ -448,7 +470,7 @@ export function GraphView({ repo, tabId }: Props) {
         top={d * ROW}
         refW={refW}
         graphW={graphW}
-        nodeX={laneX(gr.col)}
+        nodeX={commitLaneX(gr.col, i)}
         merge={gr.merge}
         extras={extras}
         extraWidth={extraWidth}

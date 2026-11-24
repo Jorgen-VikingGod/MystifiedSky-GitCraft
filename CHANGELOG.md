@@ -9,6 +9,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
 
 - Double-clicking a remote branch whose local branch is behind it now fast-forwards that local branch after switching to it. Diverged branches are switched to but never merged, and local edits are never overwritten.
+- When switching branches with uncommitted changes, choose to bring them along, stash them, commit first, or discard them after confirmation.
 - Join the GitCraft community from the Help menu.
 - Copy diagnostics from Help, open a repository in another window, and open clone URLs in a prefilled dialog.
 - Bisect from the graph. Stash selected changes, retain staged changes, or stash only untracked files.
@@ -44,6 +45,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 - Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts.
 - In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
+- Give the working-changes line its own lane above the checked-out commit so it stays clear of other commits.
 - Show the first bad bisect commit on newer Git versions.
 - Close repository windows independently, save their drafts, and stop their terminals. Stop managed subprocesses on app exit.
 - Find build tools in the active or default installation when a desktop editor omits them from PATH.

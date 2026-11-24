@@ -604,6 +604,7 @@ function TabBtn({ active, onClick, children, title }: { active: boolean; onClick
   return (
     <button
       title={title}
+      data-commit-tab={title === "Commit" ? true : undefined}
       onClick={onClick}
       className={cn("flex items-center gap-1.5 h-[30px] px-[10px] text-[14px] rounded-t-[3px]", active ? "bg-field text-white border border-white/10 border-b-transparent" : "text-white/70 hover:text-white")}
     >

@@ -88,30 +88,37 @@ export function Dialogs() {
       return <PreferencesScreen onClose={close} section={d.section} />;
     case "choice": {
       const cancel = () => { close(); d.onCancel?.(); };
+      const described = d.choices.some(choice => choice.description);
+      const choices = d.choices.map(choice => (
+        <Button
+          key={choice.label}
+          variant={choice.variant ?? "default"}
+          aria-label={described ? choice.label : undefined}
+          className={described ? "h-auto w-full flex-col items-start gap-0.5 whitespace-normal px-3 py-2 text-left" : undefined}
+          onClick={() => {
+            close();
+            choice.onSelect();
+          }}
+        >
+          <span className={described ? "font-semibold" : undefined}>{choice.label}</span>
+          {choice.description && <span className="text-[12px] text-fg2">{choice.description}</span>}
+        </Button>
+      ));
       return (
         <Dialog
           open
           onClose={cancel}
           title={d.title}
+          width={described ? 490 : undefined}
           footer={
             <>
-              <Button onClick={cancel}>Cancel</Button>
-              {d.choices.map((c) => (
-                <Button
-                  key={c.label}
-                  variant={c.variant ?? "default"}
-                  onClick={() => {
-                    close();
-                    c.onSelect();
-                  }}
-                >
-                  {c.label}
-                </Button>
-              ))}
+              <Button data-dialog-initial-focus={described || undefined} onClick={cancel}>Cancel</Button>
+              {!described && choices}
             </>
           }
         >
           <p className="text-[13px] text-fg leading-relaxed whitespace-pre-wrap break-words max-h-[50vh] overflow-auto">{d.text}</p>
+          {described && <div className="grid gap-2 mt-3">{choices}</div>}
         </Dialog>
       );
     }

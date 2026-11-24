@@ -310,6 +310,9 @@ export async function act(path: string, action: Action, quiet = false): Promise<
   }
   // Commit > Remove comments from commit messages.
   if (action.type === "commit" && set.stripComments) action = { ...action, stripComments: true };
+  if (!quiet && (action.type === "checkout" || action.type === "checkoutRemote") && action.changes === undefined) {
+    action = { ...action, changes: "ask" };
+  }
   // Pull / Push / Stash / Pop show a spinning circle on their toolbar button while this runs (lib/spin.ts).
   const run = action;
   const execute = () => withSpin(path, spinButtonFor(run, quiet), () => runAct(path, run, quiet));
@@ -325,6 +328,23 @@ const activeActions = new Map<string, string>();
 let bulkProgress: string | null = null;
 function updateBusy() { useStore.getState().setBusy(bulkProgress ?? (activeActions.size > 1 ? `Working in ${activeActions.size} repositories…` : activeActions.values().next().value ?? null)); }
 export function setBulkProgress(text: string | null) { bulkProgress = text; updateBusy(); }
+
+export function focusCommitSummary(path?: string) {
+  const state = useStore.getState();
+  const tab = state.tabs.find(tab => tab.id === state.activeId && (!path || tab.path === path)) ?? state.tabs.find(tab => path && tab.path === path);
+  if (!tab?.path) return;
+  state.setActive(tab.id);
+  state.setSettings({ showRight: true });
+  state.setUi(tab.id, { selection: { type: "wip" }, diff: null, history: null, rebase: null, conflict: null, multi: [], compareWorkdir: null, pr: null, issue: null });
+  const activeRepo = "[data-active-repository='true']";
+  requestAnimationFrame(() => {
+    if (useStore.getState().activeId !== tab.id) return;
+    document.querySelector<HTMLButtonElement>(`${activeRepo} [data-commit-tab]`)?.click();
+    requestAnimationFrame(() => {
+      if (useStore.getState().activeId === tab.id) document.querySelector<HTMLInputElement>(`${activeRepo} [data-commit-summary]`)?.focus();
+    });
+  });
+}
 
 async function runAct(path: string, action: Action, quiet: boolean): Promise<boolean> {
   const st = useStore.getState();
@@ -342,15 +362,33 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
   actionChanges.set(path, { full: false });
   try {
     const r = await api.run(path, action);
-    if (!r.ok && !quiet && action.type === "checkoutRemote" && !action.stashIfNeeded && r.message.startsWith("Local changes block this checkout.")) {
-      confirmThen(
-        "Stash changes and continue?",
-        `Git needs to replace files that have local changes. Save your staged, unstaged, and untracked changes in a named stash, then retry checking out ${action.remoteBranch}. You can restore the stash when you're ready.\n\n${r.message}`,
-        "Stash and continue",
-        () => void act(path, { ...action, stashIfNeeded: true }),
-        false,
-      );
-      return false;
+    const checkout = action.type === "checkout" || action.type === "checkoutRemote";
+    if (!r.ok && !quiet && checkout) {
+      const target = action.type === "checkout" ? action.target : action.remoteBranch;
+      const choose = action.changes === "ask" && r.message === "Choose how to handle your uncommitted changes before checkout.";
+      const blocked = action.changes !== "stash" && action.changes !== "discard" && !(action.type === "checkoutRemote" && action.stashIfNeeded) && r.message.startsWith("Local changes block this checkout.");
+      if (choose || blocked) {
+        const stash: Action = blocked && action.type === "checkoutRemote"
+          ? { ...action, changes: "carry", stashIfNeeded: true }
+          : { ...action, changes: "stash" };
+        st.setDialog({
+          kind: "choice",
+          title: choose ? "Switch with uncommitted changes?" : "Local changes block checkout",
+          text: choose ? `Choose what to do with your uncommitted changes before checking out ${target}.` : r.message,
+          choices: [
+            ...(choose ? [{ label: "Bring changes", description: "Carry compatible edits over and keep staged files staged.", variant: "primary" as const, onSelect: () => void act(path, { ...action, changes: "carry" }) }] : []),
+            { label: choose ? "Stash and switch" : "Stash and continue", description: "Save staged, unstaged, and untracked work in a named stash.", onSelect: () => void act(path, stash) },
+            { label: "Commit first", description: "Stay on the current branch and open the commit panel.", onSelect: () => focusCommitSummary(path) },
+            { label: "Discard and switch", description: "Clear uncommitted changes after confirming.", variant: "danger", onSelect: () => confirmThen(
+              "Discard changes and switch?",
+              `Staged, unstaged, and untracked changes will be discarded before checking out ${target}. GitCraft keeps a recovery backup.`,
+              "Discard and switch",
+              () => void act(path, { ...action, changes: "discard" }),
+            ) },
+          ],
+        });
+        return false;
+      }
     }
     if (!r.ok && action.type === "push" && !action.force && r.message === "This repository has no remote to push to. Add one first.") {
       confirmThen(
@@ -388,8 +426,8 @@ async function runAct(path: string, action: Action, quiet: boolean): Promise<boo
       void offerSignInHelp(path, action, r.message);
       return false;
     }
-    const checkoutStashed = action.type === "checkoutRemote" && action.stashIfNeeded && r.message.includes("Your local changes are saved in the stash");
-    if (!r.ok || (!quiet && (st.settings.notifySuccess || checkoutStashed))) st.toast(r.ok, r.message);
+    const checkoutSaved = checkout && (r.message.includes("Your local changes are saved in the stash") || r.message.includes("Discarded changes."));
+    if (!r.ok || (!quiet && (st.settings.notifySuccess || checkoutSaved))) st.toast(r.ok, r.message);
     ok = r.ok;
     await afterAction(path, action, r.ok, r.message, wasMerging);
     return r.ok;

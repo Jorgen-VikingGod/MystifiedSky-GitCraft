@@ -77,6 +77,7 @@ fn branch_config(dir: &Path, name: &str) -> Result<Vec<(String,String)>, git::Gi
 /// Git's answer when there is nothing to stash; the toolbar Stash treats it as an error
 /// (a stash with no local changes is refused instead of reported as done).
 pub const STASH_NOTHING: &str = "No local changes to save";
+const DISCARD_NOTHING: &str = "There are no changes to discard.";
 
 fn checkout_would_overwrite(out: &git::GitOut) -> bool {
     !out.ok && (out.stderr.contains("would be overwritten by checkout")
@@ -92,6 +93,16 @@ pub fn stash_message(message: &str, branch: &str) -> String {
     }
     let branch = branch.trim();
     format!("WIP on {}", if branch.is_empty() || branch == "HEAD" { "(no branch)" } else { branch })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckoutChanges {
+    Ask,
+    #[default]
+    Carry,
+    Stash,
+    Discard,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,8 +128,8 @@ pub enum Action {
         #[serde(default)]
         sign_off: bool,
     },
-    Checkout { target: String },
-    CheckoutRemote { remote_branch: String, #[serde(default)] stash_if_needed: bool },
+    Checkout { target: String, #[serde(default)] changes: CheckoutChanges },
+    CheckoutRemote { remote_branch: String, #[serde(default)] stash_if_needed: bool, #[serde(default)] changes: CheckoutChanges },
     CheckoutPullRequest { url: String, reference: String, expected: String },
     CreateBranch { name: String, at: Option<String>, checkout: bool },
     DeleteBranch { name: String },
@@ -527,7 +538,65 @@ impl Engine {
         Ok(())
     }
 
-    fn checkout_remote(&self, repo: &str, remote_branch: &str, stash_if_needed: bool) -> Result<String, String> {
+    fn review_checkout_changes(&self, dir: &Path, changes: CheckoutChanges) -> Result<(), String> {
+        if changes != CheckoutChanges::Ask { return Ok(()); }
+        let status = git::run(dir, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=dirty"]);
+        if !status.ok { return Err(status.message()); }
+        if !status.stdout.is_empty() { return Err("Choose how to handle your uncommitted changes before checkout.".into()); }
+        Ok(())
+    }
+
+    fn save_checkout_changes(&self, dir: &Path, name: &str) -> Result<bool, String> {
+        self.check_stash_allowed(dir).map_err(|error| error.message())?;
+        let out = self.git(dir, &["stash", "push", "--include-untracked", "-m", name]);
+        if !out.ok { return Err(format!("Could not save local changes in a stash.\n\n{}", out.message())); }
+        Ok(!out.stdout.lines().any(|line| line.trim() == STASH_NOTHING))
+    }
+
+    fn prepare_checkout_changes(&self, repo: &str, dir: &Path, name: &str, changes: CheckoutChanges) -> Result<Option<String>, String> {
+        self.review_checkout_changes(dir, changes)?;
+        match changes {
+            CheckoutChanges::Stash if self.save_checkout_changes(dir, name)? => {
+                Ok(Some(format!("Your local changes are saved in the stash “{name}”.")))
+            }
+            CheckoutChanges::Discard => {
+                self.check_stash_allowed(dir).map_err(|error| error.message())?;
+                let discarded = self.discard(repo, dir, None);
+                if discarded.ok { Ok(Some(discarded.message)) }
+                else if discarded.message == DISCARD_NOTHING { Ok(None) }
+                else { Err(discarded.message) }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn checkout_result(result: Result<String, String>, notice: Option<String>) -> Result<String, String> {
+        let Some(notice) = notice else { return result; };
+        result.map(|message| format!("{}. {notice}", message.trim_end_matches('.'))).map_err(|error| format!("{notice}\n\n{error}"))
+    }
+
+    fn checkout_local(&self, repo: &str, target: &str, changes: CheckoutChanges) -> Result<String, String> {
+        let dir = Path::new(repo);
+        let revision = self.rev(dir, &format!("{target}^{{commit}}"));
+        if target.starts_with('-') || revision.is_empty() { return Err("The checkout target is unavailable. Refresh the repository and try again.".into()); }
+        let from = self.head_name(dir);
+        if target == from || self.branch_ref(dir) == target { return Ok(format!("Already checked out {target}")); }
+        crate::manage::require_lfs_for_checkout(dir, &revision)?;
+        let name = format!("Changes before checking out {target}");
+        let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
+        let out = self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"]);
+        let result = if out.ok {
+            self.push_undo(repo, UndoRec::Checkout { from, to: target.to_string() });
+            Ok(format!("Checked out {target}"))
+        } else if checkout_would_overwrite(&out) && matches!(changes, CheckoutChanges::Ask | CheckoutChanges::Carry) {
+            Err(format!("Local changes block this checkout.\n\n{}", out.message()))
+        } else {
+            Err(out.message())
+        };
+        Self::checkout_result(result, notice)
+    }
+
+    fn checkout_remote(&self, repo: &str, remote_branch: &str, stash_if_needed: bool, changes: CheckoutChanges) -> Result<String, String> {
         let dir = Path::new(repo);
         let local = remote_branch.split_once('/').map(|(_, branch)| branch).unwrap_or(remote_branch);
         let selected = format!("refs/remotes/{remote_branch}");
@@ -557,21 +626,18 @@ impl Engine {
         }
 
         let stash_name = format!("Changes before checking out {remote_branch}");
-        let mut stashed = false;
+        let mut notice = if !already_on_local || behind && changes == CheckoutChanges::Discard {
+            self.prepare_checkout_changes(repo, dir, &stash_name, changes)?
+        } else { None };
         let mut run = |args: &[&str]| -> Result<(), String> {
             let out = self.git(dir, args);
             if out.ok { return Ok(()); }
-            if checkout_would_overwrite(&out) && !stashed {
+            if checkout_would_overwrite(&out) && notice.is_none() && matches!(changes, CheckoutChanges::Ask | CheckoutChanges::Carry) {
                 if !stash_if_needed {
                     return Err(format!("Local changes block this checkout.\n\n{}", out.message()));
                 }
-                self.check_stash_allowed(dir).map_err(|error| error.message())?;
-                let saved = self.git(dir, &["stash", "push", "--include-untracked", "-m", &stash_name]);
-                if !saved.ok { return Err(format!("Could not save local changes in a stash.\n\n{}", saved.message())); }
-                if saved.stdout.lines().any(|line| line.trim() == STASH_NOTHING) {
-                    return Err(out.message());
-                }
-                stashed = true;
+                if !self.save_checkout_changes(dir, &stash_name)? { return Err(out.message()); }
+                notice = Some(format!("Your local changes are saved in the stash “{stash_name}”."));
                 let retry = self.git(dir, args);
                 if retry.ok { return Ok(()); }
                 return Err(retry.message());
@@ -608,12 +674,7 @@ impl Engine {
             Ok(if already_on_local { summary } else { format!("Checked out {local}. {summary}") })
         })();
 
-        if stashed {
-            let saved = format!("Your local changes are saved in the stash “{stash_name}”.");
-            update.map(|message| format!("{}. {saved}", message.trim_end_matches('.'))).map_err(|error| format!("{saved}\n\n{error}"))
-        } else {
-            update
-        }
+        Self::checkout_result(update, notice)
     }
 
     /// Merge commits require an explicit mainline; reject stale or invalid choices before changing HEAD.
@@ -729,17 +790,10 @@ impl Engine {
                 }
                 done(o, if amend { "Amended previous commit" } else { "Committed" })
             }
-            Action::Checkout { target } => {
-                if let Err(error) = crate::manage::require_lfs_for_checkout(dir, &target) {
-                    return done(git::GitOut::failed(&error), "");
-                }
-                let from = self.head_name(dir);
-                let o = self.git(dir, &["checkout", "-q", &target]);
-                if o.ok {
-                    self.push_undo(repo, UndoRec::Checkout { from, to: target.clone() });
-                }
-                done(o, &format!("Checked out {target}"))
-            }
+            Action::Checkout { target, changes } => match self.checkout_local(repo, &target, changes) {
+                Ok(message) => ActionResult { ok: true, message },
+                Err(message) => ActionResult { ok: false, message },
+            },
             Action::CheckoutPullRequest { url, reference, expected } => {
                 if !matches!(expected.len(), 40 | 64) || !expected.bytes().all(|c| c.is_ascii_hexdigit()) || reference.starts_with('-') {
                     return done(git::GitOut::failed("The pull request has an invalid source commit."), "");
@@ -757,8 +811,8 @@ impl Engine {
                 if result.ok { self.push_undo(repo, UndoRec::Checkout { from, to: expected }); }
                 done(result, "Checked out the pull request's source commit")
             }
-            Action::CheckoutRemote { remote_branch, stash_if_needed } => {
-                match self.checkout_remote(repo, &remote_branch, stash_if_needed) {
+            Action::CheckoutRemote { remote_branch, stash_if_needed, changes } => {
+                match self.checkout_remote(repo, &remote_branch, stash_if_needed, changes) {
                     Ok(message) => ActionResult { ok: true, message },
                     Err(message) => ActionResult { ok: false, message },
                 }
@@ -1596,7 +1650,7 @@ impl Engine {
         }
         let sha = self.rev(dir, "stash@{0}");
         if sha.is_empty() || sha == previous {
-            return ActionResult { ok: false, message: "There are no changes to discard.".into() };
+            return ActionResult { ok: false, message: DISCARD_NOTHING.into() };
         }
         let backup = crate::discard_backups::save(dir, &sha);
         if backup.ok && self.rev(dir, "stash@{0}") == sha { let _ = self.git(dir, &["stash", "drop", "-q"]); }
@@ -2173,7 +2227,7 @@ mod tests {
         assert!(e.perform(&repo, Action::CreateBranch { name: "feature x".into(), at: None, checkout: true }).ok);
         let data = git::load(&d, 100);
         assert_eq!(data.head_branch.as_deref(), Some("feature-x"));
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
         assert!(e.perform(&repo, Action::DeleteBranch { name: "feature-x".into() }).ok);
         assert!(e.perform(&repo, Action::Undo).ok, "undo delete branch");
         assert!(git::load(&d, 100).refs.iter().any(|r| r.name == "feature-x"));
@@ -2339,7 +2393,7 @@ mod tests {
 
         // Merge conflict: same line changed on both branches.
         commit("a.txt", "side\n", "side change");
-        assert!(e.perform(&repo, Action::Checkout { target: "master".into() }).ok);
+        assert!(e.perform(&repo, Action::Checkout { target: "master".into(), changes: Default::default() }).ok);
         commit("a.txt", "master\n", "master change");
         let r = e.perform(&repo, Action::Merge { branch: "side".into() });
         assert!(!r.ok);

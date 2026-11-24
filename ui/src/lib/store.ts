@@ -130,7 +130,7 @@ export type DialogState =
   | { kind: "profiles" }
   | { kind: "addProfile" }
   | { kind: "workspaces" }
-  | { kind: "choice"; title: string; text: string; onCancel?: () => void; choices: { label: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
+  | { kind: "choice"; title: string; text: string; onCancel?: () => void; choices: { label: string; description?: string; variant?: "primary" | "danger" | "default"; onSelect: () => void }[] }
   | { kind: "info"; title: string; text: string }
   | { kind: "repoManagement" }
   | { kind: "message"; title: string; label: string; value: string; confirm: string; help?: string; generate?: () => Promise<string>; onSubmit: (v: string) => void };

@@ -1001,9 +1001,9 @@ fn remote_checkout_requires_the_existing_local_branch_to_track_that_remote() {
     assert!(git::run(d,&["update-ref","refs/remotes/origin/topic",&local]).ok);assert!(git::run(d,&["update-ref","refs/remotes/upstream/topic",&base]).ok);
     assert!(git::run(d,&["branch","--set-upstream-to=origin/topic","topic"]).ok);assert!(git::run(d,&["checkout","-q","main"]).ok);
     let engine=Engine::default();let repo=d.to_string_lossy();
-    let rejected=engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false });assert!(!rejected.ok);assert!(rejected.message.contains("does not track"));assert_eq!(head(d),base);
-    assert!(git::run(d,&["branch","--unset-upstream","topic"]).ok);assert!(!engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false }).ok);
-    assert!(git::run(d,&["branch","--set-upstream-to=upstream/topic","topic"]).ok);assert!(engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false }).ok);assert_eq!(head(d),local);
+    let rejected=engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false, changes: Default::default() });assert!(!rejected.ok);assert!(rejected.message.contains("does not track"));assert_eq!(head(d),base);
+    assert!(git::run(d,&["branch","--unset-upstream","topic"]).ok);assert!(!engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false, changes: Default::default() }).ok);
+    assert!(git::run(d,&["branch","--set-upstream-to=upstream/topic","topic"]).ok);assert!(engine.perform(&repo,Action::CheckoutRemote {remote_branch:"upstream/topic".into(), stash_if_needed: false, changes: Default::default() }).ok);assert_eq!(head(d),local);
     assert_eq!(git::run(d,&["rev-parse","--symbolic-full-name","topic@{upstream}"]).stdout.trim(),"refs/remotes/upstream/topic");
 }
 
@@ -1030,10 +1030,130 @@ fn tracked_topic_behind(label: &str, remote_commits: usize) -> (tempfile::TempDi
 fn current_branch(path: &Path) -> String { git::run(path, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_owned() }
 
 #[test]
+fn branch_checkout_asks_before_moving_or_stashing_local_changes() {
+    use crate::actions::CheckoutChanges;
+
+    let (folder, base, newer) = tracked_topic_behind("gitcraft-checkout-choices-", 1);
+    let d = folder.path();
+    assert!(git::run(d, &["branch", "newer", &newer]).ok);
+    std::fs::write(d.join("added.txt"), "staged version\n").unwrap();
+    assert!(git::run(d, &["add", "added.txt"]).ok);
+    std::fs::write(d.join("added.txt"), "unstaged version\n").unwrap();
+    std::fs::write(d.join("scratch.txt"), "untracked work\n").unwrap();
+    let engine = Engine::default();
+    let repo = d.to_string_lossy();
+    let checkout = |target: &str, changes| engine.perform(&repo, Action::Checkout { target: target.into(), changes });
+    let ask = checkout("newer", CheckoutChanges::Ask);
+    assert!(!ask.ok && ask.message.starts_with("Choose how to handle"), "{}", ask.message);
+    assert_eq!(current_branch(d), "main");
+    assert_eq!(head(d), base);
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+
+    let carry = checkout("newer", CheckoutChanges::Carry);
+    assert!(carry.ok, "{}", carry.message);
+    assert_eq!(current_branch(d), "newer");
+    assert_eq!(git::run(d, &["show", ":added.txt"]).stdout.trim(), "staged version");
+    assert_eq!(std::fs::read_to_string(d.join("added.txt")).unwrap().trim(), "unstaged version");
+    assert_eq!(std::fs::read_to_string(d.join("scratch.txt")).unwrap().trim(), "untracked work");
+
+    std::fs::write(d.join("file.txt"), "overlapping edit\n").unwrap();
+    let blocked = checkout("main", CheckoutChanges::Carry);
+    assert!(!blocked.ok && blocked.message.starts_with("Local changes block this checkout."), "{}", blocked.message);
+    assert_eq!(head(d), newer);
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+
+    let stash = checkout("main", CheckoutChanges::Stash);
+    assert!(stash.ok && stash.message.contains("saved in the stash"), "{}", stash.message);
+    assert_eq!(current_branch(d), "main");
+    assert_eq!(head(d), base);
+    assert!(git::run(d, &["status", "--porcelain"]).stdout.is_empty());
+    for (revision, content) in [("stash@{0}:file.txt", "overlapping edit"), ("stash@{0}:added.txt", "unstaged version"),
+        ("stash@{0}^2:added.txt", "staged version"), ("stash@{0}^3:scratch.txt", "untracked work")] {
+        assert_eq!(git::run(d, &["show", revision]).stdout.trim(), content);
+    }
+    let saved = git::run(d, &["rev-parse", "refs/stash"]).stdout.trim().to_owned();
+    let conflict = engine.perform(&repo, Action::StashPop { index: 0, expected: Some(saved.clone()), without_index: true });
+    assert!(!conflict.ok && !git::run(d, &["ls-files", "--unmerged"]).stdout.is_empty(), "{}", conflict.message);
+    assert_eq!(git::run(d, &["rev-parse", "refs/stash"]).stdout.trim(), saved, "A conflicted pop must keep the checkout stash");
+}
+
+#[test]
+fn branch_checkout_discards_only_after_validating_the_target_and_can_restore_edits() {
+    use crate::actions::CheckoutChanges;
+
+    let (folder, base, newer) = tracked_topic_behind("gitcraft-checkout-discard-", 1);
+    let d = folder.path();
+    assert!(git::run(d, &["branch", "newer", &newer]).ok);
+    std::fs::write(d.join("file.txt"), "staged version\n").unwrap();
+    assert!(git::run(d, &["add", "file.txt"]).ok);
+    std::fs::write(d.join("file.txt"), "unstaged version\n").unwrap();
+    std::fs::write(d.join("scratch.txt"), "untracked work\n").unwrap();
+    let engine = Engine::default();
+    let repo = d.to_string_lossy();
+    let discard_and_switch = |target: &str| {
+        engine.perform(&repo, Action::Checkout { target: target.into(), changes: CheckoutChanges::Discard })
+    };
+
+    let original_status = git::run(d, &["status", "--porcelain"]).stdout;
+    assert!(!discard_and_switch("missing-branch").ok);
+    assert_eq!(head(d), base);
+    assert_eq!(git::run(d, &["status", "--porcelain"]).stdout, original_status);
+    let switched = discard_and_switch("newer");
+    assert!(switched.ok, "{}", switched.message);
+    assert_eq!(current_branch(d), "newer");
+    assert_eq!(head(d), newer);
+    assert!(git::run(d, &["status", "--porcelain"]).stdout.is_empty());
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+
+    let undo_switch = engine.perform(&repo, Action::Undo);
+    assert!(undo_switch.ok, "{}", undo_switch.message);
+    assert_eq!(current_branch(d), "main");
+    let undo_discard = engine.perform(&repo, Action::Undo);
+    assert!(undo_discard.ok, "{}", undo_discard.message);
+    assert_eq!(git::run(d, &["status", "--porcelain"]).stdout, original_status);
+    assert_eq!(git::run(d, &["show", ":file.txt"]).stdout.trim(), "staged version");
+    assert_eq!(std::fs::read_to_string(d.join("file.txt")).unwrap().trim(), "unstaged version");
+    assert_eq!(std::fs::read_to_string(d.join("scratch.txt")).unwrap().trim(), "untracked work");
+}
+
+#[test]
+fn changing_to_a_remote_tracking_branch_can_leave_compatible_edits_in_a_stash() {
+    use crate::actions::CheckoutChanges;
+
+    let (folder, base, newer) = tracked_topic_behind("gitcraft-remote-choices-", 1);
+    let d = folder.path();
+    std::fs::write(d.join("scratch.txt"), "untracked work\n").unwrap();
+    std::fs::write(d.join("staged.txt"), "staged work\n").unwrap();
+    assert!(git::run(d, &["add", "staged.txt"]).ok);
+    std::fs::write(d.join("staged.txt"), "additional working edits\n").unwrap();
+    let engine = Engine::default();
+    let repo = d.to_string_lossy();
+    let checkout = |changes| engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes });
+    let ask = checkout(CheckoutChanges::Ask);
+    assert!(!ask.ok && ask.message.starts_with("Choose how to handle"), "{}", ask.message);
+    assert_eq!(current_branch(d), "main");
+    assert_eq!(head(d), base);
+    assert!(d.join("scratch.txt").exists());
+    let stashed = checkout(CheckoutChanges::Stash);
+    assert!(stashed.ok && stashed.message.contains("saved in the stash"), "{}", stashed.message);
+    assert_eq!(current_branch(d), "topic");
+    assert_eq!(head(d), newer);
+    assert!(!d.join("scratch.txt").exists());
+    assert_eq!(git::run(d, &["show", "stash@{0}^3:scratch.txt"]).stdout.trim(), "untracked work");
+    let saved = git::run(d, &["rev-parse", "refs/stash"]).stdout.trim().to_owned();
+    let restored = engine.perform(&repo, Action::StashPop { index: 0, expected: Some(saved), without_index: false });
+    assert!(restored.ok, "{}", restored.message);
+    assert_eq!(std::fs::read_to_string(d.join("scratch.txt")).unwrap().trim(), "untracked work");
+    assert_eq!(git::run(d, &["show", ":staged.txt"]).stdout.trim(), "staged work");
+    assert_eq!(std::fs::read_to_string(d.join("staged.txt")).unwrap().trim(), "additional working edits");
+    assert!(git::run(d, &["stash", "list"]).stdout.is_empty());
+}
+
+#[test]
 fn double_clicking_a_newer_remote_branch_fast_forwards_the_tracking_branch() {
     let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-ff-", 2); let d = folder.path();
     let engine = Engine::default(); let repo = d.to_string_lossy();
-    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(result.ok, "{}", result.message); assert!(result.message.contains("fast-forwarded"), "{}", result.message);
     assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), remote);
     assert_eq!(git::run(d, &["rev-parse", "refs/heads/topic"]).stdout.trim(), remote);
@@ -1049,10 +1169,10 @@ fn double_clicking_the_remote_of_the_current_branch_fast_forwards_it_in_place() 
     let (folder, local, remote) = tracked_topic_behind("gitcraft-remote-ff-current-", 1); let d = folder.path();
     assert!(git::run(d, &["checkout", "-q", "topic"]).ok); assert_eq!(head(d), local);
     let engine = Engine::default(); let repo = d.to_string_lossy();
-    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(result.ok, "{}", result.message); assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), remote);
     // Already level: nothing moves and nothing is recorded to undo.
-    let again = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let again = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(again.ok && again.message.contains("already up to date"), "{}", again.message); assert_eq!(head(d), remote);
     assert!(engine.perform(&repo, Action::Undo).ok); assert_eq!(head(d), local);
 }
@@ -1065,14 +1185,14 @@ fn a_diverged_or_ahead_tracking_branch_is_switched_to_but_never_merged_or_reset(
     assert!(git::run(d, &["add", "other.txt"]).ok); assert!(git::run(d, &["commit", "-qm", "local only"]).ok); let mine = head(d);
     assert_ne!(mine, local);
     assert!(git::run(d, &["checkout", "-q", "main"]).ok);
-    let diverged = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let diverged = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(diverged.ok && diverged.message.contains("diverged"), "{}", diverged.message);
     assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), mine); assert_ne!(head(d), remote);
-    let still = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let still = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(still.ok && still.message.contains("diverged"), "{}", still.message); assert_eq!(head(d), mine);
     // Ahead only: the remote is an ancestor of the local branch.
     assert!(git::run(d, &["update-ref", "refs/remotes/origin/topic", &local]).ok);
-    let ahead = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let ahead = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(ahead.ok && ahead.message.contains("ahead"), "{}", ahead.message); assert_eq!(head(d), mine);
 }
 
@@ -1082,7 +1202,7 @@ fn a_fast_forward_that_would_overwrite_local_edits_keeps_them_and_the_branch_in_
     assert!(git::run(d, &["checkout", "-q", "topic"]).ok);
     std::fs::write(d.join("file.txt"), "unsaved local edit\n").unwrap();
     let engine = Engine::default(); let repo = d.to_string_lossy();
-    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let result = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(!result.ok && result.message.starts_with("Local changes block this checkout."), "{}", result.message);
     assert_eq!(current_branch(d), "topic"); assert_eq!(head(d), local);
     assert_eq!(std::fs::read_to_string(d.join("file.txt")).unwrap().replace("\r\n", "\n"), "unsaved local edit\n");
@@ -1091,7 +1211,7 @@ fn a_fast_forward_that_would_overwrite_local_edits_keeps_them_and_the_branch_in_
     std::fs::write(d.join("staged.txt"), "staged contents\n").unwrap();
     assert!(git::run(d, &["add", "staged.txt"]).ok);
     std::fs::write(d.join("staged.txt"), "working contents\n").unwrap();
-    let retry = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false });
+    let retry = engine.perform(&repo, Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed: false, changes: Default::default() });
     assert!(retry.ok && retry.message.starts_with("Fast-forwarded"), "{}", retry.message);
     let updated = head(d);
     let undo = engine.perform(&repo, Action::Undo);
@@ -1116,7 +1236,7 @@ fn remote_checkout_can_save_blocking_edits_before_fast_forwarding() {
     assert!(git::run(d, &["config", "merge.autostash", "true"]).ok);
     let engine = Engine::default();
     let repo = d.to_string_lossy();
-    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed };
+    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed, changes: Default::default() };
     let blocked = engine.perform(&repo, action(false));
     assert!(!blocked.ok && blocked.message.starts_with("Local changes block this checkout."), "{}", blocked.message);
     assert_eq!(head(d), local);
@@ -1156,7 +1276,7 @@ fn creating_a_tracking_branch_protects_an_untracked_file_on_checkout() {
     std::fs::write(d.join("collision.txt"), "local untracked file\n").unwrap();
     let engine = Engine::default();
     let repo = d.to_string_lossy();
-    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed };
+    let action = |stash_if_needed| Action::CheckoutRemote { remote_branch: "origin/topic".into(), stash_if_needed, changes: Default::default() };
     let excludes = d.join(".git/info/exclude");
     let original_excludes = std::fs::read(&excludes).unwrap_or_default();
     std::fs::write(&excludes, "collision.txt\n").unwrap();

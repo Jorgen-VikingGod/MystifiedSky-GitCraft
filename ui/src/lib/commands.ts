@@ -3,7 +3,7 @@ import { openFavorite } from "@/components/RepoManagement";
 // handler runs them, and the shortcut editor changes their keys. Groups are the
 // Keyboard Shortcuts headers (Repo Actions, Navigation, Command Palette, UI).
 import { api } from "./api";
-import { act, confirmThen, promptBranch, promptStash, promptTag, promptUpstream, pullModeFor, repoData } from "./repo";
+import { act, confirmThen, focusCommitSummary, promptBranch, promptStash, promptTag, promptUpstream, pullModeFor, repoData } from "./repo";
 import { useStore } from "./store";
 import { resetZoom, stepZoom } from "./zoom";
 import { addRemote, addSubmodule, compareCommitRanges, repositoryMaintenance, addWorktree, fetchMoreHistory, initGitflow, openCleanup } from "./manage";
@@ -89,12 +89,7 @@ export const COMMANDS: Command[] = [
     repo: true,
     inInputs: true,
     keywords: "view working directory changes wip",
-    run: () => {
-      const t = activeTab();
-      if (!t) return;
-      st().setUi(t.id, { selection: { type: "wip" }, diff: null, history: null, rebase: null, conflict: null });
-      setTimeout(() => (document.querySelector("[data-active-repository='true'] [data-commit-summary]") as HTMLInputElement | null)?.focus(), 50);
-    },
+    run: focusCommitSummary,
   },
   { id: "repo:searchCommits", label: "Search Commits", group: "Repo Actions", keys: "Ctrl+F", repo: true, run: () => activeTab() && st().setUi(activeTab()!.id, { searchOpen: true }) },
   { id: "repo:history", label: "History", group: "Repo Actions", keys: "Ctrl+Shift+H", repo: true, picker: "history", keywords: "file history" },
