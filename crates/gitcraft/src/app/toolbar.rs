@@ -185,7 +185,7 @@ impl App {
                 egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
                     ui.set_min_width(width);
                     ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
-                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip(locale.text("Set as default"));
+                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip(format!("{}: {label}", locale.text("Set as default")));
                         if radio.clicked() {
                             let (m, path) = (m.to_owned(), path.clone());
                             later.push(Box::new(move |app| {
