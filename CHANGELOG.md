@@ -62,6 +62,13 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Reject Fetch and Pull actions while their repository is busy, including from open menus, shortcuts and Repository Management. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Disable Pull and Fetch for repositories involved in automatic or bulk fetch and pull operations. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Avoid a crash when saving a Pull default with malformed repository preferences. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Identify each Pull menu default selector by its operation in its tooltip and accessibility description. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Choose the default Pull action independently from running a command in the Pull menu. The selected row spans the menu, and the toolbar shows Fetch while a fetch runs and prevents duplicate actions while the repository is busy. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Keep the Pull menu compact and explain its default selection; dim the Pull or Fetch button while the repository is busy. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Translate the Pull menu's default-selection guidance into Spanish and give its action buttons consistent widths. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
 - Restore RPM packages in Linux x64 and ARM64 releases. ([#53](https://github.com/MystifiedSky/GitCraft/pull/53))
 
 - Fix a macOS build error in the native app's startup code. ([#50](https://github.com/MystifiedSky/GitCraft/pull/50))

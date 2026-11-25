@@ -404,9 +404,13 @@ impl App {
         if self.bulk.is_some() {
             return self.toast(false, "Wait for the repositories being pulled or fetched to finish");
         }
+        if paths.iter().any(|path| self.repo_pull_busy(path)) {
+            return self.toast(false, "Wait for the current repository operation to finish before fetching or pulling this selection");
+        }
         self.bulk_batch += 1;
         let batch = self.bulk_batch;
         self.bulk = Some((batch, 0));
+        self.busy_repos.extend(paths.iter().cloned());
         // Each repository's pull mode, and its autostash preference for a rebase pull.
         let modes: Vec<PullMode> = paths.iter().map(|p| {
             let m = self.pull_mode(p);
@@ -436,6 +440,7 @@ impl App {
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     // Counts arrive from several workers: only a higher count of this batch shows.
                     inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| {
+                        app.finish_busy_repo(&path);
                         if let Some((b, shown)) = app.bulk.as_mut()
                             && *b == batch
                             && n > *shown

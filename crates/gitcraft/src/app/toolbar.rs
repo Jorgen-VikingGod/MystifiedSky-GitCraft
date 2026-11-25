@@ -6,12 +6,81 @@ use super::App;
 use super::ctxmenu::{self, Entry, Later, item};
 use super::icons::{self, Icon};
 use super::repo::RepoTab;
-use super::theme::{ACCENT, p};
+#[cfg(test)]
+use super::repo;
+use super::theme::{ACCENT, GOOD, p};
 use egui::{Align2, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use gitcraft_core::actions::Action;
 use gitcraft_core::git::RefKind;
 
 const PULL_LABELS: [(&str, &str); 4] = [("fetch", "Fetch All"), ("ff", "Pull (fast-forward if possible)"), ("ffonly", "Pull (fast-forward only)"), ("rebase", "Pull (rebase)")];
+
+#[cfg(test)]
+#[test]
+fn headless_pull_busy_tracks_background_repositories() {
+    let paths = vec!["/repo/".to_owned(), "/other".to_owned()];
+    assert!(repo::pull_busy(false, &paths, "/repo"));
+    assert!(!repo::pull_busy(false, &paths, "/unrelated"));
+    assert!(repo::pull_busy(true, &[], "/repo"));
+    assert!(!repo::pull_busy(false, &[], "/repo"));
+}
+
+fn set_repo_pull_mode(prefs: &mut serde_json::Value, path: &str, mode: String) {
+    if !prefs.is_object() {
+        *prefs = serde_json::json!({});
+    }
+    let entry = prefs.as_object_mut().expect("object").entry(path).or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    entry["pullMode"] = serde_json::Value::String(mode);
+}
+
+fn save_pull_default(settings: &mut crate::settings::Store, repo_override: Option<&str>, mode: String) {
+    if let Some(path) = repo_override {
+        let mut prefs: serde_json::Value = settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
+        set_repo_pull_mode(&mut prefs, path, mode);
+        settings.set("repoPrefs", prefs);
+    } else {
+        settings.set("pullMode", mode);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn headless_pull_defaults_survive_reopening_settings() {
+    let folder = std::env::temp_dir().join(format!("gitcraft-pull-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("settings.json");
+    let mut settings = crate::settings::Store::open_at(path.clone());
+    save_pull_default(&mut settings, None, "ffonly".into());
+    save_pull_default(&mut settings, Some("/repo"), "rebase".into());
+    settings.flush().unwrap();
+    drop(settings);
+    let reopened = crate::settings::Store::open_at(path);
+    assert_eq!(reopened.string("pullMode", ""), "ffonly");
+    assert_eq!(reopened.get::<serde_json::Value>("repoPrefs").unwrap()["/repo"]["pullMode"], "rebase");
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn headless_repo_pull_mode_handles_malformed_preferences() {
+    use serde_json::json;
+
+    for malformed in [json!(null), json!(false), json!(42), json!("bad"), json!([])] {
+        let mut prefs = malformed.clone();
+        set_repo_pull_mode(&mut prefs, "/repo", "fetch".into());
+        assert_eq!(prefs, json!({"/repo": {"pullMode": "fetch"}}));
+
+        let mut prefs = json!({"/repo": malformed, "/other": {"pullMode": "ff"}});
+        set_repo_pull_mode(&mut prefs, "/repo", "rebase".into());
+        assert_eq!(prefs, json!({"/repo": {"pullMode": "rebase"}, "/other": {"pullMode": "ff"}}));
+    }
+    let mut prefs = json!({"/repo": {"pullMode": "ff", "pullAutostash": true}, "/other": {"pullMode": "ffonly"}});
+    set_repo_pull_mode(&mut prefs, "/repo", "fetch".into());
+    assert_eq!(prefs, json!({"/repo": {"pullMode": "fetch", "pullAutostash": true}, "/other": {"pullMode": "ffonly"}}));
+}
 
 /// A toolbar button 52 px wide: a label over an icon, maybe a count badge, or a spinner while
 /// its action runs.
@@ -21,7 +90,7 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
     if resp.hovered() && enabled {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.white(0.05));
     }
-    let fade = if enabled || spinning { 1.0 } else { 0.35 };
+    let fade = if enabled { 1.0 } else { 0.35 };
     let show_label = labels || spinning;
     let icon_y = if show_label { rect.center().y + 7.0 } else { rect.center().y };
     if show_label {
@@ -37,7 +106,7 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
                 let a = t * 6.0 + k as f32 / 24.0 * std::f32::consts::TAU * 0.75;
                 pos2(ir.center().x + 8.0 * a.cos(), ir.center().y + 8.0 * a.sin())
             }).collect(),
-            Stroke::new(2.0, c.white(0.9)),
+            Stroke::new(2.0, c.white(0.9).gamma_multiply(fade)),
         ));
         ui.ctx().request_repaint();
     } else {
@@ -70,6 +139,7 @@ impl App {
         let head = v.and_then(|v| v.data.refs.iter().find(|r| r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref()));
         let has_changes = v.is_some_and(|v| !v.data.status.unstaged.is_empty() || !v.data.status.staged.is_empty());
         let spin = r.and_then(|r| r.spinning);
+        let busy = r.is_some_and(|r| self.repo_pull_busy(&r.path));
         // The three parts never overlap. When the window is narrow the pickers give up room
         // first, the branch picker before the repository picker; the button group never slides
         // left over them and Actions and Search never slide left over the group.
@@ -159,38 +229,47 @@ impl App {
             later.push(Box::new(move |app| app.act(tab, Action::Redo)));
         }
         x += 52.0;
-        let pull_tip = if detached { "Pull is not available when in a detached HEAD state" } else { PULL_LABELS.iter().find(|(m, _)| *m == pull_mode).map_or("Pull", |(_, l)| l) };
-        let pulling = spin == Some("pull");
-        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, locale.text("Pull"), labels, pull_tip, v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
+        let pull_tip = locale.text(if detached && pull_mode != "fetch" { "Pull is not available when in a detached HEAD state" } else { PULL_LABELS.iter().find(|(m, _)| *m == pull_mode).map_or("Pull", |(_, l)| l) });
+        let pulling = matches!(spin, Some("pull" | "fetch"));
+        let pull_label = locale.text(if spin == Some("fetch") { "Fetch" } else { "Pull" });
+        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, pull_label, labels, pull_tip, !busy && v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
             let mode = pull_mode.clone();
             later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
         }
         x += 52.0;
         let chev = Rect::from_min_size(pos2(x, rect.top()), vec2(14.0, rect.height()));
-        let cresp = ui.interact(chev, ui.scope_id().with("pull_options"), if pulling { Sense::hover() } else { Sense::click() });
-        if cresp.hovered() {
+        let cresp = ui.interact(chev, ui.scope_id().with("pull_options"), if busy { Sense::hover() } else { Sense::click() });
+        if cresp.hovered() && !busy {
             ui.painter().rect_filled(chev, CornerRadius::ZERO, c.white(0.05));
         }
-        icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if pulling { 0.35 } else { 1.0 }));
-        let cresp = cresp.tip("Pull options");
-        egui::Popup::menu(&cresp).show(|ui| {
-            let entries = PULL_LABELS
-                .iter()
-                .map(|(m, l)| {
-                    let (m, path) = (m.to_string(), path.clone());
-                    item(format!("{} {l}", if pull_mode == m { "●" } else { "○" }), move |app| {
-                        match path.filter(|_| has_repo_mode) {
-                            Some(p) => {
-                                let mut prefs: serde_json::Value = app.settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
-                                prefs[&p]["pullMode"] = serde_json::Value::String(m);
-                                app.settings.set("repoPrefs", prefs);
-                            }
-                            None => app.settings.set("pullMode", m),
+        icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if busy { 0.35 } else { 1.0 }));
+        let cresp = cresp.tip(locale.text("Pull options"));
+        egui::Popup::menu(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            let width = 240.0;
+            ui.set_width(width);
+            ui.add(egui::Label::new(egui::RichText::new(locale.text("Select the default pull/fetch operation to execute when clicking this button")).size(13.0).color(c.white(0.6))).wrap());
+            ui.add_space(4.0);
+            for &(m, label) in &PULL_LABELS {
+                let label = locale.text(label);
+                let selected = pull_mode == m;
+                egui::Frame::new().fill(if selected { GOOD.gamma_multiply(0.30) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
+                    ui.set_min_width(width);
+                    ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
+                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip(format!("{}: {label}", locale.text("Set as default")));
+                        if radio.clicked() {
+                            let (m, path) = (m.to_owned(), path.clone());
+                            later.push(Box::new(move |app| {
+                                save_pull_default(&mut app.settings, path.as_deref().filter(|_| has_repo_mode), m);
+                            }));
                         }
-                    })
-                })
-                .collect();
-            ctxmenu::show(ui, entries, later);
+                        if ui.add_enabled(v.is_some() && (!detached || m == "fetch"), egui::Button::new(egui::RichText::new(label).size(13.0)).right_text("").frame_when_inactive(false).min_size(vec2(ui.available_width(), 0.0))).clicked() {
+                            let mode = m.to_owned();
+                            later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
+                            ui.close();
+                        }
+                    }));
+                });
+            }
         });
         x += 16.0;
         let pushing = spin == Some("push");
