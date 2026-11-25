@@ -362,6 +362,16 @@ impl App {
         }
     }
 
+    /// Show the newest terminal session running in `folder` (an agent started there), if there is one.
+    pub(crate) fn show_terminal_in(&mut self, tab: u64, folder: &str) -> bool {
+        let Some(panel) = self.term_panels.get_mut(&tab) else { return false };
+        let Some(i) = panel.sessions.iter().rposition(|s| !s.exited && super::same_folder(&s.cwd, folder)) else { return false };
+        panel.active = i;
+        self.settings.set("showTerminal", true);
+        self.settings.set("terminalMinimized", false);
+        true
+    }
+
     /// Feed what the shells wrote into their screens.
     pub(super) fn pump_terminals(&mut self) {
         let mut pending = std::mem::take(&mut *self.term_pending.lock().unwrap_or_else(|e| e.into_inner()));

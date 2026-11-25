@@ -273,7 +273,7 @@ impl App {
                         let p2 = w.path.clone();
                         later.push(Box::new(move |app| app.open_repo(&p2)));
                     }
-                    let (wp, locked) = (w.path.clone(), w.locked);
+                    let (wp, locked, wb) = (w.path.clone(), w.locked, w.branch.clone());
                     ctxmenu::attach(&rr, later, || {
                         let p1 = wp.clone();
                         let mut items = vec![item("Open worktree", move |app| app.open_repo(&p1))];
@@ -283,6 +283,10 @@ impl App {
                             items.push(Entry::Separator);
                             let p3 = wp.clone();
                             items.push(ctxmenu::off(ctxmenu::danger("Remove worktree", move |app| app.remove_worktree(tab, &p3)), !locked));
+                            if !wb.is_empty() {
+                                let (p4, b4) = (wp.clone(), wb.clone());
+                                items.push(ctxmenu::off(ctxmenu::danger("Remove worktree and delete branch…", move |app| app.remove_worktree_and_branch(tab, &p4, &b4)), !locked));
+                            }
                         }
                         items
                     });

@@ -205,7 +205,14 @@ impl App {
         let sha = r.sha.clone();
         items.push(item("Create tag here", move |app| app.prompt_tag(tab, Some(sha), false, String::new())));
         items.push(Entry::Separator);
-        if r.kind == RefKind::Local {
+        // A branch checked out in another worktree can't be deleted: removing that worktree is offered instead.
+        let in_worktree = (r.kind == RefKind::Local && !is_head).then(|| repo.data.worktrees.iter().find(|w| w.branch == r.name && !super::same_folder(&w.path, &repo.path)).map(|w| w.path.clone())).flatten();
+        if let Some(wt) = in_worktree {
+            let n = name.clone();
+            items.push(item(format!("Rename {name}"), move |app| app.prompt_rename_branch(tab, &n)));
+            let n = name.clone();
+            items.push(danger(format!("Remove worktree and delete {name}…"), move |app| app.remove_worktree_and_branch(tab, &wt, &n)));
+        } else if r.kind == RefKind::Local {
             let n = name.clone();
             items.push(item(format!("Rename {name}"), move |app| app.prompt_rename_branch(tab, &n)));
             let n = name.clone();

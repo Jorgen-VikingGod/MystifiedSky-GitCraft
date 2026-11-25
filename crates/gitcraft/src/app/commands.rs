@@ -309,6 +309,31 @@ impl App {
         }));
     }
 
+    /// Remove a worktree and, if chosen, the branch it had checked out: locally, or locally and on its remote.
+    pub(crate) fn remove_worktree_and_branch(&mut self, tab: u64, wt: &str, branch: &str) {
+        let upstream = self.repo(tab).and_then(|r| r.view.as_ref()).and_then(|v| v.data.refs.iter().find(|r| r.kind == gitcraft_core::git::RefKind::Local && r.name == branch).map(|r| r.upstream.clone())).filter(|u| !u.is_empty());
+        let mut fields = vec![Field::new("local", &format!("Also delete the branch {branch}"), FieldKind::Check)];
+        if let Some(up) = &upstream {
+            fields.push(Field::new("remote", &format!("Also delete {up} from the remote"), FieldKind::Check).when("local"));
+        }
+        let (wt, branch) = (wt.to_owned(), branch.to_owned());
+        let d = Dialog::new("Remove worktree?", Body::Form { intro: format!("Remove the worktree at {wt}? Its folder is deleted."), fields, grid: false })
+            .flag_value("local", true)
+            .choice("Remove", Kind::Danger, move |app, values| {
+                app.act(tab, Action::WorktreeRemove { path: wt.clone(), force: false });
+                // Queued after the removal: the branch can only go once no worktree has it checked out.
+                if values.flag("local") {
+                    app.act(tab, Action::DeleteBranch { name: branch.clone() });
+                    if values.flag("remote")
+                        && let Some(up) = &upstream
+                    {
+                        app.act(tab, Action::DeleteRemoteBranch { remote_branch: up.clone() });
+                    }
+                }
+            });
+        self.dialog = Some(d);
+    }
+
     pub(crate) fn add_submodule(&mut self, tab: u64) {
         let fields = vec![Field::new("url", "Remote URL", FieldKind::Text).placeholder("https://github.com/owner/library.git"), Field::new("path", "Path", FieldKind::Text).placeholder("libs/library")];
         self.dialog = Some(Dialog::form("Add Submodule", fields, "Add Submodule", move |app, v| app.act(tab, Action::SubmoduleAdd { url: s(v, "url"), path: s(v, "path") })));

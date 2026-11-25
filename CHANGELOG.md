@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Remove a worktree and delete its branch (locally, or locally and on the remote) in one step. A branch checked out in another worktree offers this instead of Delete. Sort the Agents worktree list by latest activity or branch name, and jump to the terminal an agent is running in.
 - Start an agent session in a new worktree with one click, or from an issue's menu with a branch named after it. Cursor CLI is available as a coding agent. New worktrees keep the hidden, soloed and pinned branches of the repository they came from.
 - Explain your working changes with AI from the commit panel. The last five commit and branch explanations are kept, so opening one again needs no new request (Explain Again asks anew).
 - Restore a file from any commit by right-clicking it in the commit. Its current changes are kept as a backup you can restore from Actions. File View shows Markdown files rendered, with a button to switch between the preview and the code.

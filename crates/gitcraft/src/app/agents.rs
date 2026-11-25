@@ -117,6 +117,8 @@ pub struct AgentsUi {
     pub filter: String,
     pub search: bool,
     pub expanded: HashMap<String, bool>,
+    /// How the worktree list is ordered: 0 as Git lists them, 1 by latest agent activity, 2 by branch name.
+    pub sort: u8,
 }
 
 impl App {
@@ -312,6 +314,13 @@ impl App {
                 format!("{} {} {titles}", w.path, w.branch).to_lowercase().contains(&filter)
             })
             .collect();
+        let mut visible = visible;
+        let latest = |w: &Worktree| grouped.get(&folder_key(&w.path)).and_then(|g| g.iter().map(|a| a.modified).max()).unwrap_or(i64::MIN);
+        match au.sort {
+            1 => visible.sort_by_key(|w| std::cmp::Reverse(latest(w))),
+            2 => visible.sort_by_key(|w| w.branch.to_lowercase()),
+            _ => {}
+        }
         let agent_items = || -> Vec<ctxmenu::Entry> {
             let mut out = vec![ctxmenu::Entry::Heading("Coding agent".into())];
             for (k, name) in AGENT_LABEL {
@@ -332,6 +341,10 @@ impl App {
                         if widgets::icon_button(ui, Icon::Search, 15.0, "Filter worktrees and sessions").clicked() {
                             au.search = !au.search;
                             au.filter.clear();
+                        }
+                        let sort_tip = ["Sort: as Git lists them", "Sort: latest agent activity first", "Sort: by branch name"][usize::from(au.sort.min(2))];
+                        if widgets::icon_button(ui, Icon::ArrowDownAZ, 15.0, sort_tip).clicked() {
+                            au.sort = (au.sort + 1) % 3;
                         }
                         let (pr, plug) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
                         ui.painter().rect(pr, CornerRadius::same(3), ACCENT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT.gamma_multiply(0.7)), StrokeKind::Inside);
@@ -483,7 +496,13 @@ impl App {
                         egui::Popup::menu(&dots).show(|ui| {
                             let (p1, p2, a) = (wt.path.clone(), wt.path.clone(), agent.to_owned());
                             let label = format!("Start {} here", agent_label(agent).unwrap_or("agent"));
-                            ctxmenu::show(ui, vec![item(if current { "View Changes" } else { "Open worktree" }, open.clone()), item(label, move |app| app.launch_agent(tab, &p1, &a, None, &[])), item("Copy worktree path", move |app| app.copy(&p2))], later);
+                            let p3 = wt.path.clone();
+                            let show = item("Show agent terminal", move |app| {
+                                if !app.show_terminal_in(tab, &p3) {
+                                    app.toast(false, "No terminal is running in this worktree.");
+                                }
+                            });
+                            ctxmenu::show(ui, vec![item(if current { "View Changes" } else { "Open worktree" }, open.clone()), item(label, move |app| app.launch_agent(tab, &p1, &a, None, &[])), show, item("Copy worktree path", move |app| app.copy(&p2))], later);
                         });
                     });
                 });
