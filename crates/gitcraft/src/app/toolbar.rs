@@ -8,7 +8,7 @@ use super::icons::{self, Icon};
 use super::repo::RepoTab;
 #[cfg(test)]
 use super::repo;
-use super::theme::{ACCENT, p};
+use super::theme::{ACCENT, GOOD, p};
 use egui::{Align2, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use gitcraft_core::actions::Action;
 use gitcraft_core::git::RefKind;
@@ -252,7 +252,7 @@ impl App {
             for &(m, label) in &PULL_LABELS {
                 let label = locale.text(label);
                 let selected = pull_mode == m;
-                egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
+                egui::Frame::new().fill(if selected { GOOD.gamma_multiply(0.30) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
                     ui.set_min_width(width);
                     ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
                         let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip(format!("{}: {label}", locale.text("Set as default")));
