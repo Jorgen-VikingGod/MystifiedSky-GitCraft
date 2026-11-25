@@ -13,6 +13,36 @@ use gitcraft_core::git::RefKind;
 
 const PULL_LABELS: [(&str, &str); 4] = [("fetch", "Fetch All"), ("ff", "Pull (fast-forward if possible)"), ("ffonly", "Pull (fast-forward only)"), ("rebase", "Pull (rebase)")];
 
+fn set_repo_pull_mode(prefs: &mut serde_json::Value, path: &str, mode: String) {
+    if !prefs.is_object() {
+        *prefs = serde_json::json!({});
+    }
+    let entry = prefs.as_object_mut().expect("object").entry(path).or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    entry["pullMode"] = serde_json::Value::String(mode);
+}
+
+#[cfg(test)]
+#[test]
+fn headless_repo_pull_mode_handles_malformed_preferences() {
+    use serde_json::json;
+
+    for malformed in [json!(null), json!(false), json!(42), json!("bad"), json!([])] {
+        let mut prefs = malformed.clone();
+        set_repo_pull_mode(&mut prefs, "/repo", "fetch".into());
+        assert_eq!(prefs, json!({"/repo": {"pullMode": "fetch"}}));
+
+        let mut prefs = json!({"/repo": malformed, "/other": {"pullMode": "ff"}});
+        set_repo_pull_mode(&mut prefs, "/repo", "rebase".into());
+        assert_eq!(prefs, json!({"/repo": {"pullMode": "rebase"}, "/other": {"pullMode": "ff"}}));
+    }
+    let mut prefs = json!({"/repo": {"pullMode": "ff", "pullAutostash": true}, "/other": {"pullMode": "ffonly"}});
+    set_repo_pull_mode(&mut prefs, "/repo", "fetch".into());
+    assert_eq!(prefs, json!({"/repo": {"pullMode": "fetch", "pullAutostash": true}, "/other": {"pullMode": "ffonly"}}));
+}
+
 /// A toolbar button 52 px wide: a label over an icon, maybe a count badge, or a spinner while
 /// its action runs.
 fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str, enabled: bool, badge: usize, spinning: bool) -> egui::Response {
@@ -192,7 +222,7 @@ impl App {
                                 match path.filter(|_| has_repo_mode) {
                                     Some(p) => {
                                         let mut prefs: serde_json::Value = app.settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
-                                        prefs[&p]["pullMode"] = serde_json::Value::String(m);
+                                        set_repo_pull_mode(&mut prefs, &p, m);
                                         app.settings.set("repoPrefs", prefs);
                                     }
                                     None => app.settings.set("pullMode", m),

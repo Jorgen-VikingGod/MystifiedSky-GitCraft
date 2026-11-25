@@ -60,6 +60,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Avoid a crash when saving a Pull default with malformed repository preferences.
 - Identify each Pull menu default selector by its operation in its tooltip and accessibility description.
 - Choose the default Pull action independently from running a command in the Pull menu. The selected row spans the menu, and the toolbar shows Fetch while a fetch runs and prevents duplicate actions while the repository is busy.
 - Keep the Pull menu compact and explain its default selection; dim the Pull or Fetch button while the repository is busy.
