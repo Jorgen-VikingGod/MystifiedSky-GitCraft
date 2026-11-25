@@ -164,7 +164,10 @@ jobs:
           # The packager makes no RPM packages.
           if [[ "$RPM" == true ]]; then
             cargo install cargo-generate-rpm --locked --version 0.21.1
-            cargo generate-rpm -p crates/gitcraft --target "$TARGET" -o "$bin_dir/bundle/rpm/"
+            # cargo-generate-rpm treats the output as a filename unless the directory exists.
+            rpm_dir="$bin_dir/bundle/rpm"
+            mkdir -p "$rpm_dir"
+            cargo generate-rpm -p crates/gitcraft --target "$TARGET" -o "$rpm_dir"
           fi
 
       - name: Verify the Windows MSI upgrade identity
