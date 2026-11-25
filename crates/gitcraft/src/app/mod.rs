@@ -231,6 +231,8 @@ pub struct App {
     pub(crate) bulk_batch: u64,
     /// The bulk run's status-bar text, kept apart from the tabs' own so ending one never clears the other.
     pub(crate) bulk_message: Option<String>,
+    /// Repository paths reserved by background fetch and bulk operations, including queued work.
+    pub(crate) background_repos: Vec<String>,
     /// Counts diff reads, so a read only fills the cache entry it was started for.
     pub(crate) diff_reads: u64,
     /// Counts file-history reads, so a page is added only by the latest read.
@@ -323,6 +325,7 @@ impl App {
             bulk: None,
             bulk_batch: 0,
             bulk_message: None,
+            background_repos: Vec::new(),
             diff_reads: 0,
             history_reads: 0,
             shortcuts: None,
@@ -441,6 +444,7 @@ impl App {
             return;
         }
         self.fetching = true;
+        self.background_repos.extend(paths.iter().map(|(_, p)| p.clone()));
         let prune = self.settings.flag("autoPrune", false);
         let engine = self.engine.clone();
         self.spawn(move || {
@@ -451,6 +455,7 @@ impl App {
             Msg::Apply(Box::new(move |app: &mut App| {
                 app.fetching = false;
                 for (tab, path, r) in results {
+                    app.finish_background_repo(&path);
                     if r.ok {
                         app.fetch_warned.remove(&path);
                         if !r.message.is_empty() && app.repos.contains_key(&tab) {
@@ -462,6 +467,12 @@ impl App {
                 }
             }))
         });
+    }
+
+    fn finish_background_repo(&mut self, path: &str) {
+        if let Some(i) = self.background_repos.iter().position(|p| same_folder(p, path)) {
+            self.background_repos.remove(i);
+        }
     }
 
     fn take_id(&mut self) -> u64 {

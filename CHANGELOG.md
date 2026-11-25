@@ -60,6 +60,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Disable Pull and Fetch for repositories involved in automatic or bulk fetch and pull operations.
 - Avoid a crash when saving a Pull default with malformed repository preferences.
 - Identify each Pull menu default selector by its operation in its tooltip and accessibility description.
 - Choose the default Pull action independently from running a command in the Pull menu. The selected row spans the menu, and the toolbar shows Fetch while a fetch runs and prevents duplicate actions while the repository is busy.
