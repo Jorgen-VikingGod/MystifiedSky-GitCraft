@@ -80,7 +80,7 @@ jobs:
             macos-binaries/macos-binary-aarch64-apple-darwin/gitcraft \
             macos-binaries/macos-binary-x86_64-apple-darwin/gitcraft
           chmod +x "$output"
-          lipo -verify_arch arm64 x86_64 "$output"
+          lipo "$output" -verify_arch arm64 x86_64
       - name: Install the packager
         run: cargo install cargo-packager --locked --version 0.11.8
       - name: Package installers and sign updates
