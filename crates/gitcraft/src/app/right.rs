@@ -286,6 +286,17 @@ impl App {
                 r.ui.issue = None;
             }
         }
+        let bottom = self.settings.flag("rightPanelBottom", false);
+        let tip = self.locale().text(if bottom { "Move to right" } else { "Move to bottom" });
+        let button = Rect::from_min_size(pos2(rect.right() - 30.0, ui.cursor().top() + 3.0), Vec2::splat(22.0));
+        let response = ui.interact(button, ui.scope_id().with("move_right_panel"), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+        let ink = if response.hovered() { c.white(1.0) } else { c.fg2 };
+        ui.painter().rect(button, CornerRadius::same(3), c.white(if response.hovered() { 0.15 } else { 0.05 }), Stroke::new(1.0, c.white(0.4)), StrokeKind::Inside);
+        icons::paint(ui, button, if bottom { Icon::ArrowBigRight } else { Icon::ArrowBigDown }, 13.0, ink);
+        if response.tip(tip).clicked() {
+            later.push(Box::new(move |app| app.settings.set("rightPanelBottom", !bottom)));
+        }
         if let Some(from) = r.ui.compare_workdir.clone() {
             return self.compare_panel(ui, tab, r, &from, WORKDIR, later);
         }
@@ -319,7 +330,8 @@ impl App {
         let w = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
         ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, c.black(0.2)));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let content = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top()), pos2((rect.right() - 38.0).max(rect.left() + 8.0), rect.bottom()));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.spacing_mut().item_spacing.x = 8.0;
         add(&mut child);
     }

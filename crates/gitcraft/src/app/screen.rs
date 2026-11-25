@@ -30,9 +30,12 @@ impl App {
         }
         let mut show_left = self.settings.flag("showLeft", true) && (!viewing || self.left_peek);
         let mut show_right = self.settings.flag("showRight", true) && r.view.is_some();
+        let bottom = self.settings.flag("rightPanelBottom", false) && show_right;
         let mut left_w = if show_left { self.settings.num("leftWidth", 381.0) as f32 } else { 28.0 };
-        let mut right_w = if show_right { self.settings.num("rightWidth", 342.0) as f32 } else { 0.0 };
-        (left_w, right_w, show_left, show_right) = fit_panels(body.width(), left_w, right_w, show_left, show_right);
+        let mut right_w = if show_right && !bottom { self.settings.num("rightWidth", 342.0) as f32 } else { 0.0 };
+        let fit_right;
+        (left_w, right_w, show_left, fit_right) = fit_panels(body.width(), left_w, right_w, show_left, show_right && !bottom);
+        show_right = if bottom { show_right } else { fit_right };
         let left = Rect::from_min_size(body.min, vec2(left_w, body.height()));
         {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -53,9 +56,15 @@ impl App {
             }
             x += 2.0;
         }
-        let right = Rect::from_min_max(pos2(body.right() - right_w, body.top()), body.max);
-        let centre_right = if show_right { right.left() - 2.0 } else { body.right() };
-        let centre = Rect::from_min_max(pos2(x, body.top()), pos2(centre_right, body.bottom()));
+        let centre_right = if show_right && !bottom { body.right() - right_w - 2.0 } else { body.right() };
+        let combined = Rect::from_min_max(pos2(x, body.top()), pos2(centre_right.max(x), body.bottom()));
+        let bottom_h = if bottom { bottom_panel_height(combined.height(), self.settings.num("rightPanelHeight", 350.0) as f32) } else { 0.0 };
+        let centre = Rect::from_min_max(combined.min, pos2(combined.right(), combined.bottom() - bottom_h - if bottom { 2.0_f32.min(combined.height()) } else { 0.0 }));
+        let right = if bottom {
+            Rect::from_min_max(pos2(combined.left(), centre.bottom() + 2.0_f32.min(combined.height())), combined.max)
+        } else {
+            Rect::from_min_max(pos2(body.right() - right_w, body.top()), body.max)
+        };
         // Terminal under the centre.
         // It gives way when the centre is too short for it and the graph above it.
         let show_term = self.settings.flag("showTerminal", false) && r.view.is_some() && centre.height() >= 100.0 + 2.0 + 120.0;
@@ -82,11 +91,20 @@ impl App {
             self.terminal_panel(&mut child, tab, &r, &mut later);
         }
         if show_right {
-            let split = Rect::from_min_size(pos2(right.left() - 2.0, body.top()), vec2(2.0, body.height()));
-            let dx = widgets::splitter(ui, split, ui.scope_id().with("right_split"), true);
-            if dx != 0.0 {
-                let w = (right_w - dx).clamp(300.0, 640.0);
-                later.push(Box::new(move |app| app.settings.set("rightWidth", w.round())));
+            if bottom {
+                let split = Rect::from_min_max(pos2(combined.left(), centre.bottom()), pos2(combined.right(), right.top()));
+                let dy = widgets::splitter(ui, split, ui.scope_id().with("right_bottom_split"), false);
+                if dy != 0.0 {
+                    let h = bottom_panel_height(combined.height(), bottom_h - dy);
+                    later.push(Box::new(move |app| app.settings.set("rightPanelHeight", h.round())));
+                }
+            } else {
+                let split = Rect::from_min_size(pos2(right.left() - 2.0, body.top()), vec2(2.0, body.height()));
+                let dx = widgets::splitter(ui, split, ui.scope_id().with("right_split"), true);
+                if dx != 0.0 {
+                    let w = (right_w - dx).clamp(300.0, 640.0);
+                    later.push(Box::new(move |app| app.settings.set("rightWidth", w.round())));
+                }
             }
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Min)));
             child.set_clip_rect(right);
@@ -152,6 +170,12 @@ impl App {
     }
 }
 
+fn bottom_panel_height(height: f32, preferred: f32) -> f32 {
+    let available = (height - 2.0).max(0.0);
+    let minimum = 100.0_f32.min(available / 2.0);
+    preferred.clamp(minimum, available - minimum)
+}
+
 /// Side panel widths for a body this wide, as the earlier web interface laid them out: the
 /// centre keeps up to 440 px when it can, then gives way down to 160 px while both panels
 /// shrink towards their smallest (200 and 300 px) in proportion to what they can spare. Only a
@@ -191,7 +215,15 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
 
 #[cfg(test)]
 mod tests {
-    use super::fit_panels;
+    use super::{bottom_panel_height, fit_panels};
+
+    #[test]
+    fn bottom_panel_height_fits_short_and_normal_windows() {
+        assert_eq!(bottom_panel_height(800.0, 350.0), 350.0);
+        assert_eq!(bottom_panel_height(800.0, 900.0), 698.0);
+        assert_eq!(bottom_panel_height(100.0, 350.0), 49.0);
+        assert_eq!(bottom_panel_height(0.0, 350.0), 0.0);
+    }
 
     #[test]
     fn the_default_window_keeps_both_panels() {

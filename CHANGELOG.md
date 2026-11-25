@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Move the commit details panel below the commit graph or back to the right, and resize it in either layout.
+
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
