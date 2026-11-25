@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Pull requests from a repository without its own template use the GitHub organization's default template. Commits made with a GitHub no-reply address show that account's GitHub picture.
 - Recompose commits with AI: from a commit's menu, or for a run of selected commits that ends at the checked-out commit, the commits are undone and their changes composed again into new commits for you to review. Undo brings the originals back.
 - Auto-resolve with AI explains each conflict it resolved and how confident it is (high, medium or low), shown above its suggestion in the conflict editor.
 - A "Merged #N" pill shows when a branch's pull request was merged: beside the checked-out branch in the toolbar, on worktree cards in the Agents view, and in Commit Details for the commit it ended at.

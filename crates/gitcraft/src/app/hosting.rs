@@ -1301,11 +1301,18 @@ impl App {
     pub(crate) fn start_pull_request(&mut self, tab: u64, branch: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let branch = branch.to_owned();
+        let gitlab = self.gitlab();
         self.spawn(move || {
             let dir = Path::new(&path);
             let templates = gitcraft_core::extras::pr_templates(dir);
             let target = gitcraft_core::extras::default_branch_for(dir, &branch).map(|(_, b)| b);
-            let templates: Vec<(String, String)> = templates.into_iter().map(|t| (t.name, t.body)).collect();
+            let mut templates: Vec<(String, String)> = templates.into_iter().map(|t| (t.name, t.body)).collect();
+            // A repository without a template of its own uses its GitHub organization's default one.
+            if templates.is_empty()
+                && let Some(t) = gitcraft_core::session::remote_of(&path, &gitlab).ok().and_then(|remote| gitcraft_core::hosting::org_pr_template(&remote))
+            {
+                templates.push(t);
+            }
             super::Msg::Apply(Box::new(move |app: &mut App| app.pull_request_form(tab, branch, target, templates)))
         });
     }
