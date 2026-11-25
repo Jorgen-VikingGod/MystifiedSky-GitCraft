@@ -21,7 +21,7 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
     if resp.hovered() && enabled {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.white(0.05));
     }
-    let fade = if enabled || spinning { 1.0 } else { 0.35 };
+    let fade = if enabled { 1.0 } else { 0.35 };
     let show_label = labels || spinning;
     let icon_y = if show_label { rect.center().y + 7.0 } else { rect.center().y };
     if show_label {
@@ -37,7 +37,7 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
                 let a = t * 6.0 + k as f32 / 24.0 * std::f32::consts::TAU * 0.75;
                 pos2(ir.center().x + 8.0 * a.cos(), ir.center().y + 8.0 * a.sin())
             }).collect(),
-            Stroke::new(2.0, c.white(0.9)),
+            Stroke::new(2.0, c.white(0.9).gamma_multiply(fade)),
         ));
         ui.ctx().request_repaint();
     } else {
@@ -176,10 +176,12 @@ impl App {
         icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if busy { 0.35 } else { 1.0 }));
         let cresp = cresp.tip("Pull options");
         egui::Popup::menu(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_min_width(220.0);
+            let width = 240.0;
+            ui.set_width(width);
+            ui.add(egui::Label::new(egui::RichText::new("Select the default pull/fetch operation to execute when clicking this button").size(13.0).color(c.white(0.6))).wrap());
+            ui.add_space(4.0);
             for &(m, label) in &PULL_LABELS {
                 let selected = pull_mode == m;
-                let width = ui.available_width();
                 egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
                     ui.set_min_width(width);
                     ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
