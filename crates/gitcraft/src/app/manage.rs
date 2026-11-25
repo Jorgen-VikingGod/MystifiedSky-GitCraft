@@ -250,6 +250,33 @@ impl App {
             let mut toggle_fav: Option<String> = None;
             let mut remove: Vec<String> = Vec::new();
             let mut open_paths: Vec<String> = Vec::new();
+            // Resizable Repository, Location and Upstream columns, remembered across restarts; the rest of the row
+            // shows the branch and its status.
+            let mut cols: [f32; 3] = app.settings.get("repoManagementColumns").unwrap_or([180.0, 260.0, 150.0]);
+            {
+                let w = ui.available_width();
+                let (head, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
+                let mut x = head.left() + 42.0;
+                let mut changed = false;
+                for (i, title) in ["Repository", "Location", "Upstream"].into_iter().enumerate() {
+                    ui.painter().text(pos2(x, head.center().y), egui::Align2::LEFT_CENTER, title, super::fonts::semibold(11.5), c.fg3);
+                    x += cols[i];
+                    let grip = Rect::from_center_size(pos2(x - 4.0, head.center().y), vec2(8.0, 22.0));
+                    let g = ui.interact(grip, ui.scope_id().with(("repo_col", i)), Sense::drag());
+                    if g.hovered() || g.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        ui.painter().line_segment([pos2(x - 4.0, head.top() + 4.0), pos2(x - 4.0, head.bottom() - 4.0)], egui::Stroke::new(1.0, c.fg3));
+                    }
+                    if g.dragged() {
+                        cols[i] = (cols[i] + g.drag_delta().x).clamp(80.0, 600.0);
+                        changed = true;
+                    }
+                }
+                ui.painter().text(pos2(head.right() - 8.0, head.center().y), egui::Align2::RIGHT_CENTER, "Branch", super::fonts::semibold(11.5), c.fg3);
+                if changed {
+                    app.settings.set("repoManagementColumns", cols);
+                }
+            }
             egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.58).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 for (title, paths) in &groups {
@@ -312,16 +339,20 @@ impl App {
                             toggle_fav = Some(path.clone());
                         }
                         let name = super::folder_name(path);
-                        let ng = ui.painter().layout_no_wrap(name, super::fonts::semibold(12.5), c.link);
+                        let ng = widgets::fit(ui, &name, super::fonts::semibold(12.5), c.link, cols[0] - 12.0);
                         let nr = Rect::from_min_size(pos2(star.right() + 8.0, row.center().y - ng.size().y / 2.0), ng.size());
                         ui.painter().galley(nr.min, ng, c.link);
                         if ui.interact(nr, ui.scope_id().with(("open", title, path)), Sense::click()).tip("Open").clicked() {
                             open_paths.push(path.clone());
                             close = true;
                         }
-                        let right_w = 250.0;
-                        let pg = widgets::fit(ui, path, FontId::proportional(12.5), c.fg3, row.right() - nr.right() - right_w - 16.0);
-                        ui.painter().galley(pos2(nr.right() + 8.0, row.center().y - pg.size().y / 2.0), pg, c.fg3);
+                        let location_x = star.right() + 8.0 + cols[0];
+                        let pg = widgets::fit(ui, path, FontId::proportional(12.5), c.fg3, cols[1] - 12.0);
+                        ui.painter().galley(pos2(location_x, row.center().y - pg.size().y / 2.0), pg, c.fg3);
+                        if let Some(up) = sum.as_ref().and_then(|s| s.upstream.as_deref()) {
+                            let ug = widgets::fit(ui, up, FontId::proportional(12.0), c.fg2, cols[2] - 12.0);
+                            ui.painter().galley(pos2(location_x + cols[1], row.center().y - ug.size().y / 2.0), ug, c.fg2);
+                        }
                         let mut x = row.right() - 8.0;
                         if hovered {
                             let mut buttons: Vec<(Icon, &str, u8)> = vec![(Icon::FolderOpen, "Open in File Manager", 2), (Icon::Download, "Pull repository", 1), (Icon::CloudDownload, "Fetch repository", 0)];

@@ -626,11 +626,19 @@ impl App {
         let path = r.path.clone();
         let inbox = self.inbox.clone();
         let ctx = self.ctx.clone();
+        let (error_inbox, error_ctx) = (self.inbox.clone(), self.ctx.clone());
         self.spawn(move || {
             let notify_path = path.clone();
+            // Said once per watch: the system stopped telling GitCraft about changes (or reported an error).
+            let told = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let result = gitcraft_core::watch::start(std::path::Path::new(&path), move |full| {
                 inbox.post(Msg::Changed { path: notify_path.clone(), full });
                 ctx.request_repaint();
+            }, move |error| {
+                if !told.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    error_inbox.post(Msg::Toast(false, format!("GitCraft stopped receiving file change events from the system, so changes made outside it may not show until you refresh: {error}")));
+                    error_ctx.request_repaint();
+                }
             });
             Msg::Watching { tab, result: result.map(Arc::new) }
         });

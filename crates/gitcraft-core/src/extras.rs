@@ -191,6 +191,8 @@ pub struct RepoSummary {
     pub changes: usize,
     pub ahead: u32,
     pub behind: u32,
+    /// The checked-out branch's upstream (`origin/main`), when it has one.
+    pub upstream: Option<String>,
 }
 
 /// Branch, uncommitted-change count and ahead / behind for the Repository Management list.
@@ -210,6 +212,8 @@ pub fn repo_summary(dir: &Path) -> RepoSummary {
     while let Some(line) = records.next() {
         if let Some(b) = line.strip_prefix("# branch.head ") {
             s.branch = (b != "(detached)").then(|| b.to_string());
+        } else if let Some(u) = line.strip_prefix("# branch.upstream ") {
+            s.upstream = Some(u.to_owned());
         } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
             let mut it = ab.split_whitespace();
             s.ahead = it.next().and_then(|x| x.trim_start_matches('+').parse().ok()).unwrap_or(0);

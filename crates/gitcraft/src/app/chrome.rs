@@ -92,8 +92,26 @@ impl App {
                         }
                         ui.add_space(12.0);
                         let zoom = format!("{}%", (self.settings.zoom() * 100.0).round());
-                        if status_button(ui, Icon::ZoomIn, Some(&zoom), "Reset zoom").clicked() {
-                            self.set_zoom(ui.ctx(), 1.0);
+                        // The zoom level opens a list of presets.
+                        let zr = status_button(ui, Icon::ZoomIn, Some(&zoom), "Zoom");
+                        let now = self.settings.zoom();
+                        let mut pick = None;
+                        egui::Popup::menu(&zr).show(|ui| {
+                            let mut factors = crate::settings::ZOOM_FACTORS;
+                            factors.sort_by(f32::total_cmp);
+                            for z in factors {
+                                let label = format!("{}{}%", if (z - now).abs() < 0.001 { "âœ“ " } else { "   " }, (z * 100.0).round());
+                                if ui.button(label).clicked() {
+                                    pick = Some(z);
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Reset zoom").clicked() {
+                                pick = Some(1.0);
+                            }
+                        });
+                        if let Some(z) = pick {
+                            self.set_zoom(ui.ctx(), z);
                         }
                         if status_button(ui, Icon::Gift, None, "What's new (release notes)").clicked() {
                             self.open_url(RELEASES_URL);

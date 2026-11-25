@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- GitCraft tells you when the system stops sending file change events, since changes made outside it may then not show until you refresh. Long choices in dialog lists show their full text on hover.
+- The command palette offers "Open Repo in …" for every editor installed on this computer. Repository Management has resizable Repository, Location and Upstream columns that stay as you leave them. Choose a zoom level from the status bar.
 - Terminal tab shortcuts (Ctrl+Shift+N, Ctrl+Shift+W, Ctrl+PageUp/PageDown and Ctrl+Shift+1–9; Command+Option on macOS), listed in Keyboard Shortcuts. Minimize the terminal to its tab bar, end a session from the trash button, and drop files on the terminal to type their paths.
 - Hover an annotated tag in the left panel to read its message. With a branch pinned, a pin in the Graph column header jumps to it. Checking out a branch or commit shows its working changes.
 - Rename repository tabs, reopen individual recently closed repositories from the tabs list, and delete saved workspaces without touching their repositories. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))

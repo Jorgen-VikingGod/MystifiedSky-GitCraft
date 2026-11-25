@@ -494,6 +494,14 @@ impl App {
                     let label = self.command_label(cmd);
                     items.push((cmd.id.to_owned(), label, hint, self.keys_of(cmd.id).map(|k| label_of(&k)).unwrap_or_default(), action));
                 }
+                // Every other editor found on this computer.
+                if path.is_some() {
+                    let preferred = self.settings.string("externalEditor", "vscode");
+                    for tool in installed_editors().iter().copied().filter(|t| *t != preferred) {
+                        let name = super::external_tools::editor_name(tool);
+                        items.push((format!("open-in:{tool}"), format!("Open Repo in {name}"), format!("{} editor ide", Group::Repo.title()), String::new(), PaletteAction::OpenIn(tool)));
+                    }
+                }
             }
             Picker::OpenRepo => {
                 let mut all: Vec<String> = self.tabs.iter().filter_map(|t| t.path().map(str::to_owned)).collect();
@@ -676,6 +684,13 @@ impl App {
                 PaletteAction::Theme(id) => self.set_theme(id),
                 PaletteAction::Profile(i) => self.switch_profile(i),
                 PaletteAction::Workspace(i) => self.open_workspace(i),
+                PaletteAction::OpenIn(tool) => {
+                    if let Some(path) = self.repo(tab).map(|r| r.path.clone())
+                        && let Err(e) = gitcraft_core::external::open_editor(&path, None, tool, "", "", "")
+                    {
+                        self.toast(false, e);
+                    }
+                }
             }
             return;
         }
@@ -860,6 +875,17 @@ pub enum PaletteAction {
     Theme(&'static str),
     Profile(usize),
     Workspace(usize),
+    /// Open the repository in this editor (one found installed), whatever the preferred editor is.
+    OpenIn(&'static str),
+}
+
+/// The editors found installed, looked for once per run.
+fn installed_editors() -> &'static [&'static str] {
+    static FOUND: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(|| {
+        let tools: Vec<&'static str> = super::external_tools::EDITORS.iter().map(|(id, _)| *id).collect();
+        gitcraft_core::external::installed_editors(&tools)
+    })
 }
 
 pub struct Palette {

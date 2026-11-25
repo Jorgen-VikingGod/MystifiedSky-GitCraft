@@ -209,7 +209,7 @@ struct WorkWatch {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl WorkWatch {
-    fn start(root: &Path, changed: impl Fn(bool) + Send + 'static) -> Result<Self, String> {
+    fn start(root: &Path, changed: impl Fn(bool) + Send + 'static, failed: impl Fn(String) + Send + Sync + Clone + 'static) -> Result<Self, String> {
         let root = root.canonicalize().map_err(|error| error.to_string())?;
         let mut plan = crate::watch_plan::WatchPlan::read(&root)?;
         let (events, messages) = std::sync::mpsc::channel();
@@ -218,7 +218,10 @@ impl WorkWatch {
         let mut watcher = repository_debouncer(&paths, needs_polling(&root), debounce(WORKDIR_WATCH_DEBOUNCE_MS), move |result: DebounceEventResult| {
             let event = match result {
                 Ok(events) => WorkEvent::Paths(events.into_iter().map(|event| event.path).collect()),
-                Err(_) => WorkEvent::Reconfigure(true),
+                Err(errors) => {
+                    failed(errors.to_string());
+                    WorkEvent::Reconfigure(true)
+                }
             };
             let _ = sender.send(event);
         }).map_err(|error| error.to_string())?;
@@ -274,7 +277,10 @@ impl Drop for WorkWatch {
 
 /// `on_change(full)`: `full` is false when only the file lists can have changed (files edited in the working
 /// folder, or the index), so the window refreshes just the status instead of the whole repository.
-pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'static) -> Result<RepoWatch, String> {
+///
+/// `on_error` hears when the system stops delivering change events (or reports an error for them), so the window can
+/// say changes made outside it may be missed.
+pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'static, on_error: impl Fn(String) + Send + Sync + Clone + 'static) -> Result<RepoWatch, String> {
     let gitdir = {
         let o = crate::git::run(root, &["rev-parse", "--absolute-git-dir"]);
         if o.ok {
@@ -283,7 +289,7 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
             root.join(".git")
         }
     };
-    let work = WorkWatch::start(root, on_change.clone())?;
+    let work = WorkWatch::start(root, on_change.clone(), on_error.clone())?;
     let work_events = work.events.clone();
     let lfs_tmp = excluded(gitdir.join("lfs").join("tmp"));
 
@@ -304,6 +310,7 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
         let cb = on_change.clone();
         let gd = gitdir.clone();
         let work_events = work_events.clone();
+        let failed = on_error.clone();
         let polling = needs_polling(&gitdir.canonicalize().unwrap_or_else(|_| gitdir.clone()));
         let paths = if polling {
             let mut paths = vec![(gitdir.clone(), RecursiveMode::NonRecursive)];
@@ -314,6 +321,9 @@ pub fn start(root: &Path, on_change: impl Fn(bool) + Send + Sync + Clone + 'stat
             paths
         } else { vec![(gitdir.clone(), RecursiveMode::Recursive)] };
         let g = repository_debouncer(&paths, polling, debounce(GITDIR_WATCH_DEBOUNCE_MS), move |res: DebounceEventResult| {
+            if let Err(errors) = &res {
+                failed(errors.to_string());
+            }
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).filter(|p| !under(p, &lt) && relevant_metadata(&gd, p)).collect();
                 if !paths.is_empty() {
@@ -411,7 +421,7 @@ mod registration_tests {
         assert!(crate::git::run(&root, &["config", "core.excludesFile", &excludes.to_string_lossy()]).ok);
         std::fs::create_dir_all(root.join("build/deep")).unwrap(); std::fs::write(root.join("build/deep/file"), "initial").unwrap();
         let events = Arc::new(AtomicUsize::new(0)); let count = events.clone();
-        let watch = start(&root, move |_| {count.fetch_add(1, Ordering::SeqCst);}).unwrap();
+        let watch = start(&root, move |_| {count.fetch_add(1, Ordering::SeqCst);}, |_| {}).unwrap();
         // Updating an external rule source must install watches in newly visible trees.
         std::fs::write(&excludes, "").unwrap(); std::thread::sleep(Duration::from_millis(3500));
         let baseline = events.load(Ordering::SeqCst); std::fs::write(root.join("build/deep/file"), "visible").unwrap();
@@ -423,7 +433,7 @@ mod registration_tests {
     fn real_events_follow_new_directories_ignore_edits_and_tracked_exceptions() {
         let folder=tempfile::tempdir().unwrap();let root=folder.path().canonicalize().unwrap();assert!(crate::git::run(&root,&["init","-q"]).ok);
         std::fs::write(root.join(".gitignore"),"build/\n").unwrap();std::fs::create_dir(root.join("build")).unwrap();
-        let events=Arc::new(AtomicUsize::new(0));let count=events.clone();let watch=start(&root,move |_|{count.fetch_add(1,Ordering::SeqCst);}).unwrap();
+        let events=Arc::new(AtomicUsize::new(0));let count=events.clone();let watch=start(&root,move |_|{count.fetch_add(1,Ordering::SeqCst);},|_|{}).unwrap();
         std::fs::create_dir_all(root.join("new/deep")).unwrap();std::fs::write(root.join("new/deep/file"),"initial").unwrap();
         wait_until("new directory",||events.load(Ordering::SeqCst)>0);
         std::thread::sleep(Duration::from_millis(2500));let baseline=events.load(Ordering::SeqCst);
