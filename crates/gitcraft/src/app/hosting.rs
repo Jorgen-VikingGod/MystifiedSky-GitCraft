@@ -42,8 +42,11 @@ pub struct Hosted {
     /// The source commit each review's patch was read for: a pull request that moved on needs a new read.
     pub review_sha: HashMap<u64, String>,
     /// Recently merged pull requests (number, source branch, source commit, URL), for the Merged pills.
-    pub merged: Option<Loaded<Vec<(u64, String, String, String)>>>,
+    pub merged: Option<Loaded<Vec<MergedPr>>>,
 }
+
+/// A merged pull request: its number, source branch, source commit and URL.
+pub type MergedPr = (u64, String, String, String);
 
 /// The pull request view's own state.
 #[derive(Default)]
