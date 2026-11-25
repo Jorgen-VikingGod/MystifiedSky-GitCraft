@@ -491,6 +491,7 @@ impl App {
                     if resp.clicked() {
                         later.push(Box::new(open.clone()));
                     }
+                    self.merged_pill(ui, tab, Some(&wt.branch), None, later);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let dots = widgets::icon_button(ui, Icon::EllipsisVertical, 14.0, "Worktree actions");
                         egui::Popup::menu(&dots).show(|ui| {

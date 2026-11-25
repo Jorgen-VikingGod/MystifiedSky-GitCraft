@@ -41,6 +41,8 @@ pub struct Hosted {
     pub review: HashMap<u64, Loaded<Value>>,
     /// The source commit each review's patch was read for: a pull request that moved on needs a new read.
     pub review_sha: HashMap<u64, String>,
+    /// Recently merged pull requests (number, source branch, source commit, URL), for the Merged pills.
+    pub merged: Option<Loaded<Vec<(u64, String, String, String)>>>,
 }
 
 /// The pull request view's own state.
@@ -140,6 +142,54 @@ pub fn issue_identity(i: &Value) -> String {
 impl App {
     fn gitlab(&self) -> String {
         self.settings.string("gitlabHost", "")
+    }
+
+    /// Read the repository's recently merged pull requests once, for the Merged pills.
+    pub(crate) fn want_merged_prs(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        let gitlab = self.gitlab();
+        let h = self.hosted_mut(tab);
+        if h.merged.is_some() {
+            return;
+        }
+        h.merged = Some(Loaded::Loading);
+        self.spawn(move || {
+            let r = gitcraft_core::session::remote_of(&path, &gitlab).and_then(|remote| gitcraft_core::hosting::pull_requests_page(&remote, None, gitcraft_core::hosting::PullFilter::Merged));
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.hosted_mut(tab).merged = Some(match r {
+                    Ok(page) => Loaded::Ready(page.items.into_iter().map(|pr| (pr.number, pr.source, pr.source_sha, pr.url)).collect()),
+                    Err(e) => Loaded::Failed(e),
+                });
+            }))
+        });
+    }
+
+    /// The merged pull request whose source was `branch` or ended at commit `sha`: its number and URL. Asks for the
+    /// list the first time.
+    pub(crate) fn merged_pr(&self, tab: u64, branch: Option<&str>, sha: Option<&str>, later: &mut Vec<Later>) -> Option<(u64, String)> {
+        match self.hosted.get(&tab).and_then(|h| h.merged.as_ref()) {
+            None => {
+                later.push(Box::new(move |app| app.want_merged_prs(tab)));
+                None
+            }
+            Some(Loaded::Ready(list)) => list
+                .iter()
+                .find(|(_, source, source_sha, _)| branch.is_some_and(|b| !b.is_empty() && source == b) || sha.is_some_and(|s| !s.is_empty() && source_sha == s))
+                .map(|(n, _, _, url)| (*n, url.clone())),
+            _ => None,
+        }
+    }
+
+    /// A "Merged #N" pill for `branch` (or commit `sha`) when its pull request was merged; it opens the pull request.
+    pub(crate) fn merged_pill(&self, ui: &mut Ui, tab: u64, branch: Option<&str>, sha: Option<&str>, later: &mut Vec<Later>) {
+        let Some((number, url)) = self.merged_pr(tab, branch, sha, later) else { return };
+        let purple = egui::Color32::from_rgb(0x8f, 0x6f, 0xe0);
+        let resp = egui::Frame::new().fill(purple.gamma_multiply(0.25)).stroke(Stroke::new(1.0, purple)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+            ui.label(egui::RichText::new(format!("Merged #{number}")).size(11.0).color(egui::Color32::WHITE));
+        }).response.interact(Sense::click());
+        if resp.tip("Its pull request was merged. Click to open it.").clicked() {
+            later.push(Box::new(move |app| app.open_url(&url)));
+        }
     }
 
     fn hosted_mut(&mut self, tab: u64) -> &mut Hosted {

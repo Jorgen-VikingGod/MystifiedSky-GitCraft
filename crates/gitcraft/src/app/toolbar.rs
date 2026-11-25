@@ -118,6 +118,12 @@ impl App {
         let gw = g.size().x;
         ui.painter().galley(pos2(branch_rect.left() + 8.0, rect.center().y + 1.0), g, c.white(0.9));
         icons::paint(ui, Rect::from_min_size(pos2(branch_rect.left() + 12.0 + gw, rect.center().y + 3.0), Vec2::splat(14.0)), Icon::ChevronDown, 14.0, c.white(0.9));
+        // The checked-out branch's pull request was merged: say so beside its name.
+        if let Some(head) = v.and_then(|v| v.data.head_branch.as_deref()) {
+            let pill = Rect::from_min_size(pos2(branch_rect.right() + 4.0, rect.center().y - 10.0), vec2(96.0, 20.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(pill).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            self.merged_pill(&mut child, tab, Some(head), None, later);
+        }
         if let Some(v) = v {
             egui::Popup::menu(&resp).show(|ui| {
                 let mut entries = vec![Entry::Heading("Checkout a local branch".into())];

@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- A "Merged #N" pill shows when a branch's pull request was merged: beside the checked-out branch in the toolbar, on worktree cards in the Agents view, and in Commit Details for the commit it ended at.
 - Select a run of consecutive commits to see their combined changes in the right panel, below the actions for the selection.
 - Remove a worktree and delete its branch (locally, or locally and on the remote) in one step. A branch checked out in another worktree offers this instead of Delete. Sort the Agents worktree list by latest activity or branch name, and jump to the terminal an agent is running in.
 - Start an agent session in a new worktree with one click, or from an issue's menu with a branch named after it. Cursor CLI is available as a coding agent. New worktrees keep the hidden, soloed and pinned branches of the repository they came from.

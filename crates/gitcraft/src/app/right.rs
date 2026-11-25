@@ -878,6 +878,8 @@ impl App {
         egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 12, bottom: 8 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
             ui.add(egui::Label::new(egui::RichText::new(&commit.summary).font(super::fonts::semibold(15.0)).color(c.white(1.0))).wrap().selectable(true));
+            // The pull request this commit was the head of, once merged.
+            ui.horizontal(|ui| self.merged_pill(ui, tab, None, Some(&commit.sha), later));
             if let Some(Loaded::Ready(_)) = r.commit_files.get(sha) {
                 let code = r.signatures.get(sha).map(String::as_str).unwrap_or("");
                 let label = match code {
