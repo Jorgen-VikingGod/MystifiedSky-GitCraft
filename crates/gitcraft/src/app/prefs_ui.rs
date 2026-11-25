@@ -155,7 +155,7 @@ pub fn token_url(id: &str, i: &Value) -> String {
 fn default_of(key: &str) -> Value {
     match key {
         "autoFetchMin" => json!(5),
-        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" => json!(true),
+        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" | "worktreeWipInGraph" => json!(true),
         "defaultBranch" => json!("main"),
         "initialCommits" => json!(2000),
         "pullMode" => json!("ff"),
@@ -1019,6 +1019,7 @@ impl App {
                 h(ui, "Agents");
                 row(ui, "Setup commands (1 per line)", "Commands run in sequence when a new agent session starts in a worktree. Use this to install dependencies and prepare your environment. Put each command on a new line.", None, None, true, |ui| self.area(ui, pui, s("agentSetup"), "npm install\npnpm build", 4, true));
                 row(ui, "CLI arguments", "Arguments appended to the agent command when starting a session.", None, None, false, |ui| self.text(ui, pui, s("agentArgs"), "", false, true));
+                row(ui, "Show other worktrees' changes in the graph", "A pill on the commit each other worktree has checked out counts its uncommitted changes; click it to open that worktree.", None, None, false, |ui| self.toggle(ui, s("worktreeWipInGraph"), true));
             }
             "commit" => {
                 h(ui, "Commit");

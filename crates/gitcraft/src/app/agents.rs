@@ -239,7 +239,7 @@ impl App {
         });
     }
 
-    fn want_worktree_status(&mut self, tab: u64, path: String) {
+    pub(crate) fn want_worktree_status(&mut self, tab: u64, path: String) {
         let request = super::unique_id();
         if let Some(r) = self.repo_mut(tab) {
             if r.agents.status_requests.contains_key(&path) {

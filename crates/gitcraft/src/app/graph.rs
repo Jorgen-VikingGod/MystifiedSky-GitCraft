@@ -369,6 +369,7 @@ impl App {
         let c = p();
         let path = v.path.clone();
         let cols: Columns = self.settings.get("columns").unwrap_or_default();
+        let show_worktree_wip = self.settings.flag("worktreeWipInGraph", true) && v.data.worktrees.len() > 1;
         // The branch being dragged follows the pointer.
         if let Some(dragged) = egui::DragAndDrop::payload::<GitRef>(ui.ctx())
             && let Some(at) = ui.ctx().pointer_latest_pos()
@@ -912,6 +913,37 @@ impl App {
                             if mresp.hovered() || mresp.clicked() {
                                 new_hover_ref = Some((i, first.kind == RefKind::Tag));
                                 stack = Some((i, clock));
+                            }
+                        }
+                        // Another worktree on this commit with uncommitted changes: a pill with their count that opens
+                        // it (Preferences > Agents > Show other worktrees' changes in the graph).
+                        if show_worktree_wip {
+                            for g in refs.iter().filter(|g| g.kind == RefKind::Local) {
+                                let Some(wt) = v.data.worktrees.iter().find(|w| w.branch == g.name && !super::same_folder(&w.path, &v.path)) else { continue };
+                                // Read again every 10 seconds (the request returns at once while a read is fresh).
+                                let entry = r.agents.statuses.get(&wt.path);
+                                if entry.is_none_or(|(_, at)| at.elapsed().as_secs() >= 10) {
+                                    let p = wt.path.clone();
+                                    later.push(Box::new(move |app| app.want_worktree_status(tab, p)));
+                                }
+                                let changes = match entry {
+                                    Some((super::repo::Loaded::Ready(s), _)) => super::right::working_changes(s).0,
+                                    _ => 0,
+                                };
+                                if changes == 0 || end_x + 40.0 > zone.right() {
+                                    continue;
+                                }
+                                let label = format!("✎ {changes}");
+                                let g2 = ui.painter().layout_no_wrap(label, FontId::proportional(11.0), c.white(0.95));
+                                let pill = Rect::from_min_size(pos2(end_x + 4.0, rect.center().y - INNER / 2.0), vec2(g2.size().x + 10.0, INNER));
+                                painter.rect(pill, CornerRadius::same(3), WARN.gamma_multiply(0.25), Stroke::new(1.0, WARN.gamma_multiply(0.8)), StrokeKind::Inside);
+                                painter.galley(pos2(pill.left() + 5.0, pill.center().y - g2.size().y / 2.0), g2, c.white(0.95));
+                                let presp = ui.interact(pill, ui.scope_id().with(("wt_wip", &wt.path)), Sense::click());
+                                if presp.tip(format!("{changes} uncommitted change{} in the worktree at {}. Click to open it.", if changes == 1 { "" } else { "s" }, wt.path)).clicked() {
+                                    let p = wt.path.clone();
+                                    later.push(Box::new(move |app| app.open_repo(&p)));
+                                }
+                                end_x = pill.right();
                             }
                         }
                         if more > 0 && stack.is_some_and(|(row, _)| row == i) {

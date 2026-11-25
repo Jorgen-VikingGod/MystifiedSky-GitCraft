@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents.
 - Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them.
 - Stacked pull requests: starting a pull request from a branch made on another open pull request's branch targets that branch, and the form names the pull request it stacks on.
 - Pull requests from a repository without its own template use the GitHub organization's default template. Commits made with a GitHub no-reply address show that account's GitHub picture.
