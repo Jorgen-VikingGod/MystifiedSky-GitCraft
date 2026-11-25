@@ -67,7 +67,7 @@ pub enum Pending {
 }
 
 const EDITORS: [(&str, &str); 11] = super::external_tools::EDITORS;
-const AGENTS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("none", "None")];
+const AGENTS: [(&str, &str); 7] = [("claude", "Claude Code"), ("codex", "Codex"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("cursor", "Cursor CLI"), ("none", "None")];
 const DIFF_TOOLS: [&str; 19] = ["vscode", "meld", "kdiff3", "bc", "p4merge", "winmerge", "tortoisemerge", "vimdiff", "araxis", "deltawalker", "diffmerge", "ecmerge", "emerge", "examdiff", "guiffy", "opendiff", "smerge", "tkdiff", "xxdiff"];
 const MONO_FONTS: [&str; 11] = ["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New", "Fira Code", "JetBrains Mono", "Lucida Console", "Menlo", "Monaco", "Source Code Pro", "Ubuntu Mono"];
 const OTHER_FONTS: [&str; 6] = ["Arial", "Calibri", "Open Sans", "Segoe UI", "Tahoma", "Verdana"];
@@ -155,7 +155,7 @@ pub fn token_url(id: &str, i: &Value) -> String {
 fn default_of(key: &str) -> Value {
     match key {
         "autoFetchMin" => json!(5),
-        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" => json!(true),
+        "autoPrune" | "autoUpdateSubmodules" | "rememberTabs" | "lazyLoad" | "conflictDetection" | "autoUpdate" | "ghostRefs" | "highlightRowsOnHover" | "toolbarLabels" | "showAgentsView" | "autogroupWorktreeTabs" | "spellcheck" | "notifySuccess" | "monospaceOnly" | "editorLineNumbers" | "editorSyntax" | "termDim" | "useCommitTemplate" | "sshUseAgent" | "keepGitconfigUpdated" | "worktreeWipInGraph" => json!(true),
         "defaultBranch" => json!("main"),
         "initialCommits" => json!(2000),
         "pullMode" => json!("ff"),
@@ -1013,12 +1013,37 @@ impl App {
                 }
                 sub(ui, "Coding Agent");
                 row(ui, "Coding Agent", "Started from the Agents view in the in-app terminal.", None, None, false, |ui| self.select(ui, s("codingAgent"), &AGENTS));
+                // Hooks that let the agents report their status (and Claude Code its permission requests) to the Agents view.
+                for (agent, label) in [("claude", "Claude Code"), ("codex", "Codex")] {
+                    let installed = if agent == "claude" { gitcraft_core::agent_status::claude_installed(None) } else { gitcraft_core::agent_status::codex_installed(None) };
+                    let help = if agent == "claude" {
+                        "Adds GitCraft's hooks to Claude Code's settings, so the Agents view shows whether a session is running, waiting for you or done, and lets you allow or deny its permission requests. Your other hooks stay."
+                    } else {
+                        "Makes GitCraft Codex's notify program, so the Agents view shows when a session is waiting for you. Not changed if Codex already runs another notify program."
+                    };
+                    row(ui, &format!("{label} status"), help, None, None, false, |ui| {
+                        ui.label(egui::RichText::new(if installed { "Reporting to GitCraft" } else { "Not set up" }).size(12.5).color(if installed { GOOD } else { c.fg3 }));
+                        if pbutton(ui, if installed { "Remove" } else { "Set Up" }, Kind::Default, true) {
+                            let result = match (agent, installed) {
+                                ("claude", false) => gitcraft_core::agent_status::install_claude(None),
+                                ("claude", true) => gitcraft_core::agent_status::uninstall_claude(None),
+                                (_, false) => gitcraft_core::agent_status::install_codex(None),
+                                (_, true) => gitcraft_core::agent_status::uninstall_codex(None),
+                            };
+                            match result {
+                                Ok(()) => self.toast(true, if installed { format!("{label} no longer reports to GitCraft") } else { format!("{label} now reports its status to GitCraft; restart running sessions to start") }),
+                                Err(e) => self.toast(false, e),
+                            }
+                        }
+                    });
+                }
             }
             "ai" => self.ai_section(ui, pui),
             "agents" => {
                 h(ui, "Agents");
                 row(ui, "Setup commands (1 per line)", "Commands run in sequence when a new agent session starts in a worktree. Use this to install dependencies and prepare your environment. Put each command on a new line.", None, None, true, |ui| self.area(ui, pui, s("agentSetup"), "npm install\npnpm build", 4, true));
                 row(ui, "CLI arguments", "Arguments appended to the agent command when starting a session.", None, None, false, |ui| self.text(ui, pui, s("agentArgs"), "", true));
+                row(ui, "Show other worktrees' changes in the graph", "A pill on the commit each other worktree has checked out counts its uncommitted changes; click it to open that worktree.", None, None, false, |ui| self.toggle(ui, s("worktreeWipInGraph"), true));
             }
             "commit" => {
                 h(ui, "Commit");

@@ -246,6 +246,12 @@ pub struct App {
     /// AI requests in flight (their read ids, for Stop AI).
     pub(crate) ai_reads: Vec<String>,
     pub(crate) ai_label: Option<String>,
+    /// The last few AI explanations (what was explained, title, text), newest first.
+    pub(crate) explanations: std::collections::VecDeque<(String, String, String)>,
+    /// Recompose with AI is waiting for its soft reset in this tab, to compose the changes after it.
+    pub(crate) recompose_pending: Option<u64>,
+    /// The pull request being started stacks on another: its tab, branch and the note the form shows.
+    pub(crate) pr_stack: Option<(u64, String, String)>,
     /// The preferences revision the backend last heard about.
     pub(crate) synced: u64,
     pub(crate) prefs: Option<prefs_ui::PrefsUi>,
@@ -334,6 +340,9 @@ impl App {
             ai_requests: 0,
             ai_reads: Vec::new(),
             ai_label: None,
+            explanations: Default::default(),
+            recompose_pending: None,
+            pr_stack: None,
             synced: 0,
             prefs: None,
             prefs_data: Default::default(),
@@ -954,6 +963,27 @@ impl App {
                     && let Some(p) = self.prefs.as_mut()
                 {
                     p.submodules = None;
+                }
+                // General > Delete ".orig" files after merging: the backups a merge tool left during this operation.
+                if result.ok
+                    && matches!(*action, Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. } | Action::CherryPick { .. } | Action::CherryPickMany { .. } | Action::InteractiveRebase { .. } | Action::Commit { .. } | Action::ContinueRebase | Action::SkipRebase | Action::SaveResolved { .. })
+                    && self.settings.flag("deleteOrigAfterMerge", true)
+                {
+                    self.clean_orig_files(tab);
+                }
+                if matches!(*action, Action::Reset { .. }) {
+                    self.recompose_reset_done(tab, result.ok);
+                }
+                // A checkout shows the working changes of the branch (or commit) now checked out.
+                if result.ok
+                    && matches!(*action, Action::Checkout { .. } | Action::CheckoutRemote { .. })
+                    && let Some(r) = self.repo_mut(tab)
+                {
+                    r.ui.select(repo::Selection::Wip);
+                }
+                // Keep submodules up to date: after a pull or a checkout, by the repository's choice or the global one.
+                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::Rebase { .. }) {
+                    self.update_submodules_after(tab);
                 }
                 if let Action::Stash { message } = &*action
                     && result.ok

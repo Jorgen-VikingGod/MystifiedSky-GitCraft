@@ -40,6 +40,9 @@ impl App {
         r.side.generation = r.generation;
         let path = r.path.clone();
         let detect = detect && self.repo_pref(&path, "conflictDetection").and_then(|v| v.as_bool()).unwrap_or(true);
+        // Conflict Prevention's base branches and excluded branches for this repository, one pattern per line.
+        let lines = |key: &str| -> Vec<String> { self.repo_pref(&path, key).and_then(|v| v.as_str().map(|s| s.lines().map(str::to_owned).collect())).unwrap_or_default() };
+        let (base, excluded) = (lines("baseBranches"), lines("excludedBranches"));
         let generation = self.repo(tab).map_or(0, |r| r.generation);
         self.spawn(move || {
             let dir = std::path::Path::new(&path);
@@ -50,7 +53,7 @@ impl App {
                 locks: None,
                 locks_loading: false,
                 submodules: Some(gitcraft_core::manage::submodules(dir)),
-                conflicts: detect.then(|| gitcraft_core::extras::conflict_check(dir, None)),
+                conflicts: detect.then(|| gitcraft_core::extras::conflict_check_with(dir, &base, &excluded)),
             };
             super::Msg::Side { tab, side: Box::new(side) }
         });
@@ -270,7 +273,7 @@ impl App {
                         let p2 = w.path.clone();
                         later.push(Box::new(move |app| app.open_repo(&p2)));
                     }
-                    let (wp, locked) = (w.path.clone(), w.locked);
+                    let (wp, locked, wb) = (w.path.clone(), w.locked, w.branch.clone());
                     ctxmenu::attach(&rr, later, || {
                         let p1 = wp.clone();
                         let mut items = vec![item("Open worktree", move |app| app.open_repo(&p1))];
@@ -280,6 +283,10 @@ impl App {
                             items.push(Entry::Separator);
                             let p3 = wp.clone();
                             items.push(ctxmenu::off(ctxmenu::danger("Remove worktree", move |app| app.remove_worktree(tab, &p3)), !locked));
+                            if !wb.is_empty() {
+                                let (p4, b4) = (wp.clone(), wb.clone());
+                                items.push(ctxmenu::off(ctxmenu::danger("Remove worktree and delete branch…", move |app| app.remove_worktree_and_branch(tab, &p4, &b4)), !locked));
+                            }
                         }
                         items
                     });
@@ -435,6 +442,8 @@ impl App {
                 if is_open("tags", &open) {
                     for t in &tags {
                         let resp = row(ui, 1, Icon::Tag, &t.name, None, false, None);
+                        // An annotated tag shows its message under the pointer.
+                        let resp = if resp.hovered() && let Some(note) = tag_annotation(ui.ctx(), &v.path, &t.full) { resp.on_hover_text(note) } else { resp };
                         if resp.clicked() {
                             select_sha = Some(t.sha.clone());
                         }
@@ -603,7 +612,8 @@ impl App {
             (Icon::Laptop, "Local", Some(locals)),
             (Icon::Cloud, "Remote", Some(v.map_or(0, |v| v.data.remotes.len()))),
             (Icon::Network, "Worktrees", Some(v.map_or(0, |v| v.data.worktrees.len()))),
-            (Icon::CloudCog, "Cloud Patches", Some(0)),
+            // Patch files (export and apply), the full panel's PATCHES section; it has no count.
+            (Icon::CloudCog, "Patches", None),
             // The loaded pull requests, as the full panel counts them; none before they load.
             (Icon::GitPullRequest, "Pull Requests", tab.and_then(|t| self.hosted.get(&t)).filter(|h| h.prs.started && !h.prs.loading).map(|h| h.prs.items.len())),
             (Icon::CircleDot, "Issues", None),
@@ -640,6 +650,31 @@ impl App {
             }));
         }
     }
+}
+
+/// The message of an annotated tag (`refs/tags/…`), read once in the background; `None` while it is read and for a
+/// lightweight tag.
+pub(crate) fn tag_annotation(ctx: &egui::Context, repo: &str, full: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    type Notes = Mutex<HashMap<(String, String), Option<Option<String>>>>;
+    static NOTES: LazyLock<Notes> = LazyLock::new(Default::default);
+    let key = (repo.to_owned(), full.to_owned());
+    let mut notes = NOTES.lock().unwrap_or_else(|e| e.into_inner());
+    match notes.get(&key) {
+        Some(Some(note)) => return note.clone(),
+        Some(None) => return None,
+        None => {}
+    }
+    notes.insert(key.clone(), None);
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let out = gitcraft_core::git::run(std::path::Path::new(&key.0), &["for-each-ref", "--format=%(objecttype)%00%(contents)", &key.1]);
+        let note = out.stdout.split_once('\0').filter(|(kind, _)| *kind == "tag").map(|(_, text)| text.trim().to_owned()).filter(|t| !t.is_empty());
+        NOTES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, Some(note));
+        ctx.request_repaint();
+    });
+    None
 }
 
 /// A submodule's folder inside the repository, with the system's separator.

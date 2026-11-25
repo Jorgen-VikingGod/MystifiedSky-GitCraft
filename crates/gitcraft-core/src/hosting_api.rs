@@ -383,6 +383,29 @@ fn pull_requests_filtered(r: &RemoteRepo, filter: PullFilter) -> Result<Vec<Pull
     Ok(items)
 }
 
+/// The organization's default pull request template on GitHub (from its `.github` repository), for a repository
+/// that has none of its own: its file name and text.
+pub fn org_pr_template(r: &RemoteRepo) -> Option<(String, String)> {
+    use base64::Engine;
+    if !matches!(r.service.as_str(), "github" | "github-enterprise") {
+        return None;
+    }
+    let owner = r.path.split('/').next().filter(|o| !o.is_empty())?;
+    let auth = auth(&r.service).ok()?;
+    let base = api_base(&r.service);
+    for file in [".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md", "pull_request_template.md", "PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md", "docs/PULL_REQUEST_TEMPLATE.md"] {
+        let Ok(v) = http("GET", &format!("{base}/repos/{owner}/.github/contents/{file}"), &auth, None) else { continue };
+        let Some(encoded) = v["content"].as_str() else { continue };
+        let compact: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(compact) else { continue };
+        let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+        if !text.is_empty() && text.len() <= 32 * 1024 {
+            return Some((format!("{owner}/.github/{file}"), text));
+        }
+    }
+    None
+}
+
 pub fn pull_requests(r: &RemoteRepo) -> Result<Vec<PullRequest>, String> {
     pull_requests_filtered(r, PullFilter::Open)
 }

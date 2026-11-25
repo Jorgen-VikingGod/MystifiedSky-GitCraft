@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub const AGENT_LABEL: [(&str, &str); 5] = [("claude", "Claude Code"), ("codex", "Codex CLI"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI")];
+pub const AGENT_LABEL: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex CLI"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("cursor", "Cursor CLI")];
 
 pub fn agent_label(agent: &str) -> Option<&'static str> {
     AGENT_LABEL.iter().find(|(k, _)| *k == agent).map(|(_, l)| *l)
@@ -57,6 +57,8 @@ fn connection(ai: &Value, agent: &str) -> Option<Value> {
 /// shell-quoted; the folder is handed to the terminal, never typed as `cd`.
 pub fn agent_launch(ai: &Value, shell: &str, args: &str, agent: &str, resume: Option<&str>) -> Result<(String, HashMap<String, String>), String> {
     let program = AGENT_LABEL.iter().find(|(k, _)| *k == agent).map(|(k, _)| *k).ok_or("Choose a coding agent in Preferences > External Tools.")?;
+    // Cursor's CLI is installed as cursor-agent.
+    let program = if program == "cursor" { "cursor-agent" } else { program };
     if let Some(id) = resume
         && (id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
     {
@@ -115,6 +117,13 @@ pub struct AgentsUi {
     pub filter: String,
     pub search: bool,
     pub expanded: HashMap<String, bool>,
+    /// How the worktree list is ordered: 0 as Git lists them, 1 by latest agent activity, 2 by branch name.
+    pub sort: u8,
+    /// What the agents' status hooks last reported (see `gitcraft_core::agent_status`), and when it was read.
+    pub live: Vec<gitcraft_core::agent_status::AgentState>,
+    pub live_at: Option<Instant>,
+    /// Permission requests whose command is shown in full.
+    pub expanded_requests: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -137,37 +146,69 @@ impl App {
             self.open_prefs(Some("tools"));
             return;
         }
-        let Some((path, name)) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| (v.path.clone(), v.name.clone())) else { return };
+        let Some(path) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| v.path.clone()) else { return };
         if !worktree {
             self.launch_agent(tab, &path, &agent, None, &[]);
             return;
         }
-        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let d = Dialog::prompt("Start an agent session in a new worktree", "New branch name", &format!("agent/{stamp}"), "Start", move |app, v| {
+        let d = Dialog::prompt("Start an agent session in a new worktree", "New branch name", &default_agent_branch(), "Start", move |app, v| {
             let branch = v.text("value").trim().to_owned();
-            let repo = std::path::Path::new(&path);
-            let repo_name = repo.file_name().map_or_else(|| name.clone(), |n| n.to_string_lossy().into_owned());
-            let safe: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '-' }).collect();
-            let sibling = format!("{repo_name}-{safe}");
-            let folder = repo.parent().map_or_else(|| std::path::PathBuf::from(&sibling), |p| p.join(&sibling)).to_string_lossy().into_owned();
-            let setup: Vec<String> = app.settings.string("agentSetup", "").lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
-            let engine = app.engine.clone();
-            let (p2, f2) = (path.clone(), folder.clone());
-            app.busy = Some("Adding worktree…".into());
-            app.spawn(move || {
-                let r = engine.perform(&p2, Action::WorktreeAdd { path: f2, branch, new_branch: true, start: None });
-                super::Msg::Apply(Box::new(move |app: &mut App| {
-                    app.busy = None;
-                    if r.ok {
-                        app.load_repo(tab);
-                        app.launch_agent(tab, &folder, &agent, None, &setup);
-                    } else {
-                        app.toast(false, r.message);
-                    }
-                }))
-            });
+            app.start_agent_in_worktree(tab, branch);
         });
         self.dialog = Some(d);
+    }
+
+    /// New Agent Session in one click: a new worktree on a generated branch, with the preferred agent.
+    pub(crate) fn start_agent_now(&mut self, tab: u64) {
+        if agent_label(&self.settings.string("codingAgent", "claude")).is_none() {
+            self.open_prefs(Some("tools"));
+            return;
+        }
+        self.start_agent_in_worktree(tab, default_agent_branch());
+    }
+
+    /// Start an agent session for an issue: a worktree on a branch named after it.
+    pub(crate) fn start_agent_for_issue(&mut self, tab: u64, number: &str, title: &str) {
+        let slug: String = title.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|p| !p.is_empty()).take(6).collect::<Vec<_>>().join("-");
+        let number = number.trim_start_matches('#');
+        let suggested = if slug.is_empty() { format!("issue/{number}") } else { format!("issue/{number}-{slug}") };
+        let d = Dialog::prompt("Start an agent session for this issue", "New branch name", &suggested, "Start", move |app, v| {
+            let branch = v.text("value").trim().to_owned();
+            app.start_agent_in_worktree(tab, branch);
+        });
+        self.dialog = Some(d);
+    }
+
+    /// A new worktree beside the repository on `branch` (created from HEAD), the setup commands, then the agent.
+    fn start_agent_in_worktree(&mut self, tab: u64, branch: String) {
+        let agent = self.settings.string("codingAgent", "claude");
+        let Some((path, name)) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| (v.path.clone(), v.name.clone())) else { return };
+        if branch.is_empty() {
+            return;
+        }
+        let repo = std::path::Path::new(&path);
+        let repo_name = repo.file_name().map_or_else(|| name.clone(), |n| n.to_string_lossy().into_owned());
+        let safe: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '-' }).collect();
+        let sibling = format!("{repo_name}-{safe}");
+        let folder = repo.parent().map_or_else(|| std::path::PathBuf::from(&sibling), |p| p.join(&sibling)).to_string_lossy().into_owned();
+        let setup: Vec<String> = self.settings.string("agentSetup", "").lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
+        let engine = self.engine.clone();
+        let (p2, f2) = (path.clone(), folder.clone());
+        self.busy = Some("Adding worktree…".into());
+        self.spawn(move || {
+            let r = engine.perform(&p2, Action::WorktreeAdd { path: f2, branch, new_branch: true, start: None });
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.busy = None;
+                if r.ok {
+                    // The new worktree starts with this repository's view settings.
+                    app.inherit_view(&path, &folder);
+                    app.load_repo(tab);
+                    app.launch_agent(tab, &folder, &agent, None, &setup);
+                } else {
+                    app.toast(false, r.message);
+                }
+            }))
+        });
     }
 
     fn want_agent_sessions(&mut self, tab: u64, roots: Vec<String>, key: String) {
@@ -203,7 +244,19 @@ impl App {
         });
     }
 
-    fn want_worktree_status(&mut self, tab: u64, path: String) {
+    /// Read what the agents' status hooks reported.
+    pub(crate) fn want_agent_status(&mut self, tab: u64) {
+        self.spawn(move || {
+            let live = gitcraft_core::agent_status::read_all();
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                if let Some(r) = app.repo_mut(tab) {
+                    r.agents.live = live;
+                }
+            }))
+        });
+    }
+
+    pub(crate) fn want_worktree_status(&mut self, tab: u64, path: String) {
         let request = super::unique_id();
         if let Some(r) = self.repo_mut(tab) {
             if r.agents.status_requests.contains_key(&path) {
@@ -258,7 +311,12 @@ impl App {
             au.read_at = Some(Instant::now());
             later.push(Box::new(move |app| app.want_agent_sessions(tab, roots, key)));
         }
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(10));
+        // Live status from the agents' hooks, read every two seconds.
+        if au.live_at.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+            au.live_at = Some(Instant::now());
+            later.push(Box::new(move |app| app.want_agent_status(tab)));
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(if au.live.is_empty() { 10 } else { 2 }));
         let sessions: Vec<AgentSession> = match &au.sessions {
             Some(Loaded::Ready(l)) => l.clone(),
             _ => Vec::new(),
@@ -278,6 +336,13 @@ impl App {
                 format!("{} {} {titles}", w.path, w.branch).to_lowercase().contains(&filter)
             })
             .collect();
+        let mut visible = visible;
+        let latest = |w: &Worktree| grouped.get(&folder_key(&w.path)).and_then(|g| g.iter().map(|a| a.modified).max()).unwrap_or(i64::MIN);
+        match au.sort {
+            1 => visible.sort_by_key(|w| std::cmp::Reverse(latest(w))),
+            2 => visible.sort_by_key(|w| w.branch.to_lowercase()),
+            _ => {}
+        }
         let agent_items = || -> Vec<ctxmenu::Entry> {
             let mut out = vec![ctxmenu::Entry::Heading("Coding agent".into())];
             for (k, name) in AGENT_LABEL {
@@ -298,6 +363,10 @@ impl App {
                         if widgets::icon_button(ui, Icon::Search, 15.0, "Filter worktrees and sessions").clicked() {
                             au.search = !au.search;
                             au.filter.clear();
+                        }
+                        let sort_tip = ["Sort: as Git lists them", "Sort: latest agent activity first", "Sort: by branch name"][usize::from(au.sort.min(2))];
+                        if widgets::icon_button(ui, Icon::ArrowDownAZ, 15.0, sort_tip).clicked() {
+                            au.sort = (au.sort + 1) % 3;
                         }
                         let (pr, plug) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
                         ui.painter().rect(pr, CornerRadius::same(3), ACCENT.gamma_multiply(0.2), Stroke::new(1.0, ACCENT.gamma_multiply(0.7)), StrokeKind::Inside);
@@ -341,7 +410,10 @@ impl App {
                     later.push(Box::new(move |app| app.start_agent(tab, false)));
                 }
                 egui::Popup::menu(&mo).show(|ui| {
-                    let mut entries = vec![item("Start in new worktree…", move |app| app.start_agent(tab, true))];
+                    let mut entries = vec![
+                        item("Start in a new worktree now", move |app| app.start_agent_now(tab)),
+                        item("Start in new worktree…", move |app| app.start_agent(tab, true)),
+                    ];
                     entries.extend(agent_items());
                     ctxmenu::show(ui, entries, later);
                 });
@@ -441,12 +513,19 @@ impl App {
                     if resp.clicked() {
                         later.push(Box::new(open.clone()));
                     }
+                    self.merged_pill(ui, tab, Some(&wt.branch), None, later);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let dots = widgets::icon_button(ui, Icon::EllipsisVertical, 14.0, "Worktree actions");
                         egui::Popup::menu(&dots).show(|ui| {
                             let (p1, p2, a) = (wt.path.clone(), wt.path.clone(), agent.to_owned());
                             let label = format!("Start {} here", agent_label(agent).unwrap_or("agent"));
-                            ctxmenu::show(ui, vec![item(if current { "View Changes" } else { "Open worktree" }, open.clone()), item(label, move |app| app.launch_agent(tab, &p1, &a, None, &[])), item("Copy worktree path", move |app| app.copy(&p2))], later);
+                            let p3 = wt.path.clone();
+                            let show = item("Show agent terminal", move |app| {
+                                if !app.show_terminal_in(tab, &p3) {
+                                    app.toast(false, "No terminal is running in this worktree.");
+                                }
+                            });
+                            ctxmenu::show(ui, vec![item(if current { "View Changes" } else { "Open worktree" }, open.clone()), item(label, move |app| app.launch_agent(tab, &p1, &a, None, &[])), show, item("Copy worktree path", move |app| app.copy(&p2))], later);
                         });
                     });
                 });
@@ -489,6 +568,52 @@ impl App {
                     later.push(Box::new(open.clone()));
                 }
             });
+            // What the agents running here report: their state, and a permission request to answer.
+            let here: Vec<gitcraft_core::agent_status::AgentState> = au.live.iter().filter(|s| same_folder(&s.cwd, &wt.path) || std::path::Path::new(&s.cwd).starts_with(&wt.path)).cloned().collect();
+            for state in &here {
+                let (label, color) = match state.state.as_str() {
+                    "running" => ("Running", ACCENT),
+                    "waiting" => ("Waiting for you", WARN),
+                    "permission" => ("Asking permission", BAD),
+                    _ => ("Done", GOOD),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    egui::Frame::new().fill(color.gamma_multiply(0.2)).stroke(Stroke::new(1.0, color)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(7, 1)).show(ui, |ui| {
+                        ui.label(RichText::new(format!("{} · {label}", agent_label(&state.agent).unwrap_or("Agent"))).size(11.5).color(c.white(0.95)));
+                    });
+                    if !state.message.is_empty() && state.request.is_none() {
+                        ui.add(egui::Label::new(RichText::new(&state.message).size(11.5).color(c.fg2)).truncate());
+                    }
+                });
+                if let Some(req) = &state.request {
+                    let open_cmd = au.expanded_requests.contains(&req.id);
+                    ui.horizontal(|ui| {
+                        let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::click());
+                        widgets::chevron(ui, cr, open_cmd, 12.0, c.fg2);
+                        let head = ui.add(egui::Label::new(RichText::new(format!("Wants to use {}", req.tool)).size(12.0).color(c.white(0.9))).sense(Sense::click()));
+                        if cresp.clicked() || head.clicked() {
+                            if open_cmd { au.expanded_requests.remove(&req.id) } else { au.expanded_requests.insert(req.id.clone()) };
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for (allow, text, kind) in [(false, "Deny", widgets::Kind::Danger), (true, "Allow", widgets::Kind::Success)] {
+                                if widgets::small(ui, kind, text).clicked() {
+                                    let (session, id) = (state.session.clone(), req.id.clone());
+                                    later.push(Box::new(move |app| {
+                                        if let Err(e) = gitcraft_core::agent_status::answer(&session, &id, allow) {
+                                            app.toast(false, e);
+                                        }
+                                    }));
+                                }
+                            }
+                        });
+                    });
+                    if open_cmd {
+                        egui::Frame::new().fill(c.field).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&req.detail).monospace().size(11.5).color(c.fg)).wrap());
+                        });
+                    }
+                }
+            }
             // The last activity line.
             let (row, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
             ui.painter().line_segment([row.left_top(), row.right_top()], Stroke::new(1.0, c.white(0.05)));
@@ -573,4 +698,9 @@ mod tests {
         assert_eq!(cmd, "claude --flag");
         assert!(agent_launch(&serde_json::json!({}), "bash", "", "claude", Some("x; rm")).is_err());
     }
+}
+
+/// A branch name for a new agent session: `agent/` and the time.
+fn default_agent_branch() -> String {
+    format!("agent/{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
 }

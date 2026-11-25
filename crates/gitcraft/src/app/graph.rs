@@ -369,6 +369,17 @@ impl App {
         let c = p();
         let path = v.path.clone();
         let cols: Columns = self.settings.get("columns").unwrap_or_default();
+        let show_worktree_wip = self.settings.flag("worktreeWipInGraph", true) && v.data.worktrees.len() > 1;
+        // The branch being dragged follows the pointer.
+        if let Some(dragged) = egui::DragAndDrop::payload::<GitRef>(ui.ctx())
+            && let Some(at) = ui.ctx().pointer_latest_pos()
+        {
+            let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::NULL.with("dragged_ref")));
+            let g = layer.layout_no_wrap(dragged.name.clone(), FontId::proportional(12.5), c.white(1.0));
+            let r = Rect::from_min_size(at + vec2(14.0, 6.0), g.size() + vec2(14.0, 6.0));
+            layer.rect_filled(r, CornerRadius::same(3), ACCENT.gamma_multiply(0.85));
+            layer.galley(r.min + vec2(7.0, 3.0), g, c.white(1.0));
+        }
         let widths: HashMap<String, f32> = self.settings.get("graphColumnWidths").unwrap_or_default();
         let lazy = self.settings.flag("lazyLoad", true);
         let ghost_on = self.settings.flag("ghostRefs", true);
@@ -453,6 +464,22 @@ impl App {
         if cols.graph {
             let rect = Rect::from_min_size(pos2(x, head_rect.top()), vec2(lay.graph, HEADER));
             icons::paint(ui, rect, Icon::Network, 13.0, c.white(0.7));
+            // With a pinned branch, a pin at the column's right end jumps to it.
+            if let Some(pinned) = self.pinned_ref(&path)
+                && let Some(sha) = v.data.refs.iter().find(|g| g.full == pinned || g.name == pinned).map(|g| g.sha.clone())
+                && lay.graph >= 48.0
+            {
+                let pin = Rect::from_min_size(pos2(rect.right() - 22.0, rect.top()), vec2(20.0, HEADER));
+                let pr = ui.interact(pin, ui.scope_id().with("pinned_jump"), Sense::click());
+                icons::paint(ui, pin, Icon::Pin, 12.0, if pr.hovered() { c.white(1.0) } else { ACCENT });
+                if pr.tip("Go to the pinned branch").clicked() {
+                    later.push(Box::new(move |app| {
+                        if let Some(r) = app.repo_mut(tab) {
+                            r.ui.select(Selection::Commit(sha));
+                        }
+                    }));
+                }
+            }
             x += lay.graph;
             handle(ui, Col::Graph, x, lay.graph);
         }
@@ -839,7 +866,21 @@ impl App {
                         let more_w = if more > 0 { 5.0 + 8.0 + format!("+{more}").len() as f32 * 6.5 } else { 0.0 };
                         let max_w = (zone.width() - REF_MARGIN - 6.0 - more_w).max(20.0);
                         let fill = widgets::mix(color, 0.28);
-                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), Sense::click());
+                        // Branch labels can be dragged onto another branch label: merge, rebase, fast-forward, push or
+                        // start a pull request (see `ref_dropped`).
+                        let draggable = first.kind != RefKind::Tag;
+                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), if draggable { Sense::click_and_drag() } else { Sense::click() });
+                        if draggable && lresp.drag_started() {
+                            lresp.dnd_set_drag_payload(first.clone());
+                        }
+                        if let Some(source) = lresp.dnd_hover_payload::<GitRef>().filter(|s| s.full != first.full && first.kind != RefKind::Tag) {
+                            let _ = source;
+                            painter.rect_stroke(label_rect.expand(2.0), CornerRadius::same(4), Stroke::new(2.0, ACCENT), StrokeKind::Outside);
+                        }
+                        if let Some(source) = lresp.dnd_release_payload::<GitRef>().filter(|s| s.full != first.full && first.kind != RefKind::Tag) {
+                            let (source, target) = ((*source).clone(), first.clone());
+                            later.push(Box::new(move |app| app.ref_dropped(tab, source, target)));
+                        }
                         end_x = label_rect.right();
                         if lresp.hovered() {
                             new_hover_ref = Some((i, first.kind == RefKind::Tag));
@@ -872,6 +913,37 @@ impl App {
                             if mresp.hovered() || mresp.clicked() {
                                 new_hover_ref = Some((i, first.kind == RefKind::Tag));
                                 stack = Some((i, clock));
+                            }
+                        }
+                        // Another worktree on this commit with uncommitted changes: a pill with their count that opens
+                        // it (Preferences > Agents > Show other worktrees' changes in the graph).
+                        if show_worktree_wip {
+                            for g in refs.iter().filter(|g| g.kind == RefKind::Local) {
+                                let Some(wt) = v.data.worktrees.iter().find(|w| w.branch == g.name && !super::same_folder(&w.path, &v.path)) else { continue };
+                                // Read again every 10 seconds (the request returns at once while a read is fresh).
+                                let entry = r.agents.statuses.get(&wt.path);
+                                if entry.is_none_or(|(_, at)| at.elapsed().as_secs() >= 10) {
+                                    let p = wt.path.clone();
+                                    later.push(Box::new(move |app| app.want_worktree_status(tab, p)));
+                                }
+                                let changes = match entry {
+                                    Some((super::repo::Loaded::Ready(s), _)) => super::right::working_changes(s).0,
+                                    _ => 0,
+                                };
+                                if changes == 0 || end_x + 40.0 > zone.right() {
+                                    continue;
+                                }
+                                let label = format!("✎ {changes}");
+                                let g2 = ui.painter().layout_no_wrap(label, FontId::proportional(11.0), c.white(0.95));
+                                let pill = Rect::from_min_size(pos2(end_x + 4.0, rect.center().y - INNER / 2.0), vec2(g2.size().x + 10.0, INNER));
+                                painter.rect(pill, CornerRadius::same(3), WARN.gamma_multiply(0.25), Stroke::new(1.0, WARN.gamma_multiply(0.8)), StrokeKind::Inside);
+                                painter.galley(pos2(pill.left() + 5.0, pill.center().y - g2.size().y / 2.0), g2, c.white(0.95));
+                                let presp = ui.interact(pill, ui.scope_id().with(("wt_wip", &wt.path)), Sense::click());
+                                if presp.tip(format!("{changes} uncommitted change{} in the worktree at {}. Click to open it.", if changes == 1 { "" } else { "s" }, wt.path)).clicked() {
+                                    let p = wt.path.clone();
+                                    later.push(Box::new(move |app| app.open_repo(&p)));
+                                }
+                                end_x = pill.right();
                             }
                         }
                         if more > 0 && stack.is_some_and(|(row, _)| row == i) {

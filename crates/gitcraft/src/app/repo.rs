@@ -649,11 +649,19 @@ impl App {
         let path = r.path.clone();
         let inbox = self.inbox.clone();
         let ctx = self.ctx.clone();
+        let (error_inbox, error_ctx) = (self.inbox.clone(), self.ctx.clone());
         self.spawn(move || {
             let notify_path = path.clone();
+            // Said once per watch: the system stopped telling GitCraft about changes (or reported an error).
+            let told = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let result = gitcraft_core::watch::start(std::path::Path::new(&path), move |full| {
                 inbox.post(Msg::Changed { path: notify_path.clone(), full });
                 ctx.request_repaint();
+            }, move |error| {
+                if !told.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    error_inbox.post(Msg::Toast(false, format!("GitCraft stopped receiving file change events from the system, so changes made outside it may not show until you refresh: {error}")));
+                    error_ctx.request_repaint();
+                }
             });
             Msg::Watching { tab, result: result.map(Arc::new) }
         });
@@ -947,6 +955,39 @@ impl App {
 
     pub(crate) fn draft(&self, path: &str) -> Draft {
         self.drafts.get(path).cloned().unwrap_or_default()
+    }
+
+    /// Update the submodules after a pull or checkout when Preferences ask for it (the repository's "Update submodules
+    /// after pull or checkout", else General's "Keep submodules up to date"). Only repositories with submodules.
+    pub(crate) fn update_submodules_after(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        let choice = self.repo_pref(&path, "pullCheckoutSubmodules").and_then(|v| match v {
+            serde_json::Value::Bool(b) => Some(b),
+            serde_json::Value::String(s) if s == "true" => Some(true),
+            serde_json::Value::String(s) if s == "false" => Some(false),
+            _ => None,
+        });
+        let on = choice.unwrap_or_else(|| self.settings.flag("autoUpdateSubmodules", true));
+        if on && std::path::Path::new(&path).join(".gitmodules").is_file() {
+            self.act_quiet(tab, Action::SubmoduleUpdate { paths: Vec::new() }, true);
+        }
+    }
+
+    /// Delete the `.orig` backups that appeared since the last merge-like operation began, once it is finished.
+    pub(crate) fn clean_orig_files(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        self.spawn(move || {
+            let dir = std::path::Path::new(&path);
+            let candidates = gitcraft_core::prefs::orig_cleanup_candidates(dir);
+            if candidates.is_empty() {
+                return Msg::Nothing;
+            }
+            match gitcraft_core::prefs::delete_orig_selected(dir, &candidates) {
+                Ok(removed) if !removed.is_empty() => Msg::Toast(true, format!("Removed {} .orig backup file{}", removed.len(), if removed.len() == 1 { "" } else { "s" })),
+                Ok(_) => Msg::Nothing,
+                Err(e) => Msg::Toast(false, e),
+            }
+        });
     }
 
     /// A squash merge succeeded: offer its message as the commit draft, unless the user already has a draft.

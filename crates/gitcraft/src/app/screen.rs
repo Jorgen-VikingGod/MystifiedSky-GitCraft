@@ -59,7 +59,9 @@ impl App {
         // Terminal under the centre.
         // It gives way when the centre is too short for it and the graph above it.
         let show_term = self.settings.flag("showTerminal", false) && r.view.is_some() && centre.height() >= 100.0 + 2.0 + 120.0;
-        let term_h = if show_term { (self.settings.num("terminalHeight", 220.0) as f32).clamp(100.0, (centre.height() - 120.0).max(100.0)) } else { 0.0 };
+        // Minimized, only the terminal's tab bar stays.
+        let minimized = self.settings.flag("terminalMinimized", false);
+        let term_h = if !show_term { 0.0 } else if minimized { 27.0 } else { (self.settings.num("terminalHeight", 220.0) as f32).clamp(100.0, (centre.height() - 120.0).max(100.0)) };
         let main = Rect::from_min_max(centre.min, pos2(centre.right(), centre.bottom() - term_h - if show_term { 2.0 } else { 0.0 }));
         {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(main).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -69,7 +71,7 @@ impl App {
         }
         if show_term {
             let split = Rect::from_min_size(pos2(centre.left(), main.bottom()), vec2(centre.width(), 2.0));
-            let dy = widgets::splitter(ui, split, ui.scope_id().with("term_split"), false);
+            let dy = if minimized { 0.0 } else { widgets::splitter(ui, split, ui.scope_id().with("term_split"), false) };
             if dy != 0.0 {
                 let h = (term_h - dy).clamp(100.0, 800.0);
                 later.push(Box::new(move |app| app.settings.set("terminalHeight", h.round())));

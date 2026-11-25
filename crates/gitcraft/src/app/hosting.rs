@@ -41,7 +41,12 @@ pub struct Hosted {
     pub review: HashMap<u64, Loaded<Value>>,
     /// The source commit each review's patch was read for: a pull request that moved on needs a new read.
     pub review_sha: HashMap<u64, String>,
+    /// Recently merged pull requests (number, source branch, source commit, URL), for the Merged pills.
+    pub merged: Option<Loaded<Vec<MergedPr>>>,
 }
+
+/// A merged pull request: its number, source branch, source commit and URL.
+pub type MergedPr = (u64, String, String, String);
 
 /// The pull request view's own state.
 #[derive(Default)]
@@ -140,6 +145,54 @@ pub fn issue_identity(i: &Value) -> String {
 impl App {
     fn gitlab(&self) -> String {
         self.settings.string("gitlabHost", "")
+    }
+
+    /// Read the repository's recently merged pull requests once, for the Merged pills.
+    pub(crate) fn want_merged_prs(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        let gitlab = self.gitlab();
+        let h = self.hosted_mut(tab);
+        if h.merged.is_some() {
+            return;
+        }
+        h.merged = Some(Loaded::Loading);
+        self.spawn(move || {
+            let r = gitcraft_core::session::remote_of(&path, &gitlab).and_then(|remote| gitcraft_core::hosting::pull_requests_page(&remote, None, gitcraft_core::hosting::PullFilter::Merged));
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.hosted_mut(tab).merged = Some(match r {
+                    Ok(page) => Loaded::Ready(page.items.into_iter().map(|pr| (pr.number, pr.source, pr.source_sha, pr.url)).collect()),
+                    Err(e) => Loaded::Failed(e),
+                });
+            }))
+        });
+    }
+
+    /// The merged pull request whose source was `branch` or ended at commit `sha`: its number and URL. Asks for the
+    /// list the first time.
+    pub(crate) fn merged_pr(&self, tab: u64, branch: Option<&str>, sha: Option<&str>, later: &mut Vec<Later>) -> Option<(u64, String)> {
+        match self.hosted.get(&tab).and_then(|h| h.merged.as_ref()) {
+            None => {
+                later.push(Box::new(move |app| app.want_merged_prs(tab)));
+                None
+            }
+            Some(Loaded::Ready(list)) => list
+                .iter()
+                .find(|(_, source, source_sha, _)| branch.is_some_and(|b| !b.is_empty() && source == b) || sha.is_some_and(|s| !s.is_empty() && source_sha == s))
+                .map(|(n, _, _, url)| (*n, url.clone())),
+            _ => None,
+        }
+    }
+
+    /// A "Merged #N" pill for `branch` (or commit `sha`) when its pull request was merged; it opens the pull request.
+    pub(crate) fn merged_pill(&self, ui: &mut Ui, tab: u64, branch: Option<&str>, sha: Option<&str>, later: &mut Vec<Later>) {
+        let Some((number, url)) = self.merged_pr(tab, branch, sha, later) else { return };
+        let purple = egui::Color32::from_rgb(0x8f, 0x6f, 0xe0);
+        let resp = egui::Frame::new().fill(purple.gamma_multiply(0.25)).stroke(Stroke::new(1.0, purple)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+            ui.label(egui::RichText::new(format!("Merged #{number}")).size(11.0).color(egui::Color32::WHITE));
+        }).response.interact(Sense::click());
+        if resp.tip("Its pull request was merged. Click to open it.").clicked() {
+            later.push(Box::new(move |app| app.open_url(&url)));
+        }
     }
 
     fn hosted_mut(&mut self, tab: u64) -> &mut Hosted {
@@ -373,8 +426,10 @@ impl App {
                 let sl = service_label;
                 ctxmenu::attach(&resp, later, || {
                     let id2 = id.clone();
+                    let (number, title) = (if s(&issue, "key").is_empty() { issue["number"].as_u64().unwrap_or(0).to_string() } else { s(&issue, "key") }, s(&issue, "title"));
                     vec![
                         item("View issue", move |app| app.open_issue(tab, &id2)),
+                        item("Start an Agent Session", move |app| app.start_agent_for_issue(tab, &number, &title)),
                         item("Create branch for this issue", move |app| app.branch_from_issue(tab, &issue)),
                         item(format!("View issue in {sl}"), move |app| app.open_url(&url)),
                     ]
@@ -1220,6 +1275,11 @@ impl App {
                     let i2 = issue.clone();
                     later.push(Box::new(move |app| app.branch_from_issue(tab, &i2)));
                 }
+                if widgets::small(ui, Kind::Default, "Start an Agent Session").clicked() {
+                    let number = if s(&issue, "key").is_empty() { issue["number"].as_u64().unwrap_or(0).to_string() } else { s(&issue, "key") };
+                    let title = s(&issue, "title");
+                    later.push(Box::new(move |app| app.start_agent_for_issue(tab, &number, &title)));
+                }
                 ui.add_space(8.0);
                 egui::Frame::new().fill(c.panel).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
                     ui.set_width(w - 56.0);
@@ -1242,14 +1302,41 @@ impl App {
     /// Start a pull request from `branch`: a template, the target, title and description, and
     /// pushing the branch first when the remote doesn't have it.
     pub(crate) fn start_pull_request(&mut self, tab: u64, branch: &str) {
+        self.start_pull_request_into(tab, branch, None);
+    }
+
+    /// Start a pull request from `branch`, into `into` when given (else the default or the stacked-on branch).
+    pub(crate) fn start_pull_request_into(&mut self, tab: u64, branch: &str, into: Option<String>) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let branch = branch.to_owned();
+        let gitlab = self.gitlab();
         self.spawn(move || {
             let dir = Path::new(&path);
             let templates = gitcraft_core::extras::pr_templates(dir);
             let target = gitcraft_core::extras::default_branch_for(dir, &branch).map(|(_, b)| b);
-            let templates: Vec<(String, String)> = templates.into_iter().map(|t| (t.name, t.body)).collect();
-            super::Msg::Apply(Box::new(move |app: &mut App| app.pull_request_form(tab, branch, target, templates)))
+            let mut templates: Vec<(String, String)> = templates.into_iter().map(|t| (t.name, t.body)).collect();
+            // A repository without a template of its own uses its GitHub organization's default one.
+            let remote = gitcraft_core::session::remote_of(&path, &gitlab).ok();
+            if templates.is_empty()
+                && let Some(t) = remote.as_ref().and_then(gitcraft_core::hosting::org_pr_template)
+            {
+                templates.push(t);
+            }
+            // Stacked pull requests: a branch made from another open pull request's branch targets that branch, so it
+            // shows only its own changes; the form says which pull request it stacks on.
+            let open = remote.as_ref().and_then(|r| gitcraft_core::hosting::pull_requests(r).ok()).unwrap_or_default();
+            let below = open.iter().filter(|pr| pr.source != branch && !pr.source_sha.is_empty())
+                .filter(|pr| gitcraft_core::git::run(dir, &["merge-base", "--is-ancestor", &pr.source_sha, &branch]).ok)
+                // The nearest: the one with the fewest commits between it and this branch.
+                .min_by_key(|pr| gitcraft_core::git::run(dir, &["rev-list", "--count", &format!("{}..{branch}", pr.source_sha)]).stdout.trim().parse::<u64>().unwrap_or(u64::MAX))
+                .cloned();
+            let stack = if into.is_some() { None } else { below.as_ref().map(|pr| format!("This pull request stacks on #{} ({}), so it targets {}.", pr.number, pr.title, pr.source)) };
+            let target = into.or_else(|| below.as_ref().map(|pr| pr.source.clone())).or(target);
+            let stack_key = (tab, branch.clone());
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.pr_stack = stack.map(|note| (stack_key.0, stack_key.1, note));
+                app.pull_request_form(tab, branch, target, templates)
+            }))
         });
     }
 
@@ -1285,7 +1372,11 @@ impl App {
         let body = [head.as_ref().map(|h| h.body.clone()).filter(|b| !b.is_empty()), template].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         let b2 = branch.clone();
         let (title, body, draft) = text.unwrap_or_else(|| (head.map(|h| h.summary).unwrap_or_else(|| branch.clone()), body, false));
-        let d = Dialog::new(&format!("Start a pull request from {branch}"), super::dialogs::Body::Form { intro: "The branch is pushed first if the remote doesn't have it yet.".into(), fields, grid: false })
+        let mut intro = "The branch is pushed first if the remote doesn't have it yet.".to_owned();
+        if let Some((_, _, note)) = self.pr_stack.as_ref().filter(|(t, b, _)| *t == tab && *b == branch) {
+            intro = format!("{note}\n{intro}");
+        }
+        let d = Dialog::new(&format!("Start a pull request from {branch}"), super::dialogs::Body::Form { intro, fields, grid: false })
             .width(560.0)
             .text_value("target", &target.unwrap_or_else(|| "main".into()))
             .text_value("title", &title)

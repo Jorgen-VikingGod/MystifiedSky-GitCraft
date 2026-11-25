@@ -65,6 +65,11 @@ pub fn editor_command(tool: &str) -> Option<&'static str> {
     })
 }
 
+/// The editors from `tools` whose program is installed (found on `PATH`), for "Open in â€¦" choices.
+pub fn installed_editors<'a>(tools: &[&'a str]) -> Vec<&'a str> {
+    tools.iter().copied().filter(|tool| editor_command(tool).is_some_and(|cmd| find_program(cmd).is_some())).collect()
+}
+
 /// Resolve native programs and launcher scripts without asking a command shell to parse a file path.
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     let path = Path::new(name);

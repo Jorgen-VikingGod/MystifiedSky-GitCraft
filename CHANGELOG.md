@@ -6,6 +6,23 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Stacked pull requests: starting a pull request from a branch made on another open pull request's branch targets that branch, and the form names the pull request it stacks on. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Pull requests from a repository without its own template use the GitHub organization's default template. Commits made with a GitHub no-reply address show that account's GitHub picture. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Recompose commits with AI: from a commit's menu, or for a run of selected commits that ends at the checked-out commit, the commits are undone and their changes composed again into new commits for you to review. Undo brings the originals back. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Auto-resolve with AI explains each conflict it resolved and how confident it is (high, medium or low), shown above its suggestion in the conflict editor. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- A "Merged #N" pill shows when a branch's pull request was merged: beside the checked-out branch in the toolbar, on worktree cards in the Agents view, and in Commit Details for the commit it ended at. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Select a run of consecutive commits to see their combined changes in the right panel, below the actions for the selection. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Remove a worktree and delete its branch (locally, or locally and on the remote) in one step. A branch checked out in another worktree offers this instead of Delete. Sort the Agents worktree list by latest activity or branch name, and jump to the terminal an agent is running in. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Start an agent session in a new worktree with one click, or from an issue's menu with a branch named after it. Cursor CLI is available as a coding agent. New worktrees keep the hidden, soloed and pinned branches of the repository they came from. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Explain your working changes with AI from the commit panel. The last five commit and branch explanations are kept, so opening one again needs no new request (Explain Again asks anew). ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Restore a file from any commit by right-clicking it in the commit. Its current changes are kept as a backup you can restore from Actions. File View shows Markdown files rendered, with a button to switch between the preview and the code. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- GitCraft tells you when the system stops sending file change events, since changes made outside it may then not show until you refresh. Long choices in dialog lists show their full text on hover. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- The command palette offers "Open Repo in …" for every editor installed on this computer. Repository Management has resizable Repository, Location and Upstream columns that stay as you leave them. Choose a zoom level from the status bar. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Terminal tab shortcuts (Ctrl+Shift+N, Ctrl+Shift+W, Ctrl+PageUp/PageDown and Ctrl+Shift+1–9; Command+Option on macOS), listed in Keyboard Shortcuts. Minimize the terminal to its tab bar, end a session from the trash button, and drop files on the terminal to type their paths. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Hover an annotated tag in the left panel to read its message. With a branch pinned, a pin in the Graph column header jumps to it. Checking out a branch or commit shows its working changes. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Rename repository tabs, reopen individual recently closed repositories from the tabs list, and delete saved workspaces without touching their repositories. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Find and navigate matches in File View, including while editing a file. Show syntax errors when editing JSON.
 - Fold code, edit multiple selections, match brackets, and copy code with syntax colors. Find and Replace supports case, whole-word, and regular-expression matching. Folding and multiple selections also work in large files.
@@ -45,6 +62,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing. ([#55](https://github.com/MystifiedSky/GitCraft/pull/55))
 
 - Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
@@ -62,6 +80,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- "Automatically group worktree tabs together" now works: tabs of worktrees of the same repository sit side by side and share a colored line. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Reject Fetch and Pull actions while their repository is busy, including from open menus, shortcuts and Repository Management. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
 - Disable Pull and Fetch for repositories involved in automatic or bulk fetch and pull operations. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
 - Avoid a crash when saving a Pull default with malformed repository preferences. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))

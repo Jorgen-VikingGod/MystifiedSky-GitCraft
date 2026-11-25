@@ -159,6 +159,19 @@ pub const COMMANDS: &[Command] = &[
     c("ui:leftPanel", "Toggle Left Panel", U, &["Ctrl+J"], false),
     c("ui:detailPanel", "Toggle Commit Details Panel", U, &["Ctrl+K"], false),
     mac(words(inputs(c("ui:terminalPanel", "Toggle Terminal Panel", U, &["Ctrl+`"], false)), "in-app terminal command line console"), &["Ctrl+`"]),
+    mac(inputs(c("term:new", "New Terminal Tab", U, &["Ctrl+Shift+N"], false)), &["Meta+Alt+N"]),
+    mac(inputs(c("term:close", "Close Terminal Tab", U, &["Ctrl+Shift+W"], false)), &["Meta+Alt+W"]),
+    mac(inputs(c("term:next", "Next Terminal Tab", U, &["Ctrl+PageDown"], false)), &["Meta+Alt+ArrowRight"]),
+    mac(inputs(c("term:prev", "Previous Terminal Tab", U, &["Ctrl+PageUp"], false)), &["Meta+Alt+ArrowLeft"]),
+    mac(inputs(c("term:tab1", "Select Terminal Tab 1", U, &["Ctrl+Shift+1"], false)), &["Meta+Alt+1"]),
+    mac(inputs(c("term:tab2", "Select Terminal Tab 2", U, &["Ctrl+Shift+2"], false)), &["Meta+Alt+2"]),
+    mac(inputs(c("term:tab3", "Select Terminal Tab 3", U, &["Ctrl+Shift+3"], false)), &["Meta+Alt+3"]),
+    mac(inputs(c("term:tab4", "Select Terminal Tab 4", U, &["Ctrl+Shift+4"], false)), &["Meta+Alt+4"]),
+    mac(inputs(c("term:tab5", "Select Terminal Tab 5", U, &["Ctrl+Shift+5"], false)), &["Meta+Alt+5"]),
+    mac(inputs(c("term:tab6", "Select Terminal Tab 6", U, &["Ctrl+Shift+6"], false)), &["Meta+Alt+6"]),
+    mac(inputs(c("term:tab7", "Select Terminal Tab 7", U, &["Ctrl+Shift+7"], false)), &["Meta+Alt+7"]),
+    mac(inputs(c("term:tab8", "Select Terminal Tab 8", U, &["Ctrl+Shift+8"], false)), &["Meta+Alt+8"]),
+    mac(inputs(c("term:tab9", "Select Terminal Tab 9", U, &["Ctrl+Shift+9"], false)), &["Meta+Alt+9"]),
     inputs(c("ui:zoomIn", "Increase Zoom", U, &["Ctrl+="], false)),
     inputs(c("ui:zoomOut", "Decrease Zoom", U, &["Ctrl+-"], false)),
     inputs(c("ui:zoomReset", "Reset Zoom", U, &["Ctrl+0"], false)),
@@ -196,6 +209,8 @@ pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
         egui::Key::Backtick => "`".to_owned(),
         egui::Key::OpenBracket => "[".to_owned(),
         egui::Key::CloseBracket => "]".to_owned(),
+        // Arrows by name ("ArrowRight"), the form shortcut strings are parsed from.
+        egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown => key.name().to_owned(),
         egui::Key::Num0 | egui::Key::Num1 | egui::Key::Num2 | egui::Key::Num3 | egui::Key::Num4 | egui::Key::Num5 | egui::Key::Num6 | egui::Key::Num7 | egui::Key::Num8 | egui::Key::Num9 => key.name().trim_start_matches("Num").to_owned(),
         other => {
             let n = other.symbol_or_name().to_owned();
@@ -343,6 +358,8 @@ impl App {
             "ui:leftPanel" => self.settings.toggle("showLeft", true),
             "ui:detailPanel" => self.settings.toggle("showRight", true),
             "ui:terminalPanel" => self.settings.toggle("showTerminal", false),
+            "term:new" | "term:close" | "term:next" | "term:prev" => self.terminal_command(id),
+            t if t.starts_with("term:tab") => self.terminal_command(id),
             "ui:zoomIn" => self.step_zoom(&ctx, true),
             "ui:zoomOut" => self.step_zoom(&ctx, false),
             "ui:zoomReset" => self.set_zoom(&ctx, 1.0),
@@ -478,6 +495,14 @@ impl App {
                     };
                     let label = self.command_label(cmd);
                     items.push((cmd.id.to_owned(), label, hint, self.keys_of(cmd.id).map(|k| label_of(&k)).unwrap_or_default(), action));
+                }
+                // Every other editor found on this computer.
+                if path.is_some() {
+                    let preferred = self.settings.string("externalEditor", "vscode");
+                    for tool in installed_editors().iter().copied().filter(|t| *t != preferred) {
+                        let name = super::external_tools::editor_name(tool);
+                        items.push((format!("open-in:{tool}"), format!("Open Repo in {name}"), format!("{} editor ide", Group::Repo.title()), String::new(), PaletteAction::OpenIn(tool)));
+                    }
                 }
             }
             Picker::OpenRepo => {
@@ -661,6 +686,13 @@ impl App {
                 PaletteAction::Theme(id) => self.set_theme(id),
                 PaletteAction::Profile(i) => self.switch_profile(i),
                 PaletteAction::Workspace(i) => self.open_workspace(i),
+                PaletteAction::OpenIn(tool) => {
+                    if let Some(path) = self.repo(tab).map(|r| r.path.clone())
+                        && let Err(e) = gitcraft_core::external::open_editor(&path, None, tool, "", "", "")
+                    {
+                        self.toast(false, e);
+                    }
+                }
             }
             return;
         }
@@ -845,6 +877,17 @@ pub enum PaletteAction {
     Theme(&'static str),
     Profile(usize),
     Workspace(usize),
+    /// Open the repository in this editor (one found installed), whatever the preferred editor is.
+    OpenIn(&'static str),
+}
+
+/// The editors found installed, looked for once per run.
+fn installed_editors() -> &'static [&'static str] {
+    static FOUND: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(|| {
+        let tools: Vec<&'static str> = super::external_tools::EDITORS.iter().map(|(id, _)| *id).collect();
+        gitcraft_core::external::installed_editors(&tools)
+    })
 }
 
 pub struct Palette {

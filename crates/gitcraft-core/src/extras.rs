@@ -191,6 +191,8 @@ pub struct RepoSummary {
     pub changes: usize,
     pub ahead: u32,
     pub behind: u32,
+    /// The checked-out branch's upstream (`origin/main`), when it has one.
+    pub upstream: Option<String>,
 }
 
 /// Branch, uncommitted-change count and ahead / behind for the Repository Management list.
@@ -210,6 +212,8 @@ pub fn repo_summary(dir: &Path) -> RepoSummary {
     while let Some(line) = records.next() {
         if let Some(b) = line.strip_prefix("# branch.head ") {
             s.branch = (b != "(detached)").then(|| b.to_string());
+        } else if let Some(u) = line.strip_prefix("# branch.upstream ") {
+            s.upstream = Some(u.to_owned());
         } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
             let mut it = ab.split_whitespace();
             s.ahead = it.next().and_then(|x| x.trim_start_matches('+').parse().ok()).unwrap_or(0);
@@ -324,6 +328,42 @@ pub fn default_branch_for(dir: &Path, branch: &str) -> Option<(String, String)> 
     ["main", "master"].into_iter().find(|branch| valid(&format!("refs/heads/{branch}"))).map(|branch| (branch.to_owned(), branch.to_owned()))
 }
 
+/// Whether `text` matches a branch pattern: `*` stands for any run of characters within one path part, `**` for
+/// any run including `/`.
+pub fn branch_pattern_matches(pattern: &str, text: &str) -> bool {
+    fn go(p: &[u8], t: &[u8]) -> bool {
+        match p {
+            [] => t.is_empty(),
+            [b'*', b'*', rest @ ..] => (0..=t.len()).any(|i| go(rest, &t[i..])),
+            [b'*', rest @ ..] => (0..=t.len()).take_while(|i| *i == 0 || t[i - 1] != b'/').any(|i| go(rest, &t[i..])),
+            [c, rest @ ..] => t.first() == Some(c) && go(rest, &t[1..]),
+        }
+    }
+    go(pattern.as_bytes(), text.as_bytes())
+}
+
+/// Conflict Prevention for the checked-out branch with a repository's settings: no check while a branch from
+/// `excluded` is checked out, and the target is the first branch matching `base` (lines starting with `!` exclude),
+/// else the remote's default branch.
+pub fn conflict_check_with(dir: &Path, base: &[String], excluded: &[String]) -> ConflictCheck {
+    let head = git::run(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim().to_owned();
+    if !head.is_empty() && excluded.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).any(|p| branch_pattern_matches(p, &head)) {
+        return ConflictCheck { note: Some(format!("Conflict prevention is off while {head} is checked out.")), ..Default::default() };
+    }
+    let patterns: Vec<&str> = base.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    if patterns.is_empty() {
+        return conflict_check(dir, None);
+    }
+    let refs = git::run(dir, &["for-each-ref", "--format=%(refname:short)", "refs/remotes", "refs/heads"]);
+    let names: Vec<&str> = refs.stdout.lines().filter(|n| !n.ends_with("/HEAD") && *n != head).collect();
+    let skip = |n: &str| patterns.iter().filter_map(|p| p.strip_prefix('!')).any(|p| branch_pattern_matches(p, n));
+    let target = patterns.iter().filter(|p| !p.starts_with('!')).find_map(|p| names.iter().find(|n| branch_pattern_matches(p, n) && !skip(n)));
+    match target {
+        Some(t) => conflict_check(dir, Some(t)),
+        None => ConflictCheck { note: Some("No branch matches this repository's base branches.".into()), ..Default::default() },
+    }
+}
+
 /// Files that would conflict if HEAD were merged with `target` (no working-folder changes).
 pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
     let Some(target) = target.map(|s| s.to_string()).or_else(|| default_target(dir)) else {
@@ -352,6 +392,16 @@ pub fn conflict_check(dir: &Path, target: Option<&str>) -> ConflictCheck {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn branch_patterns() {
+        assert!(branch_pattern_matches("origin/main", "origin/main"));
+        assert!(branch_pattern_matches("origin/**", "origin/feature/x"));
+        assert!(branch_pattern_matches("origin/feature/*", "origin/feature/x"));
+        assert!(!branch_pattern_matches("origin/feature/*", "origin/feature/x/y"));
+        assert!(!branch_pattern_matches("origin/main", "origin/mainline"));
+        assert!(branch_pattern_matches("release-*", "release-1.2"));
+    }
 
     #[test]
     fn patches_and_conflict_check() {

@@ -808,11 +808,15 @@ fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>,
                         FieldKind::Select(options) => {
                             let mut current = values.text(&f.key);
                             let shown = options.iter().find(|(v, _)| *v == current).map(|(_, l)| l.clone()).unwrap_or_default();
-                            egui::ComboBox::from_id_salt(("select", &f.key)).selected_text(shown).width(width - 8.0).show_ui(ui, |ui| {
+                            // Long choices (branch names) can be cut off: the full text shows under the pointer.
+                            let combo = egui::ComboBox::from_id_salt(("select", &f.key)).selected_text(shown.clone()).width(width - 8.0).show_ui(ui, |ui| {
                                 for (value, label) in options {
-                                    ui.selectable_value(&mut current, value.clone(), label);
+                                    ui.selectable_value(&mut current, value.clone(), label).on_hover_text(label);
                                 }
                             });
+                            if !shown.is_empty() {
+                                combo.response.on_hover_text(shown);
+                            }
                             values.0.insert(f.key.clone(), Value::Text(current));
                         }
                         FieldKind::Note => {

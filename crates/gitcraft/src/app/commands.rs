@@ -170,6 +170,22 @@ impl App {
         self.load_repo(tab);
     }
 
+    /// Copy a repository's hidden, soloed and pinned refs to another folder (a new worktree of it).
+    pub(crate) fn inherit_view(&mut self, source: &str, target: &str) {
+        for key in ["hidden", "solo"] {
+            let mut all: HashMap<String, Vec<String>> = self.settings.get(key).unwrap_or_default();
+            if let Some(list) = all.get(source).cloned().filter(|l| !l.is_empty()) {
+                all.insert(target.to_owned(), list);
+                self.settings.set(key, all);
+            }
+        }
+        let mut pinned: HashMap<String, String> = self.settings.get("pinned").unwrap_or_default();
+        if let Some(p) = pinned.get(source).cloned() {
+            pinned.insert(target.to_owned(), p);
+            self.settings.set("pinned", pinned);
+        }
+    }
+
     pub(crate) fn toggle_pinned(&mut self, tab: u64, full: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let mut all: HashMap<String, String> = self.settings.get("pinned").unwrap_or_default();
@@ -291,6 +307,31 @@ impl App {
         self.dialog = Some(Dialog::confirm_with("Remove worktree?", &format!("Remove the worktree at {wt}? Its folder is deleted; its branch stays."), "Remove", true, move |app, _| {
             app.act(tab, Action::WorktreeRemove { path: wt, force: false });
         }));
+    }
+
+    /// Remove a worktree and, if chosen, the branch it had checked out: locally, or locally and on its remote.
+    pub(crate) fn remove_worktree_and_branch(&mut self, tab: u64, wt: &str, branch: &str) {
+        let upstream = self.repo(tab).and_then(|r| r.view.as_ref()).and_then(|v| v.data.refs.iter().find(|r| r.kind == gitcraft_core::git::RefKind::Local && r.name == branch).map(|r| r.upstream.clone())).filter(|u| !u.is_empty());
+        let mut fields = vec![Field::new("local", &format!("Also delete the branch {branch}"), FieldKind::Check)];
+        if let Some(up) = &upstream {
+            fields.push(Field::new("remote", &format!("Also delete {up} from the remote"), FieldKind::Check).when("local"));
+        }
+        let (wt, branch) = (wt.to_owned(), branch.to_owned());
+        let d = Dialog::new("Remove worktree?", Body::Form { intro: format!("Remove the worktree at {wt}? Its folder is deleted."), fields, grid: false })
+            .flag_value("local", true)
+            .choice("Remove", Kind::Danger, move |app, values| {
+                app.act(tab, Action::WorktreeRemove { path: wt.clone(), force: false });
+                // Queued after the removal: the branch can only go once no worktree has it checked out.
+                if values.flag("local") {
+                    app.act(tab, Action::DeleteBranch { name: branch.clone() });
+                    if values.flag("remote")
+                        && let Some(up) = &upstream
+                    {
+                        app.act(tab, Action::DeleteRemoteBranch { remote_branch: up.clone() });
+                    }
+                }
+            });
+        self.dialog = Some(d);
     }
 
     pub(crate) fn add_submodule(&mut self, tab: u64) {
@@ -461,7 +502,12 @@ impl App {
                     None => Path::new(path).to_path_buf(),
                 };
                 if folder.is_dir() {
-                    self.open_repo(&folder.to_string_lossy());
+                    let folder = folder.to_string_lossy().into_owned();
+                    // The new worktree starts with the source repository's view: hidden, soloed and pinned refs.
+                    if let Some(source) = self.repo(tab).map(|r| r.path.clone()) {
+                        self.inherit_view(&source, &folder);
+                    }
+                    self.open_repo(&folder);
                 }
             }
             Action::WorktreeRemove { path, .. } => {

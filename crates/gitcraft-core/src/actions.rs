@@ -180,6 +180,9 @@ pub enum Action {
     InteractiveCherryPick { items: Vec<crate::rewrite::TodoItem>, #[serde(default)] skip_hooks: bool },
     /// Conflicts: take "ours" (current) or "theirs" (incoming) for whole files.
     TakeSide { paths: Vec<String>, side: String },
+    /// Put these files back as they were in commit `sha` (working folder and index). Changes they had are kept as a
+    /// discard backup first (restorable from Actions).
+    RestoreFiles { sha: String, paths: Vec<String> },
     MarkResolved { paths: Vec<String> },
     MarkConflicted { paths: Vec<String> },
     /// Write the merge tool's output and mark the file resolved.
@@ -1513,6 +1516,39 @@ impl Engine {
                 }
                 done(o, "Cherry pick complete")
             }
+            Action::RestoreFiles { sha, paths } => {
+                if paths.is_empty() {
+                    return done(git::GitOut::failed("Choose the files to restore."), "");
+                }
+                let mut status = vec!["status", "--porcelain", "-z", "--"];
+                status.extend(paths.iter().map(String::as_str));
+                let changed = self.git(dir, &status);
+                if !changed.ok {
+                    return done(changed, "");
+                }
+                if !changed.stdout.is_empty() {
+                    let backup = self.discard(repo, dir, Some(paths.clone()));
+                    if !backup.ok && backup.message != DISCARD_NOTHING {
+                        return backup;
+                    }
+                }
+                // Only files the commit has can be restored from it.
+                let mut listed = vec!["ls-tree", "-r", "-z", "--name-only", sha.as_str(), "--"];
+                listed.extend(paths.iter().map(String::as_str));
+                let present = self.git(dir, &listed);
+                if !present.ok {
+                    return done(present, "");
+                }
+                let found: Vec<&str> = present.stdout.split('\0').filter(|p| !p.is_empty()).collect();
+                if found.is_empty() {
+                    return done(git::GitOut::failed("None of these files exist in that commit."), "");
+                }
+                let mut checkout = vec!["checkout", sha.as_str(), "--"];
+                checkout.extend(found.iter().copied());
+                let short: String = sha.chars().take(7).collect();
+                let n = found.len();
+                done(self.git(dir, &checkout), &format!("Restored {n} file{} from {short}", if n == 1 { "" } else { "s" }))
+            }
             Action::TakeSide { paths, side } => {
                 let (flag,stage)=match side.as_str() {"ours"=>("--ours","2"),"theirs"=>("--theirs","3"),_=>return done(git::GitOut::failed("Choose current or incoming conflict contents."), "")};
                 let mut selected=Vec::new();
@@ -2350,6 +2386,27 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+
+    #[test]
+    fn files_are_restored_from_a_commit_and_local_changes_backed_up() {
+        let d = temp_repo("restore");
+        let repo = d.to_string_lossy().to_string();
+        let e = Engine::default();
+        let commit = |f: &str, t: &str, m: &str| {
+            fs::write(d.join(f), t).unwrap();
+            assert!(e.perform(&repo, Action::Commit { summary: m.into(), description: String::new(), amend: false, stage_all: true, skip_hooks: false, strip_comments: false, sign_off: false }).ok);
+            head(&d)
+        };
+        let first = commit("a.txt", "one\n", "one");
+        commit("a.txt", "two\n", "two");
+        fs::write(d.join("a.txt"), "local edit\n").unwrap();
+        let r = e.perform(&repo, Action::RestoreFiles { sha: first, paths: vec!["a.txt".into()] });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap().replace("\r\n", "\n"), "one\n");
+        // The local edit went to a discard backup.
+
+        assert!(!crate::discard_backups::list(&d).unwrap().is_empty());
+    }
 
     #[test]
     fn interactive_rebase_conflicts_and_branch_extras() {

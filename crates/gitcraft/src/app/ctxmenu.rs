@@ -147,6 +147,42 @@ impl App {
         self.per_repo("solo", path)
     }
 
+    /// A branch label was dropped on another in the graph: offer what can be done with the two.
+    pub(crate) fn ref_dropped(&mut self, tab: u64, source: GitRef, target: GitRef) {
+        let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
+        let head = v.data.head_branch.clone();
+        let is_head = |r: &GitRef| r.kind == RefKind::Local && Some(&r.name) == head.as_ref();
+        let (s, t) = (source.name.clone(), target.name.clone());
+        let mut choices: Vec<(String, Action)> = Vec::new();
+        if is_head(&target) {
+            choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: s.clone() }));
+        }
+        if is_head(&source) {
+            choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: t.clone() }));
+            choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: t.clone() }));
+        }
+        if target.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &target.sha, &source.sha) {
+            choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: s.clone() }));
+        }
+        if source.kind == RefKind::Local && target.kind == RefKind::Remote {
+            choices.push((format!("Push {s}"), Action::PushBranch { branch: s.clone() }));
+        }
+        let pull_request = source.kind == RefKind::Local && target.kind != RefKind::Tag;
+        if choices.is_empty() && !pull_request {
+            return self.toast(false, format!("Check out {t} or {s} first to merge or rebase them."));
+        }
+        let mut d = super::dialogs::Dialog::new(&format!("{s} → {t}"), super::dialogs::Body::Text(format!("What should GitCraft do with {s} and {t}?"))).cancel_label("Cancel");
+        for (label, action) in choices {
+            d = d.choice(&label, super::widgets::Kind::Default, move |app, _| app.act(tab, action));
+        }
+        if pull_request {
+            // Into the target's own branch name (a remote branch's name without its remote).
+            let into = if target.kind == RefKind::Remote { split_remote(v, &t).map_or(t.clone(), |(_, b)| b) } else { t.clone() };
+            d = d.choice(&format!("Start a pull request from {s} into {into}"), super::widgets::Kind::Primary, move |app, _| app.start_pull_request_into(tab, &s, Some(into)));
+        }
+        self.dialog = Some(d);
+    }
+
     pub(crate) fn pinned_ref(&self, path: &str) -> Option<String> {
         self.settings.get::<std::collections::HashMap<String, String>>("pinned").and_then(|m| m.get(path).cloned())
     }
@@ -205,7 +241,14 @@ impl App {
         let sha = r.sha.clone();
         items.push(item("Create tag here", move |app| app.prompt_tag(tab, Some(sha), false, String::new())));
         items.push(Entry::Separator);
-        if r.kind == RefKind::Local {
+        // A branch checked out in another worktree can't be deleted: removing that worktree is offered instead.
+        let in_worktree = (r.kind == RefKind::Local && !is_head).then(|| repo.data.worktrees.iter().find(|w| w.branch == r.name && !super::same_folder(&w.path, &repo.path)).map(|w| w.path.clone())).flatten();
+        if let Some(wt) = in_worktree {
+            let n = name.clone();
+            items.push(item(format!("Rename {name}"), move |app| app.prompt_rename_branch(tab, &n)));
+            let n = name.clone();
+            items.push(danger(format!("Remove worktree and delete {name}…"), move |app| app.remove_worktree_and_branch(tab, &wt, &n)));
+        } else if r.kind == RefKind::Local {
             let n = name.clone();
             items.push(item(format!("Rename {name}"), move |app| app.prompt_rename_branch(tab, &n)));
             let n = name.clone();
@@ -439,6 +482,11 @@ impl App {
         let base = base_for(repo, &c.sha);
         let h = head.clone();
         items.push(item(format!("Interactive Rebase {head} from here"), move |app| app.open_rebase(tab, &base, &h, false)));
+        // This commit and every newer one on the branch, composed again into new commits with AI.
+        if let Some(parent) = c.parents.first().cloned() {
+            let count = pos + 1;
+            items.push(item(format!("Recompose {count} commit{} from here with AI", if count == 1 { "" } else { "s" }), move |app| app.recompose_commits(tab, parent.clone(), count)));
+        }
         if pos + 1 < line.len() {
             let s = c.sha.clone();
             items.push(item("Squash into the commit below", move |app| app.squash_commits(tab, vec![s])));
@@ -480,6 +528,17 @@ impl App {
         let mut items = Vec::new();
         if let Some(stash) = commit.and_then(|sha| repo.data.stashes.iter().find(|s| s.sha == sha)) {
             items.push(item("Apply stashed file", act(tab, Action::StashTakeFile { index: stash.index, expected: Some(stash.sha.clone()), path: f.clone() })));
+            items.push(Entry::Separator);
+        }
+        // A file of a commit: put the working copy back to that version.
+        if in_commit
+            && let Some(sha) = commit.filter(|sha| !repo.data.stashes.iter().any(|s| s.sha == *sha) && *sha != gitcraft_core::git::WORKDIR)
+        {
+            let (f2, sha) = (f.clone(), sha.to_owned());
+            let short: String = sha.chars().take(7).collect();
+            items.push(item("Restore file from this commit", move |app| {
+                app.confirm_act(tab, "Restore this file?", &format!("Replace {f2} in the working folder with its version from {short}? Its current changes are kept as a backup you can restore from Actions."), "Restore", Action::RestoreFiles { sha: sha.clone(), paths: vec![f2.clone()] })
+            }));
             items.push(Entry::Separator);
         }
         if !in_commit {

@@ -14,9 +14,10 @@ use std::path::Path;
 pub enum AiOutput {
     CommitMessage { path: String, before: super::repo::Draft, summary: String, description: String },
     StashTitle { tab: u64, before: String, text: String },
-    Explain { title: String, text: String },
+    /// `key` names what was explained (a commit, or a branch at its tip) for the recent explanations kept.
+    Explain { key: Option<String>, title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
-    Merge { tab: u64, file: String, editor: u64, revision: u64, text: String },
+    Merge { tab: u64, file: String, editor: u64, revision: u64, text: String, notes: Vec<ai::ConflictNote> },
     PullText { tab: u64, request: u64, title: String, body: String },
 }
 
@@ -117,8 +118,14 @@ impl App {
                     }));
                 }
             }
-            AiOutput::Explain { title, text } => {
+            AiOutput::Explain { key, title, text } => {
                 let text = format!("{text}\n\nGenerated using your selected AI connection. Review the result before using it.");
+                // The last few explanations are kept, so asking again shows them without another request.
+                if let Some(key) = key {
+                    self.explanations.retain(|(k, ..)| *k != key);
+                    self.explanations.push_front((key, title.clone(), text.clone()));
+                    self.explanations.truncate(5);
+                }
                 self.dialog = Some(Dialog::info(&title, &text));
             }
             AiOutput::Compose { tab, commits } => {
@@ -127,7 +134,7 @@ impl App {
                 let plural = if n == 1 { "" } else { "s" };
                 self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits })));
             }
-            AiOutput::Merge { tab, file, editor, revision, text } => self.ai_merged(tab, &file, editor, revision, Ok(text)),
+            AiOutput::Merge { tab, file, editor, revision, text, notes } => self.ai_merged(tab, &file, editor, revision, Ok((text, notes))),
             AiOutput::PullText { tab, request, title, body } => self.pr_text_ready(tab, request, title, body),
         }
     }
@@ -207,25 +214,92 @@ impl App {
         self.with_reviewed(tab, Reviewed::Compose);
     }
 
+    /// A kept explanation for `key`, shown with Explain Again (which asks the AI anew). Returns whether one was kept.
+    fn cached_explanation(&mut self, key: &str, again: impl FnOnce(&mut App) + 'static) -> bool {
+        let Some((_, title, text)) = self.explanations.iter().find(|(k, ..)| k == key).cloned() else { return false };
+        self.dialog = Some(Dialog::confirm_with(&title, &text, "Explain Again", false, move |app, _| again(app)).cancel_label("Close"));
+        true
+    }
+
     pub(crate) fn explain_commit(&mut self, tab: u64, sha: &str, summary: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        let (sha, title) = (sha.to_owned(), format!("Explain: {summary}"));
-        self.ai_run("Explaining the commit…", move || Ok(AiOutput::Explain { title, text: ai::explain_commit(Path::new(&path), &sha)? }));
+        let key = format!("commit:{path}:{sha}");
+        let (s2, summary2, k2) = (sha.to_owned(), summary.to_owned(), key.clone());
+        if self.cached_explanation(&key, move |app| app.explain_now(tab, k2, ExplainWhat::Commit(s2, summary2))) {
+            return;
+        }
+        self.explain_now(tab, key, ExplainWhat::Commit(sha.to_owned(), summary.to_owned()));
     }
 
     pub(crate) fn explain_branch(&mut self, tab: u64, branch: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        let (b, title) = (branch.to_owned(), format!("What {branch} changes"));
-        self.ai_run(&format!("Explaining {branch}…"), move || {
-            let dir = Path::new(&path);
-            let base = gitcraft_core::extras::default_target(dir).ok_or("No branch to compare with")?;
-            Ok(AiOutput::Explain { title, text: ai::explain_branch(dir, &b, &base)? })
-        });
+        // Kept by the branch's tip, so a branch that moved is explained again.
+        let tip = self.repo(tab).and_then(|r| r.view.as_ref()).and_then(|v| v.data.refs.iter().find(|r| r.name == branch).map(|r| r.sha.clone())).unwrap_or_default();
+        let key = format!("branch:{path}:{branch}:{tip}");
+        let (b2, k2) = (branch.to_owned(), key.clone());
+        if self.cached_explanation(&key, move |app| app.explain_now(tab, k2, ExplainWhat::Branch(b2))) {
+            return;
+        }
+        self.explain_now(tab, key, ExplainWhat::Branch(branch.to_owned()));
+    }
+
+    fn explain_now(&mut self, tab: u64, key: String, what: ExplainWhat) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        match what {
+            ExplainWhat::Commit(sha, summary) => {
+                let title = format!("Explain: {summary}");
+                self.ai_run("Explaining the commit…", move || Ok(AiOutput::Explain { key: Some(key), title, text: ai::explain_commit(Path::new(&path), &sha)? }));
+            }
+            ExplainWhat::Branch(branch) => {
+                let title = format!("What {branch} changes");
+                self.ai_run(&format!("Explaining {branch}…"), move || {
+                    let dir = Path::new(&path);
+                    let base = gitcraft_core::extras::default_target(dir).ok_or("No branch to compare with")?;
+                    Ok(AiOutput::Explain { key: Some(key), title, text: ai::explain_branch(dir, &branch, &base)? })
+                });
+            }
+        }
+    }
+
+    /// Recompose with AI: the commits after `base` on the checked-out branch are undone (a soft reset, which Undo
+    /// reverses) and their changes are composed into new commits with AI. The working folder
+    /// must be clean so nothing else is folded in.
+    pub(crate) fn recompose_commits(&mut self, tab: u64, base: String, count: usize) {
+        let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
+        if !v.data.status.staged.is_empty() || !v.data.status.unstaged.is_empty() {
+            return self.toast(false, "Commit or stash your working changes first, so only these commits are recomposed.");
+        }
+        let plural = if count == 1 { "" } else { "s" };
+        let text = format!("The {count} newest commit{plural} on this branch are undone (their changes stay in the working folder) and composed again into new commits with AI. You can review the result before it is committed, and Undo brings the original commits back.");
+        self.dialog = Some(Dialog::confirm_with(&format!("Recompose {count} commit{plural} with AI?"), &text, "Recompose", false, move |app, _| {
+            app.recompose_pending = Some(tab);
+            app.act(tab, Action::Reset { sha: base, mode: "soft".into() });
+        }));
+    }
+
+    /// The soft reset of Recompose with AI finished: compose its changes, or stop if it failed.
+    pub(crate) fn recompose_reset_done(&mut self, tab: u64, ok: bool) {
+        if self.recompose_pending != Some(tab) {
+            return;
+        }
+        self.recompose_pending = None;
+        if ok {
+            self.compose_commits(tab);
+        }
+    }
+
+    /// Explain the uncommitted changes. Not kept: they change as you work.
+    pub(crate) fn explain_working(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        self.ai_run("Explaining the working changes…", move || Ok(AiOutput::Explain { key: None, title: "Explain working changes".into(), text: ai::explain_working(Path::new(&path))? }));
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ai_resolve_conflict(&mut self, tab: u64, base: String, ours: String, theirs: String, file: String, editor: u64, revision: u64) {
-        self.ai_run("Merging both sides…", move || Ok(AiOutput::Merge { tab, editor, revision, text: ai::resolve_conflict(&base, &ours, &theirs, &file)?, file }));
+        self.ai_run("Merging both sides…", move || {
+            let (text, notes) = ai::resolve_conflict(&base, &ours, &theirs, &file)?;
+            Ok(AiOutput::Merge { tab, editor, revision, text, notes, file })
+        });
         if let Some(r) = self.repo_mut(tab) {
             r.conflict_ui.ai_busy = true;
         }
@@ -238,4 +312,10 @@ impl App {
             Ok(AiOutput::PullText { tab, request, title, body })
         });
     }
+}
+
+/// What an explanation is of.
+enum ExplainWhat {
+    Commit(String, String),
+    Branch(String),
 }

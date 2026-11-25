@@ -136,7 +136,37 @@ impl App {
     }
 
     /// The open tabs, scrolled sideways by the mouse wheel when they do not fit.
+    /// The repository a tab's worktree belongs to (its main worktree), when that repository has more than one.
+    fn worktree_group(&self, id: u64) -> Option<String> {
+        let v = self.repos.get(&id)?.view.as_ref()?;
+        (v.data.worktrees.len() > 1).then(|| v.data.worktrees.first().map(|w| w.path.replace('\\', "/").trim_end_matches('/').to_lowercase())).flatten()
+    }
+
+    /// UI Customization > Automatically group worktree tabs together: worktrees of one repository sit side by side.
+    fn group_worktree_tabs(&mut self) {
+        if !self.settings.flag("autogroupWorktreeTabs", true) || self.tab_drag.is_some() {
+            return;
+        }
+        let groups: Vec<Option<String>> = self.tabs.iter().map(|t| self.worktree_group(t.id)).collect();
+        let mut order: Vec<usize> = Vec::with_capacity(self.tabs.len());
+        for i in 0..self.tabs.len() {
+            if order.contains(&i) {
+                continue;
+            }
+            order.push(i);
+            if let Some(g) = &groups[i] {
+                order.extend((i + 1..self.tabs.len()).filter(|j| groups[*j].as_ref() == Some(g)));
+            }
+        }
+        if order.iter().enumerate().any(|(at, i)| at != *i) {
+            let mut old: Vec<Option<super::Tab>> = std::mem::take(&mut self.tabs).into_iter().map(Some).collect();
+            self.tabs = order.into_iter().filter_map(|i| old[i].take()).collect();
+            self.remember_tabs();
+        }
+    }
+
     fn tab_strip(&mut self, ui: &mut Ui) {
+        self.group_worktree_tabs();
         let room = (ui.available_width() - ICON_TAB - 33.0 - 2.0 * ICON_TAB - 160.0).max(MIN_TAB_WIDTH);
         egui::ScrollArea::horizontal()
             .id_salt("tab_strip")
@@ -197,6 +227,16 @@ impl App {
             icons::paint(ui, close, Icon::X, 13.0, ink);
         }
         divider(ui, rect.right(), rect);
+        // Tabs of worktrees of one repository share a coloured line along their bottom.
+        if self.settings.flag("autogroupWorktreeTabs", true)
+            && let Some(group) = self.worktree_group(id)
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            group.hash(&mut h);
+            let color = super::widgets::lane_color(h.finish() as usize % 16);
+            ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 1.5), pos2(rect.right(), rect.bottom() - 1.5)], egui::Stroke::new(3.0, color));
+        }
         let response = response.tip(tab.path().unwrap_or(&tab.title).to_owned());
 
         if close_response.clicked() || response.middle_clicked() {

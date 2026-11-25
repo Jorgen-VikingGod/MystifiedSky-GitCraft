@@ -1,5 +1,6 @@
-//! Author pictures from Gravatar, found by the SHA-256 of the trimmed, lower-case address.
-//! Only the hash is sent; an address without a picture answers 404 and the app shows initials.
+//! Author pictures. A GitHub no-reply address (`123+name@users.noreply.github.com`) shows that account's GitHub
+//! picture; any other address is looked up on Gravatar by the SHA-256 of the trimmed, lower-case address (only the hash
+//! is sent). An address without a picture answers 404 and the app shows initials.
 
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -18,9 +19,21 @@ pub fn url(email: &str, px: u32) -> Option<String> {
     Some(format!("https://gravatar.com/avatar/{hash}?s={px}&d=404"))
 }
 
+/// The GitHub picture of a GitHub no-reply address: by account id (`123+name@…`), else by login (`name@…`).
+pub fn github_url(email: &str, px: u32) -> Option<String> {
+    let email = email.trim().to_lowercase();
+    let local = email.strip_suffix("@users.noreply.github.com")?;
+    let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    match local.split_once('+') {
+        Some((id, _)) if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) => Some(format!("https://avatars.githubusercontent.com/u/{id}?s={px}")),
+        None if valid(local) => Some(format!("https://github.com/{local}.png?size={px}")),
+        _ => None,
+    }
+}
+
 /// The picture's bytes, `Ok(None)` when the address has none.
 pub fn fetch(email: &str, px: u32) -> Result<Option<Vec<u8>>, String> {
-    let Some(url) = url(email, px) else { return Ok(None) };
+    let Some(url) = github_url(email, px).or_else(|| url(email, px)) else { return Ok(None) };
     let _ = rustls::crypto::ring::default_provider().install_default();
     crate::runtime().block_on(async {
         let policy = reqwest::redirect::Policy::custom(|a| if a.previous().len() > 4 || a.url().scheme() != "https" { a.stop() } else { a.follow() });
@@ -59,5 +72,13 @@ mod tests {
         assert_eq!(url("  Test@Example.com ", 64).as_deref(), Some(want));
         assert_eq!(url("not an address", 64), None);
         assert_eq!(url("", 64), None);
+    }
+
+    #[test]
+    fn github_no_reply_addresses_use_the_github_picture() {
+        assert_eq!(github_url("12345+octo@users.noreply.github.com", 64).as_deref(), Some("https://avatars.githubusercontent.com/u/12345?s=64"));
+        assert_eq!(github_url("octo-cat@users.noreply.github.com", 64).as_deref(), Some("https://github.com/octo-cat.png?size=64"));
+        assert_eq!(github_url("someone@example.com", 64), None);
+        assert_eq!(github_url("../x@users.noreply.github.com", 64), None);
     }
 }
