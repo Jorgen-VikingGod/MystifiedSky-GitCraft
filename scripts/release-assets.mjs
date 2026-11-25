@@ -17,11 +17,17 @@ const encodedKey = /pub const PUBLIC_KEY: &str = "([A-Za-z0-9+/]+={0,2})";/.exec
 if (!encodedKey) throw new Error("GitCraft's update public key is missing");
 const publicKey = Buffer.from(encodedKey, "base64").toString("utf8").trim().split(/\r?\n/).at(-1);
 
+function normalizeVersion(value) {
+  const core = value.trim().replace(/^v+/, "").split(/[-+]/, 1)[0];
+  return /^\d+\.\d+\.\d+$/.test(core) ? core.split(".").map(part => BigInt(part)).join(".") : null;
+}
+
 function verifySignature(file, signature) {
   const directory = mkdtempSync(join(tmpdir(), "gitcraft-signature-"));
   const decoded = join(directory, "update.minisig");
+  const contents = Buffer.from(signature, "base64");
   try {
-    writeFileSync(decoded, Buffer.from(signature, "base64"));
+    writeFileSync(decoded, contents);
     const result = spawnSync("/usr/bin/minisign", ["-V", "-q", "-P", publicKey, "-m", file, "-x", decoded], {
       encoding: "utf8",
     });
@@ -31,6 +37,12 @@ function verifySignature(file, signature) {
   } finally {
     rmSync(decoded, { force: true });
     rmdirSync(directory);
+  }
+  // GitCraft also checks the version when the signer includes it in the trusted comment.
+  const trustedComment = contents.toString("utf8").split(/\r?\n/, 3)[2]?.slice("trusted comment: ".length);
+  const signedVersion = trustedComment?.split("\t").find(field => field.startsWith("version:"))?.slice("version:".length);
+  if (signedVersion !== undefined && normalizeVersion(signedVersion) !== normalizeVersion(version)) {
+    throw new Error(`${file} was signed for version ${signedVersion}, expected ${version}`);
   }
 }
 
