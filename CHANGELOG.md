@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Stacked pull requests: starting a pull request from a branch made on another open pull request's branch targets that branch, and the form names the pull request it stacks on.
 - Pull requests from a repository without its own template use the GitHub organization's default template. Commits made with a GitHub no-reply address show that account's GitHub picture.
 - Recompose commits with AI: from a commit's menu, or for a run of selected commits that ends at the checked-out commit, the commits are undone and their changes composed again into new commits for you to review. Undo brings the originals back.
 - Auto-resolve with AI explains each conflict it resolved and how confident it is (high, medium or low), shown above its suggestion in the conflict editor.

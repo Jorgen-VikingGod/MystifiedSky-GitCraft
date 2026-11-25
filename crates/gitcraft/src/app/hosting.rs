@@ -1308,12 +1308,27 @@ impl App {
             let target = gitcraft_core::extras::default_branch_for(dir, &branch).map(|(_, b)| b);
             let mut templates: Vec<(String, String)> = templates.into_iter().map(|t| (t.name, t.body)).collect();
             // A repository without a template of its own uses its GitHub organization's default one.
+            let remote = gitcraft_core::session::remote_of(&path, &gitlab).ok();
             if templates.is_empty()
-                && let Some(t) = gitcraft_core::session::remote_of(&path, &gitlab).ok().and_then(|remote| gitcraft_core::hosting::org_pr_template(&remote))
+                && let Some(t) = remote.as_ref().and_then(gitcraft_core::hosting::org_pr_template)
             {
                 templates.push(t);
             }
-            super::Msg::Apply(Box::new(move |app: &mut App| app.pull_request_form(tab, branch, target, templates)))
+            // Stacked pull requests: a branch made from another open pull request's branch targets that branch, so it
+            // shows only its own changes; the form says which pull request it stacks on.
+            let open = remote.as_ref().and_then(|r| gitcraft_core::hosting::pull_requests(r).ok()).unwrap_or_default();
+            let below = open.iter().filter(|pr| pr.source != branch && !pr.source_sha.is_empty())
+                .filter(|pr| gitcraft_core::git::run(dir, &["merge-base", "--is-ancestor", &pr.source_sha, &branch]).ok)
+                // The nearest: the one with the fewest commits between it and this branch.
+                .min_by_key(|pr| gitcraft_core::git::run(dir, &["rev-list", "--count", &format!("{}..{branch}", pr.source_sha)]).stdout.trim().parse::<u64>().unwrap_or(u64::MAX))
+                .cloned();
+            let target = below.as_ref().map(|pr| pr.source.clone()).or(target);
+            let stack = below.map(|pr| format!("This pull request stacks on #{} ({}), so it targets {}.", pr.number, pr.title, pr.source));
+            let stack_key = (tab, branch.clone());
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.pr_stack = stack.map(|note| (stack_key.0, stack_key.1, note));
+                app.pull_request_form(tab, branch, target, templates)
+            }))
         });
     }
 
@@ -1349,7 +1364,11 @@ impl App {
         let body = [head.as_ref().map(|h| h.body.clone()).filter(|b| !b.is_empty()), template].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         let b2 = branch.clone();
         let (title, body, draft) = text.unwrap_or_else(|| (head.map(|h| h.summary).unwrap_or_else(|| branch.clone()), body, false));
-        let d = Dialog::new(&format!("Start a pull request from {branch}"), super::dialogs::Body::Form { intro: "The branch is pushed first if the remote doesn't have it yet.".into(), fields, grid: false })
+        let mut intro = "The branch is pushed first if the remote doesn't have it yet.".to_owned();
+        if let Some((_, _, note)) = self.pr_stack.as_ref().filter(|(t, b, _)| *t == tab && *b == branch) {
+            intro = format!("{note}\n{intro}");
+        }
+        let d = Dialog::new(&format!("Start a pull request from {branch}"), super::dialogs::Body::Form { intro, fields, grid: false })
             .width(560.0)
             .text_value("target", &target.unwrap_or_else(|| "main".into()))
             .text_value("title", &title)

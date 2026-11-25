@@ -248,6 +248,8 @@ pub struct App {
     pub(crate) explanations: std::collections::VecDeque<(String, String, String)>,
     /// Recompose with AI is waiting for its soft reset in this tab, to compose the changes after it.
     pub(crate) recompose_pending: Option<u64>,
+    /// The pull request being started stacks on another: its tab, branch and the note the form shows.
+    pub(crate) pr_stack: Option<(u64, String, String)>,
     /// The preferences revision the backend last heard about.
     pub(crate) synced: u64,
     pub(crate) prefs: Option<prefs_ui::PrefsUi>,
@@ -337,6 +339,7 @@ impl App {
             ai_label: None,
             explanations: Default::default(),
             recompose_pending: None,
+            pr_stack: None,
             synced: 0,
             prefs: None,
             prefs_data: Default::default(),
