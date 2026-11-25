@@ -82,6 +82,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Keep commit, stash, and patch controls reachable when the changes panel is short, and prevent the bottom panel from being resized below the form when space permits.
 - "Automatically group worktree tabs together" now works: tabs of worktrees of the same repository sit side by side and share a colored line. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Reject Fetch and Pull actions while their repository is busy, including from open menus, shortcuts and Repository Management. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))

@@ -4,6 +4,7 @@
 
 use super::App;
 use super::ctxmenu::Later;
+use super::right::WorkTab;
 use super::theme::p;
 use super::widgets;
 use egui::{Align2, CornerRadius, FontId, Rect, Ui, pos2, vec2};
@@ -58,7 +59,8 @@ impl App {
         }
         let centre_right = if show_right && !bottom { body.right() - right_w - 2.0 } else { body.right() };
         let combined = Rect::from_min_max(pos2(x, body.top()), pos2(centre_right.max(x), body.bottom()));
-        let bottom_h = if bottom { bottom_panel_height(combined.height(), self.settings.num("rightPanelHeight", 350.0) as f32) } else { 0.0 };
+        let bottom_min = 428.0 + if r.work.tab == WorkTab::Commit && r.work.options_open { 110.0 } else { 0.0 };
+        let bottom_h = if bottom { bottom_panel_height(combined.height(), self.settings.num("rightPanelHeight", 350.0) as f32, bottom_min) } else { 0.0 };
         let centre = Rect::from_min_max(combined.min, pos2(combined.right(), combined.bottom() - bottom_h - if bottom { 2.0_f32.min(combined.height()) } else { 0.0 }));
         let right = if bottom {
             Rect::from_min_max(pos2(combined.left(), centre.bottom() + 2.0_f32.min(combined.height())), combined.max)
@@ -95,7 +97,7 @@ impl App {
                 let split = Rect::from_min_max(pos2(combined.left(), centre.bottom()), pos2(combined.right(), right.top()));
                 let dy = widgets::splitter(ui, split, ui.scope_id().with("right_bottom_split"), false);
                 if dy != 0.0 {
-                    let h = bottom_panel_height(combined.height(), bottom_h - dy);
+                    let h = bottom_panel_height(combined.height(), bottom_h - dy, bottom_min);
                     later.push(Box::new(move |app| app.settings.set("rightPanelHeight", h.round())));
                 }
             } else {
@@ -170,10 +172,11 @@ impl App {
     }
 }
 
-fn bottom_panel_height(height: f32, preferred: f32) -> f32 {
+fn bottom_panel_height(height: f32, preferred: f32, panel_min: f32) -> f32 {
     let available = (height - 2.0).max(0.0);
-    let minimum = 100.0_f32.min(available / 2.0);
-    preferred.clamp(minimum, available - minimum)
+    let centre_min = 100.0_f32.min(available / 2.0);
+    let maximum = available - centre_min;
+    preferred.clamp(panel_min.min(maximum), maximum)
 }
 
 /// Side panel widths for a body this wide, as the earlier web interface laid them out: the
@@ -219,10 +222,17 @@ mod tests {
 
     #[test]
     fn bottom_panel_height_fits_short_and_normal_windows() {
-        assert_eq!(bottom_panel_height(800.0, 350.0), 350.0);
-        assert_eq!(bottom_panel_height(800.0, 900.0), 698.0);
-        assert_eq!(bottom_panel_height(100.0, 350.0), 49.0);
-        assert_eq!(bottom_panel_height(0.0, 350.0), 0.0);
+        assert_eq!(bottom_panel_height(800.0, 350.0, 428.0), 428.0);
+        assert_eq!(bottom_panel_height(800.0, 900.0, 428.0), 698.0);
+        assert_eq!(bottom_panel_height(100.0, 350.0, 428.0), 49.0);
+        assert_eq!(bottom_panel_height(0.0, 350.0, 428.0), 0.0);
+    }
+
+    #[test]
+    fn bottom_panel_cannot_be_dragged_below_the_work_form_when_room_is_available() {
+        assert_eq!(bottom_panel_height(800.0, 0.0, 428.0), 428.0);
+        assert_eq!(bottom_panel_height(800.0, 0.0, 538.0), 538.0);
+        assert_eq!(bottom_panel_height(500.0, 0.0, 538.0), 398.0);
     }
 
     #[test]

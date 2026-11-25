@@ -442,7 +442,7 @@ impl App {
             WorkTab::Patch => 230.0,
         };
         const FILE_SECTION_HEIGHT: f32 = 30.0;
-        let lists_h = (ui.available_height() - box_h).max(60.0);
+        let lists_h = work_list_height(ui.available_height(), box_h);
         let mut events: Vec<(bool, FileEvent)> = Vec::new();
         let active_unstaged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Unstaged).map(|d| d.file.clone());
         let active_staged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Staged).map(|d| d.file.clone());
@@ -579,212 +579,214 @@ impl App {
                 }
             }
         }
-        // Grip, then the Commit / Stash / Patch tabs.
-        let w = ui.available_width();
-        let (grip, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-        ui.painter().rect_filled(Rect::from_center_size(grip.center(), vec2(100.0, 4.0)), CornerRadius::same(2), c.white(0.1));
-        let (tabs, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
-        ui.painter().line_segment([tabs.left_bottom(), tabs.right_bottom()], Stroke::new(1.0, c.white(0.1)));
-        let mut tx = tabs.left() + 8.0;
-        for (t, icon, label) in [(WorkTab::Commit, Icon::GitCommitHorizontal, "Commit"), (WorkTab::Stash, Icon::Download, "Stash"), (WorkTab::Patch, Icon::FileDown, "Patch")] {
-            let on = wu.tab == t;
-            let show_label = on || t == WorkTab::Commit;
-            let g = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(14.0), c.white(1.0));
-            let tw = 20.0 + 15.0 + if show_label { 6.0 + g.size().x } else { 0.0 };
-            let tr = Rect::from_min_size(pos2(tx, tabs.top()), vec2(tw, 30.0));
-            let resp = ui.interact(tr, ui.scope_id().with(("worktab", label)), Sense::click());
-            if on {
-                ui.painter().rect(tr, CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, c.field, Stroke::new(1.0, c.white(0.1)), StrokeKind::Inside);
-                ui.painter().line_segment([tr.left_bottom() + vec2(1.0, 0.0), tr.right_bottom() - vec2(1.0, 0.0)], Stroke::new(1.0, c.field));
+        work_form_scroll(tab, ui.available_height()).show(ui, |ui| {
+            // Grip, then the Commit / Stash / Patch tabs.
+            let w = ui.available_width();
+            let (grip, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
+            ui.painter().rect_filled(Rect::from_center_size(grip.center(), vec2(100.0, 4.0)), CornerRadius::same(2), c.white(0.1));
+            let (tabs, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+            ui.painter().line_segment([tabs.left_bottom(), tabs.right_bottom()], Stroke::new(1.0, c.white(0.1)));
+            let mut tx = tabs.left() + 8.0;
+            for (t, icon, label) in [(WorkTab::Commit, Icon::GitCommitHorizontal, "Commit"), (WorkTab::Stash, Icon::Download, "Stash"), (WorkTab::Patch, Icon::FileDown, "Patch")] {
+                let on = wu.tab == t;
+                let show_label = on || t == WorkTab::Commit;
+                let g = ui.painter().layout_no_wrap(label.to_owned(), FontId::proportional(14.0), c.white(1.0));
+                let tw = 20.0 + 15.0 + if show_label { 6.0 + g.size().x } else { 0.0 };
+                let tr = Rect::from_min_size(pos2(tx, tabs.top()), vec2(tw, 30.0));
+                let resp = ui.interact(tr, ui.scope_id().with(("worktab", label)), Sense::click());
+                if on {
+                    ui.painter().rect(tr, CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, c.field, Stroke::new(1.0, c.white(0.1)), StrokeKind::Inside);
+                    ui.painter().line_segment([tr.left_bottom() + vec2(1.0, 0.0), tr.right_bottom() - vec2(1.0, 0.0)], Stroke::new(1.0, c.field));
+                }
+                let ink = if on || resp.hovered() { c.white(1.0) } else { c.white(0.7) };
+                icons::paint(ui, Rect::from_min_size(pos2(tr.left() + 10.0, tr.center().y - 7.5), Vec2::splat(15.0)), icon, 15.0, ink);
+                if show_label {
+                    ui.painter().text(pos2(tr.left() + 31.0, tr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), ink);
+                }
+                if resp.tip(label).clicked() {
+                    wu.tab = t;
+                }
+                tx += tw + 2.0;
             }
-            let ink = if on || resp.hovered() { c.white(1.0) } else { c.white(0.7) };
-            icons::paint(ui, Rect::from_min_size(pos2(tr.left() + 10.0, tr.center().y - 7.5), Vec2::splat(15.0)), icon, 15.0, ink);
-            if show_label {
-                ui.painter().text(pos2(tr.left() + 31.0, tr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(14.0), ink);
-            }
-            if resp.tip(label).clicked() {
-                wu.tab = t;
-            }
-            tx += tw + 2.0;
-        }
-        let push = self.settings.flag("pushAfterCommit", false);
-        let mut commit_now: Option<bool> = None;
-        egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 8 }).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            match wu.tab {
-                WorkTab::Commit => {
-                    let mut amend = draft.amend;
-                    if widgets::checkbox(ui, &mut amend, "Amend previous commit", 13.5).clicked() {
-                        if amend {
-                            let (s, d) = gitcraft_core::git::last_commit_message(std::path::Path::new(&path));
-                            draft = Draft { summary: s, description: d, amend: true };
-                        } else {
-                            draft = Draft::default();
-                        }
-                        draft_changed = true;
-                    }
-                    let left = m_counter() as i64 - draft.summary.chars().count() as i64;
-                    // The box takes the accent colour while either field has the focus.
-                    let (summary_id, description_id) = (egui::Id::NULL.with(("summary", tab)), egui::Id::NULL.with(("description", tab)));
-                    let focused = ui.memory(|m| m.has_focus(summary_id) || m.has_focus(description_id));
-                    let language = self.settings.flag("spellcheck", true).then(|| {
-                        if self.settings.string("language", "en") == "es" {
-                            spelling::Language::Spanish
-                        } else {
-                            spelling::Language::English
-                        }
-                    });
-                    let border = if focused { ACCENT.gamma_multiply(0.7) } else { c.white(0.1) };
-                    egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, border)).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::ZERO;
-                        ui.horizontal(|ui| {
-                            ui.add_space(10.0);
-                            let w = ui.available_width() - 26.0 - 6.0 - 40.0;
-                            let sresp = spelling::edit(ui, &mut draft.summary, summary_id, spelling::Field::Summary(w), language, &mut wu.summary_spelling);
-                            if sresp.changed() {
-                                draft_changed = true;
+            let push = self.settings.flag("pushAfterCommit", false);
+            let mut commit_now: Option<bool> = None;
+            egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 8 }).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                match wu.tab {
+                    WorkTab::Commit => {
+                        let mut amend = draft.amend;
+                        if widgets::checkbox(ui, &mut amend, "Amend previous commit", 13.5).clicked() {
+                            if amend {
+                                let (s, d) = gitcraft_core::git::last_commit_message(std::path::Path::new(&path));
+                                draft = Draft { summary: s, description: d, amend: true };
+                            } else {
+                                draft = Draft::default();
                             }
-                            if sresp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
-                                commit_now = Some(ui.input(|i| i.modifiers.shift));
-                            }
-                            ui.add_sized([40.0, 30.0], egui::Label::new(egui::RichText::new(left.to_string()).size(14.0).color(if left < 0 { REMOVED } else { c.white(0.6) })));
-                            if Self::ai_button(ui, "Generate a commit message with AI").clicked() {
-                                later.push(Box::new(move |app| app.ai_commit_message(tab)));
-                            }
-                        });
-                        let dresp = spelling::edit(ui, &mut draft.description, description_id, spelling::Field::Description, language, &mut wu.description_spelling);
-                        if dresp.changed() {
                             draft_changed = true;
                         }
-                        if dresp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
-                            commit_now = Some(ui.input(|i| i.modifiers.shift));
+                        let left = m_counter() as i64 - draft.summary.chars().count() as i64;
+                        // The box takes the accent colour while either field has the focus.
+                        let (summary_id, description_id) = (egui::Id::NULL.with(("summary", tab)), egui::Id::NULL.with(("description", tab)));
+                        let focused = ui.memory(|m| m.has_focus(summary_id) || m.has_focus(description_id));
+                        let language = self.settings.flag("spellcheck", true).then(|| {
+                            if self.settings.string("language", "en") == "es" {
+                                spelling::Language::Spanish
+                            } else {
+                                spelling::Language::English
+                            }
+                        });
+                        let border = if focused { ACCENT.gamma_multiply(0.7) } else { c.white(0.1) };
+                        egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, border)).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::ZERO;
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                let w = ui.available_width() - 26.0 - 6.0 - 40.0;
+                                let sresp = spelling::edit(ui, &mut draft.summary, summary_id, spelling::Field::Summary(w), language, &mut wu.summary_spelling);
+                                if sresp.changed() {
+                                    draft_changed = true;
+                                }
+                                if sresp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+                                    commit_now = Some(ui.input(|i| i.modifiers.shift));
+                                }
+                                ui.add_sized([40.0, 30.0], egui::Label::new(egui::RichText::new(left.to_string()).size(14.0).color(if left < 0 { REMOVED } else { c.white(0.6) })));
+                                if Self::ai_button(ui, "Generate a commit message with AI").clicked() {
+                                    later.push(Box::new(move |app| app.ai_commit_message(tab)));
+                                }
+                            });
+                            let dresp = spelling::edit(ui, &mut draft.description, description_id, spelling::Field::Description, language, &mut wu.description_spelling);
+                            if dresp.changed() {
+                                draft_changed = true;
+                            }
+                            if dresp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+                                commit_now = Some(ui.input(|i| i.modifiers.shift));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
+                            widgets::chevron(ui, cr, wu.options_open, 14.0, c.white(0.7));
+                            let resp = ui.add(egui::Label::new(egui::RichText::new("Commit options").size(13.5).color(c.white(0.7))).sense(Sense::click()));
+                            if resp.clicked() || cresp.clicked() {
+                                wu.options_open = !wu.options_open;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
+                                    later.push(Box::new(move |app| app.compose_commits(tab)));
+                                }
+                                if Self::ai_button(ui, "Explain the working changes with AI").clicked() {
+                                    later.push(Box::new(move |app| app.explain_working(tab)));
+                                }
+                            });
+                        });
+                        if wu.options_open {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                let mut push = push;
+                                if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
+                                    later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
+                                let w = ui.available_width();
+                                widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
+                                if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
+                                    wu.skip_hooks = Some(skip);
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
+                            });
                         }
-                    });
-                    ui.horizontal(|ui| {
-                        let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::click());
-                        widgets::chevron(ui, cr, wu.options_open, 14.0, c.white(0.7));
-                        let resp = ui.add(egui::Label::new(egui::RichText::new("Commit options").size(13.5).color(c.white(0.7))).sense(Sense::click()));
-                        if resp.clicked() || cresp.clicked() {
-                            wu.options_open = !wu.options_open;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
-                                later.push(Box::new(move |app| app.compose_commits(tab)));
-                            }
-                            if Self::ai_button(ui, "Explain the working changes with AI").clicked() {
-                                later.push(Box::new(move |app| app.explain_working(tab)));
-                            }
-                        });
-                    });
-                    if wu.options_open {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            let mut push = push;
-                            if widgets::checkbox(ui, &mut push, "Push after committing", 12.5).clicked() {
-                                later.push(Box::new(move |app| app.settings.set("pushAfterCommit", push)));
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.label(egui::RichText::new("Co-authors:").size(12.5).color(c.white(0.8)));
-                            let w = ui.available_width();
-                            widgets::field(ui, &mut wu.coauthors, "Name <email>, …", w, 22.0, 12.0).tip("Adds a Co-authored-by line for each person (separate several with commas)");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            let mut skip = wu.skip_hooks.unwrap_or_else(|| self.settings.flag("skipHooks", false));
-                            if widgets::checkbox(ui, &mut skip, "Skip Git hooks", 12.5).clicked() {
-                                wu.skip_hooks = Some(skip);
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            widgets::checkbox(ui, &mut wu.sign_off, "Sign off (DCO)", 12.5).tip("Add a Signed-off-by trailer using your Git identity");
-                        });
                     }
-                }
-                WorkTab::Patch => {
-                    egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(egui::RichText::new("Share your uncommitted changes as a .patch file, without pushing a branch. Untracked files must be staged first. Anyone can apply it with GitCraft or git apply.").size(12.5).color(c.fg2)).wrap());
-                        ui.add_space(6.0);
-                        if widgets::link(ui, "Apply a patch file…", 12.5).clicked() {
-                            later.push(Box::new(move |app| app.apply_patch(tab)));
-                        }
-                    });
-                }
-                WorkTab::Stash => {
-                    egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::ZERO;
-                        ui.horizontal(|ui| {
-                            ui.add_space(10.0);
-                            let w = ui.available_width() - 26.0 - 8.0;
-                            ui.add_sized([w, 34.0], egui::TextEdit::singleline(&mut wu.stash_message).frame(egui::Frame::NONE).font(FontId::proportional(15.0)).hint_text(egui::RichText::new("Stash title").color(c.white(0.7))).align(Align2::LEFT_CENTER));
-                            if Self::ai_button(ui, "Name the stash with AI").clicked() {
-                                later.push(Box::new(move |app| app.ai_stash_title(tab)));
+                    WorkTab::Patch => {
+                        egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(egui::RichText::new("Share your uncommitted changes as a .patch file, without pushing a branch. Untracked files must be staged first. Anyone can apply it with GitCraft or git apply.").size(12.5).color(c.fg2)).wrap());
+                            ui.add_space(6.0);
+                            if widgets::link(ui, "Apply a patch file…", 12.5).clicked() {
+                                later.push(Box::new(move |app| app.apply_patch(tab)));
                             }
                         });
-                        ui.horizontal(|ui| {
-                            ui.add_space(10.0);
-                            ui.label(egui::RichText::new("Staged and unstaged changes, including new files, are stashed.").size(12.0).color(c.fg3));
-                        });
-                        ui.add_space(8.0);
-                    });
-                }
-            }
-            // The big green button.
-            let (label, enabled) = match wu.tab {
-                WorkTab::Patch if total == 0 => ("No Changes for a Patch".to_owned(), false),
-                WorkTab::Patch => (format!("Save {total} File Change{} as a Patch", if total == 1 { "" } else { "s" }), true),
-                WorkTab::Stash if total == 0 => ("No Changes to Stash".to_owned(), false),
-                WorkTab::Stash => (format!("Stash Changes to {total} File{}", if total == 1 { "" } else { "s" }), true),
-                _ if !conflicted.is_empty() => (format!("Resolve {} Conflict{} to Commit", conflicted.len(), if conflicted.len() == 1 { "" } else { "s" }), false),
-                _ if merging && !draft.summary.trim().is_empty() => ("Commit and Merge".to_owned(), true),
-                _ if staged.is_empty() && !draft.amend => ("Stage Changes to Commit".to_owned(), false),
-                _ if draft.summary.trim().is_empty() => ("Type a Message to Commit".to_owned(), false),
-                _ if draft.amend => (format!("Amend Previous Commit{}", if push { " and Push" } else { "" }), true),
-                _ => (format!("Commit Changes to {} File{}{}", staged.len(), if staged.len() == 1 { "" } else { "s" }, if push { " and Push" } else { "" }), true),
-            };
-            let w = ui.available_width();
-            let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), if enabled { Sense::click() } else { Sense::hover() });
-            let (fill, stroke, ink) = if enabled {
-                (GOOD.gamma_multiply(if resp.hovered() { 0.35 } else { 0.25 }), GOOD, c.white(1.0))
-            } else {
-                (GOOD.gamma_multiply(0.1), GOOD.gamma_multiply(0.25), c.white(0.45))
-            };
-            ui.painter().rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-            let g = ui.painter().layout_no_wrap(label, super::fonts::semibold(13.5), ink);
-            let x0 = rect.center().x - (g.size().x + 23.0) / 2.0;
-            icons::paint(ui, Rect::from_min_size(pos2(x0, rect.center().y - 7.5), Vec2::splat(15.0)), Icon::GitCommitHorizontal, 15.0, ink);
-            ui.painter().galley(pos2(x0 + 23.0, rect.center().y - g.size().y / 2.0), g, ink);
-            if resp.clicked() {
-                match wu.tab {
-                    WorkTab::Patch => {
-                        let name = super::patches::patch_name(if draft.summary.is_empty() { &branch } else { &draft.summary });
-                        later.push(Box::new(move |app| app.save_patch(tab, Vec::new(), &name)));
                     }
                     WorkTab::Stash => {
-                        // The title stays while Git runs and if it fails; it is cleared once the stash is made.
-                        let message = wu.stash_message.clone();
-                        later.push(Box::new(move |app| app.act(tab, Action::Stash { message })));
+                        egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::ZERO;
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                let w = ui.available_width() - 26.0 - 8.0;
+                                ui.add_sized([w, 34.0], egui::TextEdit::singleline(&mut wu.stash_message).frame(egui::Frame::NONE).font(FontId::proportional(15.0)).hint_text(egui::RichText::new("Stash title").color(c.white(0.7))).align(Align2::LEFT_CENTER));
+                                if Self::ai_button(ui, "Name the stash with AI").clicked() {
+                                    later.push(Box::new(move |app| app.ai_stash_title(tab)));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new("Staged and unstaged changes, including new files, are stashed.").size(12.0).color(c.fg3));
+                            });
+                            ui.add_space(8.0);
+                        });
                     }
-                    WorkTab::Commit => commit_now = Some(false),
                 }
-            }
-            if let Some(all) = commit_now
-                && wu.tab == WorkTab::Commit
-                && (all || enabled)
-            {
-                // The summary typed this frame is stored first, so the commit uses what was submitted rather than the
-                // draft as it was before the last key press.
-                let (stored_path, typed) = (path.clone(), draft_changed.then(|| draft.clone()));
-                later.push(Box::new(move |app| {
-                    if let Some(typed) = typed {
-                        app.set_draft(&stored_path, typed);
+                // The big green button.
+                let (label, enabled) = match wu.tab {
+                    WorkTab::Patch if total == 0 => ("No Changes for a Patch".to_owned(), false),
+                    WorkTab::Patch => (format!("Save {total} File Change{} as a Patch", if total == 1 { "" } else { "s" }), true),
+                    WorkTab::Stash if total == 0 => ("No Changes to Stash".to_owned(), false),
+                    WorkTab::Stash => (format!("Stash Changes to {total} File{}", if total == 1 { "" } else { "s" }), true),
+                    _ if !conflicted.is_empty() => (format!("Resolve {} Conflict{} to Commit", conflicted.len(), if conflicted.len() == 1 { "" } else { "s" }), false),
+                    _ if merging && !draft.summary.trim().is_empty() => ("Commit and Merge".to_owned(), true),
+                    _ if staged.is_empty() && !draft.amend => ("Stage Changes to Commit".to_owned(), false),
+                    _ if draft.summary.trim().is_empty() => ("Type a Message to Commit".to_owned(), false),
+                    _ if draft.amend => (format!("Amend Previous Commit{}", if push { " and Push" } else { "" }), true),
+                    _ => (format!("Commit Changes to {} File{}{}", staged.len(), if staged.len() == 1 { "" } else { "s" }, if push { " and Push" } else { "" }), true),
+                };
+                let w = ui.available_width();
+                let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), if enabled { Sense::click() } else { Sense::hover() });
+                let (fill, stroke, ink) = if enabled {
+                    (GOOD.gamma_multiply(if resp.hovered() { 0.35 } else { 0.25 }), GOOD, c.white(1.0))
+                } else {
+                    (GOOD.gamma_multiply(0.1), GOOD.gamma_multiply(0.25), c.white(0.45))
+                };
+                ui.painter().rect(rect, CornerRadius::same(3), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+                let g = ui.painter().layout_no_wrap(label, super::fonts::semibold(13.5), ink);
+                let x0 = rect.center().x - (g.size().x + 23.0) / 2.0;
+                icons::paint(ui, Rect::from_min_size(pos2(x0, rect.center().y - 7.5), Vec2::splat(15.0)), Icon::GitCommitHorizontal, 15.0, ink);
+                ui.painter().galley(pos2(x0 + 23.0, rect.center().y - g.size().y / 2.0), g, ink);
+                if resp.clicked() {
+                    match wu.tab {
+                        WorkTab::Patch => {
+                            let name = super::patches::patch_name(if draft.summary.is_empty() { &branch } else { &draft.summary });
+                            later.push(Box::new(move |app| app.save_patch(tab, Vec::new(), &name)));
+                        }
+                        WorkTab::Stash => {
+                            // The title stays while Git runs and if it fails; it is cleared once the stash is made.
+                            let message = wu.stash_message.clone();
+                            later.push(Box::new(move |app| app.act(tab, Action::Stash { message })));
+                        }
+                        WorkTab::Commit => commit_now = Some(false),
                     }
-                    app.commit_from_wip(tab, all);
-                }));
-            }
+                }
+                if let Some(all) = commit_now
+                    && wu.tab == WorkTab::Commit
+                    && (all || enabled)
+                {
+                    // The summary typed this frame is stored first, so the commit uses what was submitted rather than the
+                    // draft as it was before the last key press.
+                    let (stored_path, typed) = (path.clone(), draft_changed.then(|| draft.clone()));
+                    later.push(Box::new(move |app| {
+                        if let Some(typed) = typed {
+                            app.set_draft(&stored_path, typed);
+                        }
+                        app.commit_from_wip(tab, all);
+                    }));
+                }
+            });
         });
         if draft_changed {
             later.push(Box::new(move |app| app.set_draft(&path, draft)));
@@ -1166,6 +1168,15 @@ impl App {
     }
 }
 
+fn work_list_height(available: f32, box_h: f32) -> f32 {
+    let available = available.max(0.0);
+    (available - box_h).max(60.0_f32.min(available / 2.0))
+}
+
+fn work_form_scroll(tab: u64, height: f32) -> egui::ScrollArea {
+    egui::ScrollArea::vertical().id_salt(("work_form", tab)).max_height(height.max(0.0)).min_scrolled_height(0.0).auto_shrink([false, false])
+}
+
 fn m_counter() -> u32 {
     gitcraft_core::metrics::COMMIT_SUMMARY_COUNTER
 }
@@ -1173,6 +1184,30 @@ fn m_counter() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_work_panel_leaves_room_for_the_form() {
+        let available: f32 = 32.0;
+        let lists_h = work_list_height(available, 300.0);
+        assert!(lists_h < available, "the form must have a visible viewport");
+        assert_eq!(lists_h, 16.0);
+        assert_eq!(work_list_height(0.0, 300.0), 0.0);
+        assert_eq!(work_list_height(600.0, 300.0), 300.0);
+        assert_eq!(work_list_height(150.0, 410.0), 60.0);
+    }
+
+    #[test]
+    fn short_work_form_scrolls_to_its_last_control() {
+        egui::__run_test_ui(|ui| {
+            let output = work_form_scroll(1, 16.0).vertical_scroll_offset(410.0).show(ui, |ui| {
+                ui.add_space(400.0);
+                ui.allocate_exact_size(vec2(100.0, 40.0), Sense::click()).0
+            });
+            assert!(output.inner_rect.height() <= 16.0);
+            assert!(output.state.clamped_offset().y > 0.0);
+            assert!(output.inner.intersects(output.inner_rect));
+        });
+    }
 
     #[test]
     fn coauthor_trailers() {
