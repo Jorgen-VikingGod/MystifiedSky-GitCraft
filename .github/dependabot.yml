@@ -4,7 +4,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      cargo-patches:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      action-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
