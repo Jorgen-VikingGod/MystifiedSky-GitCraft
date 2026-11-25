@@ -1299,6 +1299,11 @@ impl App {
     /// Start a pull request from `branch`: a template, the target, title and description, and
     /// pushing the branch first when the remote doesn't have it.
     pub(crate) fn start_pull_request(&mut self, tab: u64, branch: &str) {
+        self.start_pull_request_into(tab, branch, None);
+    }
+
+    /// Start a pull request from `branch`, into `into` when given (else the default or the stacked-on branch).
+    pub(crate) fn start_pull_request_into(&mut self, tab: u64, branch: &str, into: Option<String>) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let branch = branch.to_owned();
         let gitlab = self.gitlab();
@@ -1322,8 +1327,8 @@ impl App {
                 // The nearest: the one with the fewest commits between it and this branch.
                 .min_by_key(|pr| gitcraft_core::git::run(dir, &["rev-list", "--count", &format!("{}..{branch}", pr.source_sha)]).stdout.trim().parse::<u64>().unwrap_or(u64::MAX))
                 .cloned();
-            let target = below.as_ref().map(|pr| pr.source.clone()).or(target);
-            let stack = below.map(|pr| format!("This pull request stacks on #{} ({}), so it targets {}.", pr.number, pr.title, pr.source));
+            let stack = if into.is_some() { None } else { below.as_ref().map(|pr| format!("This pull request stacks on #{} ({}), so it targets {}.", pr.number, pr.title, pr.source)) };
+            let target = into.or_else(|| below.as_ref().map(|pr| pr.source.clone())).or(target);
             let stack_key = (tab, branch.clone());
             super::Msg::Apply(Box::new(move |app: &mut App| {
                 app.pr_stack = stack.map(|note| (stack_key.0, stack_key.1, note));

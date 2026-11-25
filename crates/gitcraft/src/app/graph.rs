@@ -369,6 +369,16 @@ impl App {
         let c = p();
         let path = v.path.clone();
         let cols: Columns = self.settings.get("columns").unwrap_or_default();
+        // The branch being dragged follows the pointer.
+        if let Some(dragged) = egui::DragAndDrop::payload::<GitRef>(ui.ctx())
+            && let Some(at) = ui.ctx().pointer_latest_pos()
+        {
+            let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::NULL.with("dragged_ref")));
+            let g = layer.layout_no_wrap(dragged.name.clone(), FontId::proportional(12.5), c.white(1.0));
+            let r = Rect::from_min_size(at + vec2(14.0, 6.0), g.size() + vec2(14.0, 6.0));
+            layer.rect_filled(r, CornerRadius::same(3), ACCENT.gamma_multiply(0.85));
+            layer.galley(r.min + vec2(7.0, 3.0), g, c.white(1.0));
+        }
         let widths: HashMap<String, f32> = self.settings.get("graphColumnWidths").unwrap_or_default();
         let lazy = self.settings.flag("lazyLoad", true);
         let ghost_on = self.settings.flag("ghostRefs", true);
@@ -855,7 +865,21 @@ impl App {
                         let more_w = if more > 0 { 5.0 + 8.0 + format!("+{more}").len() as f32 * 6.5 } else { 0.0 };
                         let max_w = (zone.width() - REF_MARGIN - 6.0 - more_w).max(20.0);
                         let fill = widgets::mix(color, 0.28);
-                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), Sense::click());
+                        // Branch labels can be dragged onto another branch label: merge, rebase, fast-forward, push or
+                        // start a pull request (see `ref_dropped`).
+                        let draggable = first.kind != RefKind::Tag;
+                        let (label_rect, lresp) = ref_label(ui, &painter, pos2(end_x, rect.center().y), max_w, first, remote, v, fill, fade, ui.scope_id().with(("ref", tab, &first.full)), if draggable { Sense::click_and_drag() } else { Sense::click() });
+                        if draggable && lresp.drag_started() {
+                            lresp.dnd_set_drag_payload(first.clone());
+                        }
+                        if let Some(source) = lresp.dnd_hover_payload::<GitRef>().filter(|s| s.full != first.full && first.kind != RefKind::Tag) {
+                            let _ = source;
+                            painter.rect_stroke(label_rect.expand(2.0), CornerRadius::same(4), Stroke::new(2.0, ACCENT), StrokeKind::Outside);
+                        }
+                        if let Some(source) = lresp.dnd_release_payload::<GitRef>().filter(|s| s.full != first.full && first.kind != RefKind::Tag) {
+                            let (source, target) = ((*source).clone(), first.clone());
+                            later.push(Box::new(move |app| app.ref_dropped(tab, source, target)));
+                        }
                         end_x = label_rect.right();
                         if lresp.hovered() {
                             new_hover_ref = Some((i, first.kind == RefKind::Tag));

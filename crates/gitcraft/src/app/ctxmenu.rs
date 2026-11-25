@@ -147,6 +147,42 @@ impl App {
         self.per_repo("solo", path)
     }
 
+    /// A branch label was dropped on another in the graph: offer what can be done with the two.
+    pub(crate) fn ref_dropped(&mut self, tab: u64, source: GitRef, target: GitRef) {
+        let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
+        let head = v.data.head_branch.clone();
+        let is_head = |r: &GitRef| r.kind == RefKind::Local && Some(&r.name) == head.as_ref();
+        let (s, t) = (source.name.clone(), target.name.clone());
+        let mut choices: Vec<(String, Action)> = Vec::new();
+        if is_head(&target) {
+            choices.push((format!("Merge {s} into {t}"), Action::Merge { branch: s.clone() }));
+        }
+        if is_head(&source) {
+            choices.push((format!("Rebase {s} onto {t}"), Action::Rebase { onto: t.clone() }));
+            choices.push((format!("Merge {t} into {s}"), Action::Merge { branch: t.clone() }));
+        }
+        if target.kind == RefKind::Local && target.sha != source.sha && is_loaded_ancestor(v, &target.sha, &source.sha) {
+            choices.push((format!("Fast-forward {t} to {s}"), Action::FastForward { branch: t.clone(), to: s.clone() }));
+        }
+        if source.kind == RefKind::Local && target.kind == RefKind::Remote {
+            choices.push((format!("Push {s}"), Action::PushBranch { branch: s.clone() }));
+        }
+        let pull_request = source.kind == RefKind::Local && target.kind != RefKind::Tag;
+        if choices.is_empty() && !pull_request {
+            return self.toast(false, format!("Check out {t} or {s} first to merge or rebase them."));
+        }
+        let mut d = super::dialogs::Dialog::new(&format!("{s} → {t}"), super::dialogs::Body::Text(format!("What should GitCraft do with {s} and {t}?"))).cancel_label("Cancel");
+        for (label, action) in choices {
+            d = d.choice(&label, super::widgets::Kind::Default, move |app, _| app.act(tab, action));
+        }
+        if pull_request {
+            // Into the target's own branch name (a remote branch's name without its remote).
+            let into = if target.kind == RefKind::Remote { split_remote(v, &t).map_or(t.clone(), |(_, b)| b) } else { t.clone() };
+            d = d.choice(&format!("Start a pull request from {s} into {into}"), super::widgets::Kind::Primary, move |app, _| app.start_pull_request_into(tab, &s, Some(into)));
+        }
+        self.dialog = Some(d);
+    }
+
     pub(crate) fn pinned_ref(&self, path: &str) -> Option<String> {
         self.settings.get::<std::collections::HashMap<String, String>>("pinned").and_then(|m| m.get(path).cloned())
     }
