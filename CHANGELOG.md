@@ -6,6 +6,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Start an agent session in a new worktree with one click, or from an issue's menu with a branch named after it. Cursor CLI is available as a coding agent. New worktrees keep the hidden, soloed and pinned branches of the repository they came from.
+- Explain your working changes with AI from the commit panel. The last five commit and branch explanations are kept, so opening one again needs no new request (Explain Again asks anew).
 - Restore a file from any commit by right-clicking it in the commit. Its current changes are kept as a backup you can restore from Actions. File View shows Markdown files rendered, with a button to switch between the preview and the code.
 - GitCraft tells you when the system stops sending file change events, since changes made outside it may then not show until you refresh. Long choices in dialog lists show their full text on hover.
 - The command palette offers "Open Repo in …" for every editor installed on this computer. Repository Management has resizable Repository, Location and Upstream columns that stay as you leave them. Choose a zoom level from the status bar.

@@ -170,6 +170,22 @@ impl App {
         self.load_repo(tab);
     }
 
+    /// Copy a repository's hidden, soloed and pinned refs to another folder (a new worktree of it).
+    pub(crate) fn inherit_view(&mut self, source: &str, target: &str) {
+        for key in ["hidden", "solo"] {
+            let mut all: HashMap<String, Vec<String>> = self.settings.get(key).unwrap_or_default();
+            if let Some(list) = all.get(source).cloned().filter(|l| !l.is_empty()) {
+                all.insert(target.to_owned(), list);
+                self.settings.set(key, all);
+            }
+        }
+        let mut pinned: HashMap<String, String> = self.settings.get("pinned").unwrap_or_default();
+        if let Some(p) = pinned.get(source).cloned() {
+            pinned.insert(target.to_owned(), p);
+            self.settings.set("pinned", pinned);
+        }
+    }
+
     pub(crate) fn toggle_pinned(&mut self, tab: u64, full: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let mut all: HashMap<String, String> = self.settings.get("pinned").unwrap_or_default();
@@ -461,7 +477,12 @@ impl App {
                     None => Path::new(path).to_path_buf(),
                 };
                 if folder.is_dir() {
-                    self.open_repo(&folder.to_string_lossy());
+                    let folder = folder.to_string_lossy().into_owned();
+                    // The new worktree starts with the source repository's view: hidden, soloed and pinned refs.
+                    if let Some(source) = self.repo(tab).map(|r| r.path.clone()) {
+                        self.inherit_view(&source, &folder);
+                    }
+                    self.open_repo(&folder);
                 }
             }
             Action::WorktreeRemove { path, .. } => {

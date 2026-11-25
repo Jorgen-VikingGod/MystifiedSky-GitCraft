@@ -14,7 +14,8 @@ use std::path::Path;
 pub enum AiOutput {
     CommitMessage { path: String, before: super::repo::Draft, summary: String, description: String },
     StashTitle { tab: u64, before: String, text: String },
-    Explain { title: String, text: String },
+    /// `key` names what was explained (a commit, or a branch at its tip) for the recent explanations kept.
+    Explain { key: Option<String>, title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
     Merge { tab: u64, file: String, editor: u64, revision: u64, text: String },
     PullText { tab: u64, request: u64, title: String, body: String },
@@ -117,8 +118,14 @@ impl App {
                     }));
                 }
             }
-            AiOutput::Explain { title, text } => {
+            AiOutput::Explain { key, title, text } => {
                 let text = format!("{text}\n\nGenerated using your selected AI connection. Review the result before using it.");
+                // The last few explanations are kept, so asking again shows them without another request.
+                if let Some(key) = key {
+                    self.explanations.retain(|(k, ..)| *k != key);
+                    self.explanations.push_front((key, title.clone(), text.clone()));
+                    self.explanations.truncate(5);
+                }
                 self.dialog = Some(Dialog::info(&title, &text));
             }
             AiOutput::Compose { tab, commits } => {
@@ -207,20 +214,57 @@ impl App {
         self.with_reviewed(tab, Reviewed::Compose);
     }
 
+    /// A kept explanation for `key`, shown with Explain Again (which asks the AI anew). Returns whether one was kept.
+    fn cached_explanation(&mut self, key: &str, again: impl FnOnce(&mut App) + 'static) -> bool {
+        let Some((_, title, text)) = self.explanations.iter().find(|(k, ..)| k == key).cloned() else { return false };
+        self.dialog = Some(Dialog::confirm_with(&title, &text, "Explain Again", false, move |app, _| again(app)).cancel_label("Close"));
+        true
+    }
+
     pub(crate) fn explain_commit(&mut self, tab: u64, sha: &str, summary: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        let (sha, title) = (sha.to_owned(), format!("Explain: {summary}"));
-        self.ai_run("Explaining the commit…", move || Ok(AiOutput::Explain { title, text: ai::explain_commit(Path::new(&path), &sha)? }));
+        let key = format!("commit:{path}:{sha}");
+        let (s2, summary2, k2) = (sha.to_owned(), summary.to_owned(), key.clone());
+        if self.cached_explanation(&key, move |app| app.explain_now(tab, k2, ExplainWhat::Commit(s2, summary2))) {
+            return;
+        }
+        self.explain_now(tab, key, ExplainWhat::Commit(sha.to_owned(), summary.to_owned()));
     }
 
     pub(crate) fn explain_branch(&mut self, tab: u64, branch: &str) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
-        let (b, title) = (branch.to_owned(), format!("What {branch} changes"));
-        self.ai_run(&format!("Explaining {branch}…"), move || {
-            let dir = Path::new(&path);
-            let base = gitcraft_core::extras::default_target(dir).ok_or("No branch to compare with")?;
-            Ok(AiOutput::Explain { title, text: ai::explain_branch(dir, &b, &base)? })
-        });
+        // Kept by the branch's tip, so a branch that moved is explained again.
+        let tip = self.repo(tab).and_then(|r| r.view.as_ref()).and_then(|v| v.data.refs.iter().find(|r| r.name == branch).map(|r| r.sha.clone())).unwrap_or_default();
+        let key = format!("branch:{path}:{branch}:{tip}");
+        let (b2, k2) = (branch.to_owned(), key.clone());
+        if self.cached_explanation(&key, move |app| app.explain_now(tab, k2, ExplainWhat::Branch(b2))) {
+            return;
+        }
+        self.explain_now(tab, key, ExplainWhat::Branch(branch.to_owned()));
+    }
+
+    fn explain_now(&mut self, tab: u64, key: String, what: ExplainWhat) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        match what {
+            ExplainWhat::Commit(sha, summary) => {
+                let title = format!("Explain: {summary}");
+                self.ai_run("Explaining the commit…", move || Ok(AiOutput::Explain { key: Some(key), title, text: ai::explain_commit(Path::new(&path), &sha)? }));
+            }
+            ExplainWhat::Branch(branch) => {
+                let title = format!("What {branch} changes");
+                self.ai_run(&format!("Explaining {branch}…"), move || {
+                    let dir = Path::new(&path);
+                    let base = gitcraft_core::extras::default_target(dir).ok_or("No branch to compare with")?;
+                    Ok(AiOutput::Explain { key: Some(key), title, text: ai::explain_branch(dir, &branch, &base)? })
+                });
+            }
+        }
+    }
+
+    /// Explain the uncommitted changes. Not kept: they change as you work.
+    pub(crate) fn explain_working(&mut self, tab: u64) {
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        self.ai_run("Explaining the working changes…", move || Ok(AiOutput::Explain { key: None, title: "Explain working changes".into(), text: ai::explain_working(Path::new(&path))? }));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -238,4 +282,10 @@ impl App {
             Ok(AiOutput::PullText { tab, request, title, body })
         });
     }
+}
+
+/// What an explanation is of.
+enum ExplainWhat {
+    Commit(String, String),
+    Branch(String),
 }

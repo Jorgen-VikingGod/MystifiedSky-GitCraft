@@ -373,8 +373,10 @@ impl App {
                 let sl = service_label;
                 ctxmenu::attach(&resp, later, || {
                     let id2 = id.clone();
+                    let (number, title) = (if s(&issue, "key").is_empty() { issue["number"].as_u64().unwrap_or(0).to_string() } else { s(&issue, "key") }, s(&issue, "title"));
                     vec![
                         item("View issue", move |app| app.open_issue(tab, &id2)),
+                        item("Start an Agent Session", move |app| app.start_agent_for_issue(tab, &number, &title)),
                         item("Create branch for this issue", move |app| app.branch_from_issue(tab, &issue)),
                         item(format!("View issue in {sl}"), move |app| app.open_url(&url)),
                     ]
@@ -1219,6 +1221,11 @@ impl App {
                 if widgets::small(ui, Kind::Primary, "Create branch for this issue").clicked() {
                     let i2 = issue.clone();
                     later.push(Box::new(move |app| app.branch_from_issue(tab, &i2)));
+                }
+                if widgets::small(ui, Kind::Default, "Start an Agent Session").clicked() {
+                    let number = if s(&issue, "key").is_empty() { issue["number"].as_u64().unwrap_or(0).to_string() } else { s(&issue, "key") };
+                    let title = s(&issue, "title");
+                    later.push(Box::new(move |app| app.start_agent_for_issue(tab, &number, &title)));
                 }
                 ui.add_space(8.0);
                 egui::Frame::new().fill(c.panel).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(4)).inner_margin(egui::Margin::same(12)).show(ui, |ui| {

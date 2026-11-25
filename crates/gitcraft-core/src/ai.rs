@@ -414,6 +414,16 @@ pub fn explain_commit(dir: &Path, sha: &str) -> Result<String, String> {
     explain(format!("Explain this commit:\n{}\n{diff}", metadata.stdout))
 }
 
+/// Explain the uncommitted changes to tracked files (staged and not).
+pub fn explain_working(dir: &Path) -> Result<String, String> {
+    let has_head = git::run(dir, &["rev-parse", "--verify", "-q", "HEAD"]).ok;
+    let diff = if has_head { crate::ai_context::diff(dir, &["diff", "HEAD"])? } else { crate::ai_context::diff(dir, &["diff", "--cached"])? };
+    if diff.trim().is_empty() {
+        return Err("There are no changes to tracked files to explain.".into());
+    }
+    explain(format!("Explain these uncommitted changes in the working folder (not yet committed):\n{diff}"))
+}
+
 /// Explain what a branch adds compared with another (usually the main branch).
 pub fn explain_branch(dir: &Path, branch: &str, base: &str) -> Result<String, String> {
     let log = git::run(dir, &["log", "--format=- %s", &format!("{base}..{branch}")]).stdout;

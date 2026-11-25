@@ -649,6 +649,9 @@ impl App {
                             if widgets::button(ui, Kind::Ai, Some(Icon::Sparkles), "Compose with AI", 24.0, true).tip("Split your changes into focused commits with AI").clicked() {
                                 later.push(Box::new(move |app| app.compose_commits(tab)));
                             }
+                            if Self::ai_button(ui, "Explain the working changes with AI").clicked() {
+                                later.push(Box::new(move |app| app.explain_working(tab)));
+                            }
                         });
                     });
                     if wu.options_open {

@@ -67,7 +67,7 @@ pub enum Pending {
 }
 
 const EDITORS: [(&str, &str); 11] = super::external_tools::EDITORS;
-const AGENTS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("none", "None")];
+const AGENTS: [(&str, &str); 7] = [("claude", "Claude Code"), ("codex", "Codex"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("cursor", "Cursor CLI"), ("none", "None")];
 const DIFF_TOOLS: [&str; 19] = ["vscode", "meld", "kdiff3", "bc", "p4merge", "winmerge", "tortoisemerge", "vimdiff", "araxis", "deltawalker", "diffmerge", "ecmerge", "emerge", "examdiff", "guiffy", "opendiff", "smerge", "tkdiff", "xxdiff"];
 const MONO_FONTS: [&str; 11] = ["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New", "Fira Code", "JetBrains Mono", "Lucida Console", "Menlo", "Monaco", "Source Code Pro", "Ubuntu Mono"];
 const OTHER_FONTS: [&str; 6] = ["Arial", "Calibri", "Open Sans", "Segoe UI", "Tahoma", "Verdana"];

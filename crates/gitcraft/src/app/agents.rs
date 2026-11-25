@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub const AGENT_LABEL: [(&str, &str); 5] = [("claude", "Claude Code"), ("codex", "Codex CLI"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI")];
+pub const AGENT_LABEL: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex CLI"), ("copilot", "Copilot CLI"), ("opencode", "OpenCode"), ("gemini", "Gemini CLI"), ("cursor", "Cursor CLI")];
 
 pub fn agent_label(agent: &str) -> Option<&'static str> {
     AGENT_LABEL.iter().find(|(k, _)| *k == agent).map(|(_, l)| *l)
@@ -57,6 +57,8 @@ fn connection(ai: &Value, agent: &str) -> Option<Value> {
 /// shell-quoted; the folder is handed to the terminal, never typed as `cd`.
 pub fn agent_launch(ai: &Value, shell: &str, args: &str, agent: &str, resume: Option<&str>) -> Result<(String, HashMap<String, String>), String> {
     let program = AGENT_LABEL.iter().find(|(k, _)| *k == agent).map(|(k, _)| *k).ok_or("Choose a coding agent in Preferences > External Tools.")?;
+    // Cursor's CLI is installed as cursor-agent.
+    let program = if program == "cursor" { "cursor-agent" } else { program };
     if let Some(id) = resume
         && (id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
     {
@@ -137,37 +139,69 @@ impl App {
             self.open_prefs(Some("tools"));
             return;
         }
-        let Some((path, name)) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| (v.path.clone(), v.name.clone())) else { return };
+        let Some(path) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| v.path.clone()) else { return };
         if !worktree {
             self.launch_agent(tab, &path, &agent, None, &[]);
             return;
         }
-        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let d = Dialog::prompt("Start an agent session in a new worktree", "New branch name", &format!("agent/{stamp}"), "Start", move |app, v| {
+        let d = Dialog::prompt("Start an agent session in a new worktree", "New branch name", &default_agent_branch(), "Start", move |app, v| {
             let branch = v.text("value").trim().to_owned();
-            let repo = std::path::Path::new(&path);
-            let repo_name = repo.file_name().map_or_else(|| name.clone(), |n| n.to_string_lossy().into_owned());
-            let safe: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '-' }).collect();
-            let sibling = format!("{repo_name}-{safe}");
-            let folder = repo.parent().map_or_else(|| std::path::PathBuf::from(&sibling), |p| p.join(&sibling)).to_string_lossy().into_owned();
-            let setup: Vec<String> = app.settings.string("agentSetup", "").lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
-            let engine = app.engine.clone();
-            let (p2, f2) = (path.clone(), folder.clone());
-            app.busy = Some("Adding worktree…".into());
-            app.spawn(move || {
-                let r = engine.perform(&p2, Action::WorktreeAdd { path: f2, branch, new_branch: true, start: None });
-                super::Msg::Apply(Box::new(move |app: &mut App| {
-                    app.busy = None;
-                    if r.ok {
-                        app.load_repo(tab);
-                        app.launch_agent(tab, &folder, &agent, None, &setup);
-                    } else {
-                        app.toast(false, r.message);
-                    }
-                }))
-            });
+            app.start_agent_in_worktree(tab, branch);
         });
         self.dialog = Some(d);
+    }
+
+    /// New Agent Session in one click: a new worktree on a generated branch, with the preferred agent.
+    pub(crate) fn start_agent_now(&mut self, tab: u64) {
+        if agent_label(&self.settings.string("codingAgent", "claude")).is_none() {
+            self.open_prefs(Some("tools"));
+            return;
+        }
+        self.start_agent_in_worktree(tab, default_agent_branch());
+    }
+
+    /// Start an agent session for an issue: a worktree on a branch named after it.
+    pub(crate) fn start_agent_for_issue(&mut self, tab: u64, number: &str, title: &str) {
+        let slug: String = title.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|p| !p.is_empty()).take(6).collect::<Vec<_>>().join("-");
+        let number = number.trim_start_matches('#');
+        let suggested = if slug.is_empty() { format!("issue/{number}") } else { format!("issue/{number}-{slug}") };
+        let d = Dialog::prompt("Start an agent session for this issue", "New branch name", &suggested, "Start", move |app, v| {
+            let branch = v.text("value").trim().to_owned();
+            app.start_agent_in_worktree(tab, branch);
+        });
+        self.dialog = Some(d);
+    }
+
+    /// A new worktree beside the repository on `branch` (created from HEAD), the setup commands, then the agent.
+    fn start_agent_in_worktree(&mut self, tab: u64, branch: String) {
+        let agent = self.settings.string("codingAgent", "claude");
+        let Some((path, name)) = self.repo(tab).and_then(|r| r.view.as_ref()).map(|v| (v.path.clone(), v.name.clone())) else { return };
+        if branch.is_empty() {
+            return;
+        }
+        let repo = std::path::Path::new(&path);
+        let repo_name = repo.file_name().map_or_else(|| name.clone(), |n| n.to_string_lossy().into_owned());
+        let safe: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '-' }).collect();
+        let sibling = format!("{repo_name}-{safe}");
+        let folder = repo.parent().map_or_else(|| std::path::PathBuf::from(&sibling), |p| p.join(&sibling)).to_string_lossy().into_owned();
+        let setup: Vec<String> = self.settings.string("agentSetup", "").lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
+        let engine = self.engine.clone();
+        let (p2, f2) = (path.clone(), folder.clone());
+        self.busy = Some("Adding worktree…".into());
+        self.spawn(move || {
+            let r = engine.perform(&p2, Action::WorktreeAdd { path: f2, branch, new_branch: true, start: None });
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.busy = None;
+                if r.ok {
+                    // The new worktree starts with this repository's view settings.
+                    app.inherit_view(&path, &folder);
+                    app.load_repo(tab);
+                    app.launch_agent(tab, &folder, &agent, None, &setup);
+                } else {
+                    app.toast(false, r.message);
+                }
+            }))
+        });
     }
 
     fn want_agent_sessions(&mut self, tab: u64, roots: Vec<String>, key: String) {
@@ -341,7 +375,10 @@ impl App {
                     later.push(Box::new(move |app| app.start_agent(tab, false)));
                 }
                 egui::Popup::menu(&mo).show(|ui| {
-                    let mut entries = vec![item("Start in new worktree…", move |app| app.start_agent(tab, true))];
+                    let mut entries = vec![
+                        item("Start in a new worktree now", move |app| app.start_agent_now(tab)),
+                        item("Start in new worktree…", move |app| app.start_agent(tab, true)),
+                    ];
                     entries.extend(agent_items());
                     ctxmenu::show(ui, entries, later);
                 });
@@ -573,4 +610,9 @@ mod tests {
         assert_eq!(cmd, "claude --flag");
         assert!(agent_launch(&serde_json::json!({}), "bash", "", "claude", Some("x; rm")).is_err());
     }
+}
+
+/// A branch name for a new agent session: `agent/` and the time.
+fn default_agent_branch() -> String {
+    format!("agent/{}", chrono::Utc::now().format("%Y%m%dT%H%M%S"))
 }

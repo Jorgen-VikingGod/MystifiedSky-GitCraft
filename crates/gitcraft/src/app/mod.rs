@@ -244,6 +244,8 @@ pub struct App {
     /// AI requests in flight (their read ids, for Stop AI).
     pub(crate) ai_reads: Vec<String>,
     pub(crate) ai_label: Option<String>,
+    /// The last few AI explanations (what was explained, title, text), newest first.
+    pub(crate) explanations: std::collections::VecDeque<(String, String, String)>,
     /// The preferences revision the backend last heard about.
     pub(crate) synced: u64,
     pub(crate) prefs: Option<prefs_ui::PrefsUi>,
@@ -331,6 +333,7 @@ impl App {
             ai_requests: 0,
             ai_reads: Vec::new(),
             ai_label: None,
+            explanations: Default::default(),
             synced: 0,
             prefs: None,
             prefs_data: Default::default(),
