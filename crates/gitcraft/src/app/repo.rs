@@ -775,9 +775,6 @@ impl App {
         let stashed = matches!(action, Action::Checkout { .. } | Action::CheckoutRemote { .. }) && (result.message.contains("Your local changes are saved in the stash") || result.message.contains("Discarded changes."));
         if !handled && (!result.ok || (!quiet && (notify || stashed))) {
             self.toast(result.ok, result.message.clone());
-            if !result.ok {
-                self.notify(&result.message);
-            }
         }
         let light = index_only(&action) && result.ok;
         let Some(r) = self.repo_mut(tab) else { return };

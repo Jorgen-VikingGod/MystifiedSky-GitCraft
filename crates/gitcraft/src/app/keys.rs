@@ -126,6 +126,7 @@ pub const COMMANDS: &[Command] = &[
     inputs(c("nav:newTab", "New Tab", N, &["Ctrl+T"], false)),
     inputs(c("nav:closeTab", "Close Tab", N, &["Ctrl+W"], false)),
     inputs(c("nav:reopenTab", "Reopen Closed Tab", N, &["Ctrl+Shift+T"], false)),
+    inputs(c("nav:tabsList", "Open Tabs List", N, &["Ctrl+Shift+A"], false)),
     mac(inputs(c("nav:nextTab", "Jump to the next open tab", N, &["Ctrl+Tab"], false)), &["Ctrl+Tab", "Meta+Shift+]"]),
     mac(inputs(c("nav:prevTab", "Jump to the previous open tab", N, &["Ctrl+Shift+Tab"], false)), &["Ctrl+Shift+Tab", "Meta+Shift+["]),
     words(inputs(c("nav:moveTabLeft", "Move Tab Left", N, &["Ctrl+Shift+PageUp"], false)), "reorder rearrange"),
@@ -319,6 +320,11 @@ impl App {
             "nav:newTab" => self.new_tab(),
             "nav:closeTab" => self.close_tab(self.active),
             "nav:reopenTab" => self.reopen_tab(),
+            "nav:tabsList" => {
+                if self.dialog.is_none() {
+                    egui::Popup::toggle_id(&self.ctx, super::tabs::tabs_list_id());
+                }
+            }
             "nav:nextTab" => self.cycle_tab(1),
             "nav:prevTab" => self.cycle_tab(-1),
             "nav:moveTabLeft" => self.shift_tab(self.active, -1),

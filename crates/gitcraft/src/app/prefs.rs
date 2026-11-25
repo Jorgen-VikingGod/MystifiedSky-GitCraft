@@ -6,6 +6,46 @@ use super::theme::{WARN, p};
 use super::widgets::Tip;
 use super::widgets;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum NoticeFilter {
+    #[default]
+    All,
+    Read,
+    Unread,
+}
+
+impl NoticeFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Read => "Read",
+            Self::Unread => "Unread",
+        }
+    }
+
+    fn matches(self, read: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Read => read,
+            Self::Unread => !read,
+        }
+    }
+
+    fn empty_message(self) -> &'static str {
+        match self {
+            Self::All => "You have no notifications",
+            Self::Read => "You have no read notifications",
+            Self::Unread => "You have no unread notifications",
+        }
+    }
+
+    fn mark_all(self, notices: &mut [super::Notice], read: bool) {
+        for notice in notices.iter_mut().filter(|notice| self.matches(notice.read)) {
+            notice.read = read;
+        }
+    }
+}
+
 impl App {
     /// Tell the backend the preferences that change how it works: the Git program, SSH, logging,
     /// encodings, the services and AI. Runs when the preferences changed.
@@ -142,23 +182,80 @@ impl App {
         let ws: Vec<serde_json::Value> = self.settings.get("workspaces").unwrap_or_default();
         let Some(w) = ws.get(index) else { return };
         let repos: Vec<String> = w["repos"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-        for r in repos {
-            self.open_repo_checked(&r);
-        }
+        self.spawn(move || {
+            let checked: Vec<_> = repos.into_iter().map(|path| {
+                gitcraft_core::git::repo_root(std::path::Path::new(&path))
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .ok_or_else(|| format!("{path} is not a Git repository"))
+            }).collect();
+            super::Msg::Apply(Box::new(move |app| {
+                for repo in checked {
+                    match repo {
+                        Ok(path) => app.open_repo(&path),
+                        Err(error) => app.toast(false, error),
+                    }
+                }
+            }))
+        });
     }
 
     pub(crate) fn workspaces_dialog(&mut self) {
         use super::dialogs::{Body, Dialog};
-        let ws: Vec<serde_json::Value> = self.settings.get("workspaces").unwrap_or_default();
-        let rows = ws.iter().map(|w| (w["name"].as_str().unwrap_or("Workspace").to_owned(), format!("{} repositories", w["repos"].as_array().map_or(0, Vec::len)))).collect();
-        let on_pick = std::rc::Rc::new(|app: &mut App, i: usize| {
-            app.dialog = None;
-            app.open_workspace(i);
-        });
-        let d = Dialog::new("Workspaces", Body::Pick { hint: "Filter workspaces".into(), filter: String::new(), rows, button: "Open all".into(), on_pick })
+        use super::widgets::Kind;
+        let mut filter = String::new();
+        let draw = move |app: &mut App, ui: &mut egui::Ui| {
+            let mut workspaces: Vec<serde_json::Value> = app.settings.get("workspaces").unwrap_or_default();
+            widgets::field(ui, &mut filter, "Filter workspaces", ui.available_width(), 30.0, 13.0);
+            ui.add_space(8.0);
+            if workspaces.is_empty() {
+                ui.label("No workspaces yet.");
+            }
+            let query = filter.trim().to_lowercase();
+            let mut any_shown = false;
+            let mut deleted = None;
+            for (index, workspace) in workspaces.iter().enumerate() {
+                let name = workspace["name"].as_str().unwrap_or("Workspace");
+                if !name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                any_shown = true;
+                let count = workspace["repos"].as_array().map_or(0, Vec::len);
+                let mut open = false;
+                ui.push_id(index, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_height(34.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if widgets::button(ui, Kind::Danger, None, "Delete", 26.0, true)
+                                .tip(format!("Delete the {name} workspace")).clicked()
+                            {
+                                deleted = Some(index);
+                            }
+                            open = widgets::button(ui, Kind::Primary, None, "Open all", 26.0, true)
+                                .tip(format!("Open repositories in {name}")).clicked();
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(format!("{name} · {count} repositories")).truncate());
+                            });
+                        });
+                    });
+                    ui.separator();
+                });
+                if open {
+                    app.open_workspace(index);
+                    return true;
+                }
+            }
+            if let Some(index) = deleted {
+                workspaces.remove(index);
+                app.settings.set("workspaces", workspaces);
+            } else if !workspaces.is_empty() && !any_shown {
+                ui.label("No matching workspaces.");
+            }
+            false
+        };
+        let d = Dialog::new("Workspaces", Body::Custom(Box::new(draw)))
             .width(560.0)
             .cancel_label("Close")
-            .choice("New workspace…", super::widgets::Kind::Primary, |app, _| app.new_workspace_dialog());
+            .choice("New workspace…", Kind::Primary, |app, _| app.new_workspace_dialog());
         self.dialog = Some(d);
     }
 
@@ -166,11 +263,14 @@ impl App {
         use super::dialogs::{Dialog, Field, FieldKind};
         let mut candidates: Vec<String> = self.tabs.iter().filter_map(|t| t.path().map(str::to_owned)).collect();
         for r in self.settings.recents() {
-            if !candidates.contains(&r) {
+            if !candidates.iter().any(|path| super::same_folder(path, &r)) {
                 candidates.push(r);
             }
         }
         let mut fields = vec![Field::new("name", "Workspace name", FieldKind::Text)];
+        if candidates.is_empty() {
+            fields.push(Field::new("", "Open some repositories first.", FieldKind::Note));
+        }
         for (i, c) in candidates.iter().enumerate() {
             fields.push(Field::new(&format!("repo{i}"), c, FieldKind::Check));
         }
@@ -180,6 +280,7 @@ impl App {
             let mut ws: Vec<serde_json::Value> = app.settings.get("workspaces").unwrap_or_default();
             ws.push(serde_json::json!({"id": format!("w{}", chrono::Local::now().timestamp_millis()), "name": v.text("name").trim(), "repos": repos}));
             app.settings.set("workspaces", ws);
+            app.workspaces_dialog();
         })
         .checked(move |v| (v.text("name").trim().is_empty() || !(0..candidates.len()).any(|i| v.flag(&format!("repo{i}")))).then(String::new));
         self.dialog = Some(d);
@@ -300,18 +401,17 @@ impl App {
     /// `drops` gets the rectangles of its open drop-downs; `close` is set to close the menu.
     fn notification_menu(&mut self, ui: &mut egui::Ui, drops: &mut Vec<egui::Rect>, close: &mut bool) {
         let c = p();
-        ui.set_width(340.0);
+        ui.set_width((ui.ctx().content_rect().width() - 24.0).min(340.0));
         let filter_id = egui::Id::NULL.with("notice_filter");
-        let mut filter: u8 = ui.data(|d| d.get_temp(filter_id)).unwrap_or(0);
+        let mut filter: NoticeFilter = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Notifications").font(super::fonts::semibold(13.0)).color(c.fg));
             ui.add_space(8.0);
-            let names = ["All", "Read", "Unread"];
-            let pick = ui.add(egui::Button::new(egui::RichText::new(format!("{} ▾", names[filter as usize])).size(12.5).color(c.white(0.8))).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, c.white(0.15))).min_size(egui::vec2(0.0, 22.0))).tip("Filter notifications");
+            let pick = ui.add(egui::Button::new(egui::RichText::new(format!("{} ▾", filter.label())).size(12.5).color(c.white(0.8))).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, c.white(0.15))).min_size(egui::vec2(0.0, 22.0))).tip("Filter notifications");
             let drop = egui::Popup::menu(&pick).show(|ui| {
-                for (i, n) in names.iter().enumerate() {
-                    if ui.button(egui::RichText::new(format!("{}{n}", if filter as usize == i { "✓ " } else { "   " })).size(13.0)).clicked() {
-                        filter = i as u8;
+                for choice in [NoticeFilter::All, NoticeFilter::Read, NoticeFilter::Unread] {
+                    if ui.selectable_label(choice == filter, choice.label()).clicked() {
+                        filter = choice;
                     }
                 }
             });
@@ -319,11 +419,13 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let more = ui.add(egui::Button::new(egui::RichText::new("⋮").size(15.0).color(c.white(0.7))).frame_when_inactive(false).min_size(egui::vec2(22.0, 22.0))).tip("Notification options");
                 let drop = egui::Popup::menu(&more).align(egui::RectAlign::BOTTOM_END).show(|ui| {
-                    if ui.add_enabled(self.notices.iter().any(|n| !n.read), egui::Button::new("Mark all as read")).clicked() {
-                        self.notices.iter_mut().for_each(|n| n.read = true);
+                    let any_unread = filter.matches(false) && self.notices.iter().any(|n| !n.read);
+                    let any_read = filter.matches(true) && self.notices.iter().any(|n| n.read);
+                    if ui.add_enabled(any_unread, egui::Button::new("Mark all as read")).clicked() {
+                        filter.mark_all(&mut self.notices, true);
                     }
-                    if ui.add_enabled(self.notices.iter().any(|n| n.read), egui::Button::new("Mark all as unread")).clicked() {
-                        self.notices.iter_mut().for_each(|n| n.read = false);
+                    if ui.add_enabled(any_read, egui::Button::new("Mark all as unread")).clicked() {
+                        filter.mark_all(&mut self.notices, false);
                     }
                     if ui.button("Notification Settings").clicked() {
                         self.open_prefs(Some("notifications"));
@@ -336,7 +438,7 @@ impl App {
         ui.data_mut(|d| d.insert_temp(filter_id, filter));
         ui.separator();
         // The update, above the notifications while one is downloading or ready to install.
-        let update_row = self.update_row() && filter != 1;
+        let update_row = self.update_row() && filter.matches(false);
         if update_row {
             let ready = self.update.phase == super::updater::Phase::Ready;
             ui.horizontal(|ui| {
@@ -355,17 +457,12 @@ impl App {
             });
             ui.separator();
         }
-        let shown: Vec<usize> = (0..self.notices.len()).rev().filter(|i| match filter {
-            1 => self.notices[*i].read,
-            2 => !self.notices[*i].read,
-            _ => true,
-        }).collect();
+        let shown: Vec<usize> = (0..self.notices.len()).rev().filter(|i| filter.matches(self.notices[*i].read)).collect();
         if shown.is_empty() {
             if update_row {
                 return;
             }
-            let text = ["You have no notifications", "You have no read notifications", "You have no unread notifications"][filter as usize];
-            ui.label(egui::RichText::new(text).size(12.5).color(c.fg3));
+            ui.vertical_centered(|ui| ui.label(egui::RichText::new(filter.empty_message()).size(12.5).color(c.fg3)));
             return;
         }
         let mut remove = None;
@@ -382,12 +479,15 @@ impl App {
                 });
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(widgets::format_date(n.at, "MM/DD/YYYY h:mm A")).size(11.0).color(c.fg3));
-                    if widgets::link(ui, if n.read { "Mark unread" } else { "Mark read" }, 11.0).clicked() {
-                        n.read = !n.read;
-                    }
-                    if widgets::link(ui, "Remove", 11.0).clicked() {
-                        remove = Some(i);
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if notice_button(ui, Icon::Trash2, "Remove notification").clicked() {
+                            remove = Some(i);
+                        }
+                        let (icon, label) = if n.read { (Icon::Undo2, "Mark as unread") } else { (Icon::Check, "Mark as read") };
+                        if notice_button(ui, icon, label).clicked() {
+                            n.read = !n.read;
+                        }
+                    });
                 });
                 ui.separator();
             }
@@ -395,5 +495,90 @@ impl App {
         if let Some(i) = remove {
             self.notices.remove(i);
         }
+    }
+}
+
+fn notice_button(ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::Response {
+    let c = p();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    icons::paint(ui, rect, icon, 13.0, if response.hovered() || response.has_focus() { c.fg } else { c.fg2 });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    response.tip(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Notice, StartOptions};
+
+    #[test]
+    fn failure_toasts_stay_in_the_notification_inbox() {
+        let ctx = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut app = App::new(&ctx, StartOptions::default(), crate::settings::Store::in_memory());
+        app.toast(true, "success");
+        app.toast(false, "operation failed");
+        assert_eq!(app.notices.len(), 1);
+        assert_eq!(app.notices[0].text, "operation failed");
+        assert!(!app.notices[0].read);
+    }
+
+    #[test]
+    fn notification_bulk_actions_use_the_list_filter() {
+        let mut notices = [
+            Notice { text: "already read".into(), at: 0, read: true },
+            Notice { text: "unread".into(), at: 1, read: false },
+        ];
+        NoticeFilter::Read.mark_all(&mut notices, true);
+        assert_eq!(notices.each_ref().map(|notice| notice.read), [true, false]);
+        NoticeFilter::Unread.mark_all(&mut notices, false);
+        assert_eq!(notices.each_ref().map(|notice| notice.read), [true, false]);
+        NoticeFilter::Unread.mark_all(&mut notices, true);
+        assert_eq!(notices.each_ref().map(|notice| notice.read), [true, true]);
+        NoticeFilter::Read.mark_all(&mut notices, false);
+        assert_eq!(notices.each_ref().map(|notice| notice.read), [false, false]);
+    }
+
+    #[test]
+    fn workspace_rows_fit_together_and_delete_only_the_selected_group() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = App::new(&cc, StartOptions::default(), crate::settings::Store::in_memory());
+        app.settings.set("workspaces", serde_json::json!([
+            {"id": "alpha", "name": "Alpha", "repos": ["/alpha"]},
+            {"id": "beta", "name": "Beta", "repos": ["/beta"]},
+        ]));
+        app.workspaces_dialog();
+        let render = |app: &mut App, events| {
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(930.0, 669.0))),
+                events,
+                ..Default::default()
+            }, |_| app.draw_dialog(&ctx));
+            output.textures_delta.clear();
+            output
+        };
+        render(&mut app, vec![]);
+        let output = render(&mut app, vec![]);
+        let mut buttons: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "Delete" => {
+                let bounds = text.visual_bounding_rect();
+                shape.clip_rect.contains(bounds.center()).then_some(bounds.center())
+            }
+            _ => None,
+        }).collect();
+        buttons.sort_by(|a, b| a.y.total_cmp(&b.y));
+        assert_eq!(buttons.len(), 2);
+        let row_gap = buttons[1].y - buttons[0].y;
+        assert!((26.0..=45.0).contains(&row_gap), "workspace rows are {row_gap} points apart");
+        let pos = buttons[1];
+        for pressed in [true, false] {
+            render(&mut app, vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE },
+            ]);
+        }
+        let workspaces: Vec<serde_json::Value> = app.settings.get("workspaces").unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0]["id"], "alpha");
     }
 }

@@ -150,6 +150,17 @@ impl Store {
         self.get::<Map<String, Value>>("aliases")?.get(path)?.as_str().filter(|a| !a.is_empty()).map(str::to_owned)
     }
 
+    pub fn set_alias(&mut self, path: &str, name: &str) {
+        let mut aliases: Map<String, Value> = self.get("aliases").unwrap_or_default();
+        let name = name.trim();
+        if name.is_empty() {
+            aliases.remove(path);
+        } else {
+            aliases.insert(path.to_owned(), Value::from(name));
+        }
+        self.set("aliases", aliases);
+    }
+
     pub fn tab_width(&self, path: &str) -> Option<f32> {
         self.get::<Map<String, Value>>("tabWidths")?.get(path)?.as_f64().map(|w| w as f32)
     }

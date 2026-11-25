@@ -420,9 +420,7 @@ impl App {
             WorkTab::Patch => 230.0,
         };
         const FILE_SECTION_HEIGHT: f32 = 30.0;
-        // When there are no staged files, keep the staging area visible as unstaged files scroll.
-        let staged_footer = if staged.is_empty() { FILE_SECTION_HEIGHT } else { 0.0 };
-        let lists_h = (ui.available_height() - box_h - staged_footer).max(60.0 - staged_footer);
+        let lists_h = (ui.available_height() - box_h).max(60.0);
         let mut events: Vec<(bool, FileEvent)> = Vec::new();
         let active_unstaged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Unstaged).map(|d| d.file.clone());
         let active_staged = r.ui.diff.as_ref().filter(|d| d.source == DiffSource::Staged).map(|d| d.file.clone());
@@ -531,30 +529,21 @@ impl App {
                     events.push((false, e));
                 }
             }
-            if staged.is_empty() {
-                return;
-            }
             let resp = widgets::section_head(ui, !wu.staged_closed, FILE_SECTION_HEIGHT, &format!("Staged Files ({})", staged.len()), |ui| {
-                if widgets::small(ui, Kind::Danger, "Unstage All Changes").tip(format!("{}+Shift+U", super::menu::MOD)).clicked() {
+                if !staged.is_empty() && widgets::small(ui, Kind::Danger, "Unstage All Changes").tip(format!("{}+Shift+U", super::menu::MOD)).clicked() {
                     later.push(Box::new(move |app| app.act_quiet(tab, Action::UnstageAll, true)));
                 }
             });
             if resp.clicked() {
                 wu.staged_closed = !wu.staged_closed;
             }
-            if !wu.staged_closed {
+            if !wu.staged_closed && !staged.is_empty() {
                 let menu = |f: &FileChange| self.file_menu(tab, v, &f.path, true, false, None, None);
                 if let Some(e) = self.file_list(ui, ui.scope_id().with("staged"), FileRows { files: &staged, active: active_staged.as_deref(), button: Some(("Unstage File", Kind::Danger)) }, &mut wu.closed, &menu, later) {
                     events.push((true, e));
                 }
             }
         });
-        if staged.is_empty() {
-            let header = widgets::section_head(ui, !wu.staged_closed, FILE_SECTION_HEIGHT, "Staged Files (0)", |_| {});
-            if header.clicked() {
-                wu.staged_closed = !wu.staged_closed;
-            }
-        }
         for (is_staged, e) in events {
             match e {
                 FileEvent::Open(f) => {

@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Rename repository tabs, reopen individual recently closed repositories from the tabs list, and delete saved workspaces without touching their repositories. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Find and navigate matches in File View, including while editing a file. Show syntax errors when editing JSON.
 - Fold code, edit multiple selections, match brackets, and copy code with syntax colors. Find and Replace supports case, whole-word, and regular-expression matching. Folding and multiple selections also work in large files.
 - Select and copy text from a large read-only file preview or either side of a full diff.
@@ -59,6 +60,9 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Keep staged and unstaged files in the same scrolling area so an empty staged section leaves more room for changed files. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Draw joined emoji and keycaps in the Windows editor using the installed emoji font.
 - Open the full comparison automatically when a file exceeds the hunk diff limit.
 - Keep the original and modified panes in sync when scrolling large or wrapped split diffs.

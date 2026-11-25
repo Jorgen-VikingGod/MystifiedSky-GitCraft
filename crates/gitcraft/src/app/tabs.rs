@@ -5,7 +5,7 @@
 use super::widgets::Tip;
 use super::icons::{self, Icon};
 use super::theme::{ACCENT, p};
-use super::{App, TabKind};
+use super::{App, TabKind, folder_name};
 use egui::{Color32, CornerRadius, FontId, Id, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 const HEIGHT: f32 = 30.0;
@@ -13,6 +13,10 @@ const DEFAULT_TAB_WIDTH: f32 = 97.0;
 const MIN_TAB_WIDTH: f32 = 76.0;
 const MAX_TAB_WIDTH: f32 = 480.0;
 const ICON_TAB: f32 = 38.0;
+
+pub(super) fn tabs_list_id() -> Id {
+    Id::unique("tabs_list")
+}
 /// The colours of the profile marks, by the profile's icon number.
 /// The colour of profile picture `i`.
 pub(crate) fn profile_color(i: usize) -> Color32 {
@@ -52,6 +56,7 @@ fn divider(ui: &Ui, x: f32, rect: Rect) {
 fn icon_tab(ui: &mut Ui, icon: Icon, tip: &str, active: bool) -> egui::Response {
     let c = p();
     let (rect, response) = ui.allocate_exact_size(vec2(ICON_TAB, HEIGHT), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
     if active {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.toolbar);
     }
@@ -103,19 +108,24 @@ impl App {
                             self.open_prefs(None);
                         }
                         let unread = self.notices.iter().filter(|n| !n.read).count() + usize::from(self.update_row());
-                        let bell = icons::slot(ui, ICON_TAB, Icon::Bell, 15.0, c.white(0.8), c.white(1.0)).tip("Notifications");
+                        let badge = if unread >= 50 { "50+".to_owned() } else { unread.to_string() };
+                        let label = if unread > 0 { format!("Notifications ({badge} unread)") } else { "Notifications".to_owned() };
+                        let bell = icons::slot(ui, 33.0, Icon::Bell, 15.0, c.white(0.8), c.white(1.0));
+                        bell.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+                        let bell = bell.tip(label);
                         if unread > 0 {
-                            let text = if unread >= 50 { "50+".to_owned() } else { unread.to_string() };
+                            let text = badge;
                             let w = (text.len() as f32 * 6.0 + 6.0).max(14.0);
-                            let br = egui::Rect::from_min_size(egui::pos2(bell.rect.center().x + 2.0, bell.rect.center().y - 12.0), egui::vec2(w, 13.0));
+                            let br = egui::Rect::from_min_size(egui::pos2(bell.rect.right() - w - 1.0, bell.rect.top() + 3.0), egui::vec2(w, 14.0));
                             ui.painter().rect_filled(br, egui::CornerRadius::same(7), egui::Color32::from_rgb(0x2f, 0x81, 0xf7));
                             ui.painter().text(br.center(), egui::Align2::CENTER_CENTER, text, super::fonts::bold(9.0), egui::Color32::WHITE);
                         }
                         self.notifications(ui, &bell);
                         let list = icons::slot(ui, 33.0, Icon::ChevronDown, 16.0, c.white(0.8), c.white(1.0));
-                        let list_tip = format!("Tabs list ({})", key_text(ui.ctx(), "Mod+Shift+A"));
+                        let list_tip = self.keys_of("nav:tabsList").map_or_else(|| "Tabs list".to_owned(), |key| format!("Tabs list ({})", super::keys::label(&key)));
+                        list.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &list_tip));
                         let list = list.tip(list_tip);
-                        egui::Popup::menu(&list).show(|ui| self.tabs_list(ui));
+                        egui::Popup::menu(&list).id(tabs_list_id()).align(egui::RectAlign::BOTTOM_END).show(|ui| self.tabs_list(ui));
                     });
                 });
                 // The bar's lower edge.
@@ -157,6 +167,7 @@ impl App {
         };
         let active = id == self.active;
         let (rect, response) = ui.allocate_exact_size(vec2(width, HEIGHT), Sense::click_and_drag());
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, &tab.title));
         let dragging = self.tab_drag.as_ref().is_some_and(|d| d.id == id);
         let hovered = response.hovered() || response.contains_pointer();
         let fill = if active { c.toolbar } else if hovered { c.white(0.05) } else { Color32::TRANSPARENT };
@@ -178,6 +189,7 @@ impl App {
         ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, ink);
 
         let close_response = ui.interact(close, Id::NULL.with(("tab_close", id)), Sense::click());
+        close_response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Close {}", tab.title)));
         if active || hovered || close_response.hovered() {
             if close_response.hovered() {
                 ui.painter().rect_filled(close, CornerRadius::same(4), c.white(0.15));
@@ -220,15 +232,21 @@ impl App {
                 self.close_tabs(right);
             }
             ui.separator();
-            ui.add_enabled(false, egui::Button::new("Rename tab"));
+            if ui.button("Rename tab").clicked() {
+                ui.close();
+                self.rename_tab_dialog(id);
+            }
             if ui.add_enabled(!self.closed.is_empty(), egui::Button::new("Reopen Closed Tab")).clicked() {
                 self.reopen_tab();
             }
             ui.separator();
-            if ui.add_enabled(!first, egui::Button::new("Move Tab Left").shortcut_text("Ctrl+Shift+PgUp")).clicked() {
+            let shortcut = |command| self.keys_of(command).map_or_else(String::new, |key| super::keys::label(&key));
+            let left_key = shortcut("nav:moveTabLeft");
+            let right_key = shortcut("nav:moveTabRight");
+            if ui.add_enabled(!first, egui::Button::new("Move Tab Left").shortcut_text(left_key)).clicked() {
                 self.shift_tab(id, -1);
             }
-            if ui.add_enabled(!last, egui::Button::new("Move Tab Right").shortcut_text("Ctrl+Shift+PgDn")).clicked() {
+            if ui.add_enabled(!last, egui::Button::new("Move Tab Right").shortcut_text(right_key)).clicked() {
                 self.shift_tab(id, 1);
             }
         });
@@ -311,15 +329,47 @@ impl App {
         }
     }
 
-    fn tabs_list(&mut self, ui: &mut Ui) {
-        let shown: Vec<(u64, String)> = self.tabs.iter().filter(|t| t.kind != TabKind::Launchpad).map(|t| (t.id, t.title.clone())).collect();
-        for (id, title) in shown {
-            let mark = if id == self.active { "• " } else { "   " };
-            if ui.button(format!("{mark}{title}")).clicked() {
-                self.active = id;
-                self.remember_tabs();
+    fn rename_tab_dialog(&mut self, id: u64) {
+        use super::dialogs::{Dialog, Field, FieldKind};
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        let field = Field::new("name", "Tab name", FieldKind::Text);
+        self.dialog = Some(Dialog::form("Rename tab", vec![field], "Rename", move |app, values| {
+            let Some(tab) = app.tabs.iter_mut().find(|t| t.id == id) else { return };
+            let name = values.text("name");
+            let name = name.trim();
+            if let TabKind::Repo(path) = &tab.kind {
+                app.settings.set_alias(path, name);
+                tab.title = if name.is_empty() { folder_name(path) } else { name.to_owned() };
+            } else if !name.is_empty() {
+                tab.title = name.to_owned();
             }
-        }
+        }).text_value("name", &tab.title));
+    }
+
+    fn tabs_list(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical().max_height((ui.ctx().content_rect().height() - 108.0).max(100.0)).show(ui, |ui| {
+            ui.label("Open Tabs");
+            let mut activate = None;
+            for tab in &self.tabs {
+                if ui.selectable_label(self.active == tab.id, &tab.title).clicked() {
+                    activate = Some(tab.id);
+                }
+            }
+            if let Some(id) = activate {
+                self.activate(id);
+                ui.close();
+            }
+            let mut closed = self.closed.iter().rev().filter(|tab| tab.path().is_some()).peekable();
+            if closed.peek().is_some() {
+                ui.separator();
+                ui.label("Closed Recently");
+                let reopen = closed.find_map(|tab| ui.button(&tab.title).clicked().then_some(tab.id));
+                if let Some(id) = reopen {
+                    self.reopen_closed_tab(id);
+                    ui.close();
+                }
+            }
+        });
     }
 
     fn profile_button(&mut self, ui: &mut Ui) {
@@ -370,12 +420,6 @@ fn truncated(ui: &Ui, text: &str, width: f32, color: Color32) -> std::sync::Arc<
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// How a command's key reads on this system (`Ctrl+T`, `⌘T`).
-/// How a key written in craft-keymap's notation reads on this system.
-fn key_text(ctx: &egui::Context, chord: &str) -> String {
-    craft_menu::Chord::parse(chord).map(|c| c.display(craft_keymap::egui::platform(ctx))).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +430,43 @@ mod tests {
         assert_eq!(tab_width(Some(10.0)), MIN_TAB_WIDTH);
         assert_eq!(tab_width(Some(9000.0)), MAX_TAB_WIDTH);
         assert_eq!(tab_width(Some(f32::NAN)), DEFAULT_TAB_WIDTH);
+    }
+
+    #[test]
+    fn repository_tab_rename_persists_when_reopened_and_blank_restores_folder_name() {
+        let ctx = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut app = App::new(&ctx, super::super::StartOptions::default(), crate::settings::Store::in_memory());
+        app.open_repo("/fixture/alpha");
+        let alpha = app.active;
+        app.open_repo("/fixture/beta");
+        let beta = app.active;
+        let rename = |app: &mut App, id, name: &str| {
+            app.rename_tab_dialog(id);
+            let mut dialog = app.dialog.take().expect("rename dialog").text_value("name", name);
+            (dialog.choices.remove(0).then)(app, &dialog.values);
+        };
+        rename(&mut app, alpha, "  Alpha review  ");
+        assert_eq!(app.settings.alias("/fixture/alpha").as_deref(), Some("Alpha review"));
+        app.close_tab_now(alpha);
+        app.close_tab_now(beta);
+        app.reopen_closed_tab(alpha);
+        assert_eq!(app.active_tab().unwrap().title, "Alpha review");
+        assert_eq!(app.closed.last().map(|tab| tab.id), Some(beta));
+        let reopened = app.active;
+        rename(&mut app, reopened, " ");
+        assert_eq!(app.settings.alias("/fixture/alpha"), None);
+        assert_eq!(app.active_tab().unwrap().title, "alpha");
+        app.reopen_tab();
+        assert_eq!(app.active_tab().unwrap().title, "beta");
+    }
+
+    #[test]
+    fn tabs_list_command_toggles_its_popup() {
+        let ctx = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut app = App::new(&ctx, super::super::StartOptions::default(), crate::settings::Store::in_memory());
+        app.run_command("nav:tabsList");
+        assert!(egui::Popup::is_id_open(&app.ctx, tabs_list_id()));
+        app.run_command("nav:tabsList");
+        assert!(!egui::Popup::is_id_open(&app.ctx, tabs_list_id()));
     }
 }

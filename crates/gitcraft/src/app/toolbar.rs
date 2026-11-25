@@ -25,7 +25,9 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
     let show_label = labels || spinning;
     let icon_y = if show_label { rect.center().y + 7.0 } else { rect.center().y };
     if show_label {
-        ui.painter().text(pos2(rect.center().x, rect.center().y - 10.0), Align2::CENTER_CENTER, label, FontId::proportional(11.0), c.white(0.75).gamma_multiply(fade));
+        let ink = c.white(0.75).gamma_multiply(fade);
+        let galley = super::widgets::fit(ui, label, FontId::proportional(11.0), ink, rect.width());
+        ui.painter().galley(pos2(rect.center().x - galley.size().x / 2.0, rect.center().y - 10.0 - galley.size().y / 2.0), galley, ink);
     }
     let ir = Rect::from_center_size(pos2(rect.center().x, icon_y), Vec2::splat(19.0));
     if spinning {
@@ -48,12 +50,14 @@ fn tb(ui: &mut Ui, rect: Rect, icon: Icon, label: &str, labels: bool, tip: &str,
         ui.painter().rect_filled(br, CornerRadius::same(7), ACCENT);
         ui.painter().text(br.center(), Align2::CENTER_CENTER, text, super::fonts::bold(9.5), c.white(1.0));
     }
-    if tip.is_empty() { resp } else { resp.tip(tip) }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled && !spinning, label));
+    if tip.is_empty() { resp.tip(label) } else { resp.tip(tip) }
 }
 
 impl App {
     pub(crate) fn toolbar(&self, ui: &mut Ui, tab: u64, r: Option<&RepoTab>, later: &mut Vec<Later>) {
         let c = p();
+        let locale = self.locale();
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, CornerRadius::ZERO, c.toolbar);
         ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, c.black(0.3)));
@@ -147,17 +151,17 @@ impl App {
         ui.set_clip_rect(full_clip.intersect(Rect::from_min_max(full_clip.min, pos2(limit, full_clip.max.y))));
         let undo = v.and_then(|v| v.undo.undo.clone());
         let redo = v.and_then(|v| v.undo.redo.clone());
-        if tb(ui, slot(x, 52.0), Icon::Undo2, "Undo", labels, &undo.as_ref().map_or("Nothing to undo".into(), |u| format!("Undo {u}")), undo.is_some(), 0, false).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::Undo2, locale.text("Undo"), labels, &undo.as_ref().map_or("Nothing to undo".into(), |u| format!("Undo {u}")), undo.is_some(), 0, false).clicked() {
             later.push(Box::new(move |app| app.act(tab, Action::Undo)));
         }
         x += 52.0;
-        if tb(ui, slot(x, 52.0), Icon::Redo2, "Redo", labels, &redo.as_ref().map_or("Nothing to redo".into(), |u| format!("Redo {u}")), redo.is_some(), 0, false).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::Redo2, locale.text("Redo"), labels, &redo.as_ref().map_or("Nothing to redo".into(), |u| format!("Redo {u}")), redo.is_some(), 0, false).clicked() {
             later.push(Box::new(move |app| app.act(tab, Action::Redo)));
         }
         x += 52.0;
         let pull_tip = if detached { "Pull is not available when in a detached HEAD state" } else { PULL_LABELS.iter().find(|(m, _)| *m == pull_mode).map_or("Pull", |(_, l)| l) };
         let pulling = spin == Some("pull");
-        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, "Pull", labels, pull_tip, v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, locale.text("Pull"), labels, pull_tip, v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
             let mode = pull_mode.clone();
             later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
         }
@@ -190,16 +194,16 @@ impl App {
         });
         x += 16.0;
         let pushing = spin == Some("push");
-        if tb(ui, slot(x, 52.0), Icon::ArrowUpFromLine, "Push", labels, if detached { "Push is not available when in a detached HEAD state" } else { "Push" }, v.is_some() && !detached, head.map_or(0, |h| h.ahead), pushing).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::ArrowUpFromLine, locale.text("Push"), labels, if detached { "Push is not available when in a detached HEAD state" } else { "Push" }, v.is_some() && !detached, head.map_or(0, |h| h.ahead), pushing).clicked() {
             later.push(Box::new(move |app| app.act(tab, Action::Push { force: false, lease: None, review: None })));
         }
         x += 52.0;
-        if tb(ui, slot(x, 52.0), Icon::GitBranch, "Branch", labels, &format!("Create branch ({}+B)", super::menu::MOD), v.is_some(), 0, false).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::GitBranch, locale.text("Branch"), labels, &format!("Create branch ({}+B)", super::menu::MOD), v.is_some(), 0, false).clicked() {
             later.push(Box::new(move |app| app.prompt_branch(tab, None, true)));
         }
         x += 52.0;
         let stashing = spin == Some("stash");
-        if tb(ui, slot(x, 52.0), Icon::Download, "Stash", labels, "Stash changes", has_changes || stashing, 0, stashing).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::Download, locale.text("Stash"), labels, "Stash changes", has_changes || stashing, 0, stashing).clicked() {
             later.push(Box::new(move |app| app.act(tab, Action::Stash { message: String::new() })));
         }
         x += 52.0;
@@ -208,7 +212,7 @@ impl App {
             let sresp = ui.interact(chev, ui.scope_id().with("stash_options"), Sense::click());
             icons::paint(ui, chev, Icon::ChevronDown, 12.0, if sresp.hovered() { c.fg } else { c.fg3 });
             let untracked = v.is_some_and(|v| v.data.status.unstaged.iter().any(|f| f.status == '?'));
-            let sresp = sresp.tip("Stash options");
+            let sresp = sresp.tip(locale.text("Stash options"));
             egui::Popup::menu(&sresp).show(|ui| {
                 let entries = vec![
                     ctxmenu::off(item("Stash with a title", move |app| app.prompt_stash(tab, "stash")), has_changes),
@@ -220,13 +224,13 @@ impl App {
             x += 14.0;
         }
         let popping = spin == Some("pop");
-        if tb(ui, slot(x, 52.0), Icon::Upload, "Pop", labels, "Pop the latest stash", v.is_some_and(|v| !v.data.stashes.is_empty()) || popping, 0, popping).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::Upload, locale.text("Pop"), labels, "Pop the latest stash", v.is_some_and(|v| !v.data.stashes.is_empty()) || popping, 0, popping).clicked() {
             later.push(Box::new(move |app| app.act(tab, Action::StashPop { index: 0, expected: None, without_index: false })));
         }
         x += 52.0 + 4.0;
         ui.painter().rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(1.0, 34.0)), CornerRadius::ZERO, c.white(0.2));
         x += 5.0;
-        if tb(ui, slot(x, 52.0), Icon::SquareTerminal, "Terminal", labels, "Toggle the terminal panel (Ctrl+`)", v.is_some(), 0, false).clicked() {
+        if tb(ui, slot(x, 52.0), Icon::SquareTerminal, locale.text("Terminal"), labels, "Toggle the terminal panel (Ctrl+`)", v.is_some(), 0, false).clicked() {
             later.push(Box::new(|app| app.settings.toggle("showTerminal", false)));
         }
         ui.set_clip_rect(full_clip);

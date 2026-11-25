@@ -22,6 +22,7 @@ mod keys;
 mod hosting;
 mod icons;
 mod left;
+mod locale;
 mod manage;
 mod markdown;
 mod menu;
@@ -200,6 +201,7 @@ pub struct App {
     pub(crate) pickers: craft_dialogs::Dialogs<dialogs::Pick>,
     /// What the status bar says is running.
     pub(crate) busy: Option<String>,
+    sample_loading: bool,
     pub(crate) job: Option<Job>,
     pub(crate) drafts: HashMap<String, repo::Draft>,
     /// Drafts to set once the action that asked for them is queued.
@@ -295,6 +297,7 @@ impl App {
                 move || ctx.request_repaint()
             })),
             busy: None,
+            sample_loading: false,
             job: None,
             drafts: HashMap::new(),
             pending_drafts: Vec::new(),
@@ -567,19 +570,26 @@ impl App {
     }
 
     pub(crate) fn reopen_tab(&mut self) {
-        let Some(mut tab) = self.closed.pop() else { return };
+        if let Some(id) = self.closed.last().map(|tab| tab.id) {
+            self.reopen_closed_tab(id);
+        }
+    }
+
+    fn reopen_closed_tab(&mut self, id: u64) {
+        let Some(index) = self.closed.iter().position(|tab| tab.id == id) else { return };
+        let mut tab = self.closed.remove(index);
         // A repository opened again since its tab was closed: go to that tab, so one folder
         // never has two tabs (file changes refresh only one of them).
         if let Some(path) = tab.path()
-            && let Some(open) = self.tabs.iter().find(|t| t.path() == Some(path))
+            && let Some(open) = self.tabs.iter().find(|t| t.path().is_some_and(|p| same_folder(p, path)))
         {
-            self.active = open.id;
-            self.remember_tabs();
+            self.activate(open.id);
             return;
         }
-        tab.id = self.take_id();
         if let Some(path) = tab.path().map(str::to_owned) {
-            self.ensure_repo(tab.id, &path);
+            tab = self.repo_tab(path);
+        } else {
+            tab.id = self.take_id();
         }
         self.active = tab.id;
         self.tabs.push(tab);
@@ -607,7 +617,11 @@ impl App {
     }
 
     pub(crate) fn toast(&mut self, ok: bool, text: impl Into<String>) {
-        self.toasts.push(Toast { ok, text: text.into(), until: Instant::now() + Duration::from_secs(if ok { 4 } else { 8 }) });
+        let text = text.into();
+        if !ok {
+            self.notify(&text);
+        }
+        self.toasts.push(Toast { ok, text, until: Instant::now() + Duration::from_secs(if ok { 4 } else { 8 }) });
         if self.toasts.len() > 5 {
             self.toasts.remove(0);
         }
@@ -851,12 +865,7 @@ impl App {
         match msg {
             Msg::Nothing => {}
             Msg::Apply(f) => f(self),
-            Msg::Toast(ok, text) => {
-                if !ok {
-                    self.notify(&text);
-                }
-                self.toast(ok, text)
-            }
+            Msg::Toast(ok, text) => self.toast(ok, text),
             Msg::Copy(text) => self.copy(&text),
             Msg::OpenRepo(path) => self.open_repo(&path),
             Msg::Located { tab, path } => {

@@ -24,9 +24,10 @@ impl App {
     fn menus(&self) -> MenuBar {
         let repo = self.active_tab().and_then(|t| t.path()).is_some();
         let s = &self.settings;
+        let locale = self.locale();
         let editor = super::external_tools::editor_name(&s.string("externalEditor", "vscode"));
-        let i = |id: &str, label: &str| -> Node { self.item(id, label).into() };
-        let on = |id: &str, label: &str, enabled: bool| -> Node { self.item(id, label).enabled(enabled).into() };
+        let i = |id: &str, label: &str| -> Node { self.item(id, locale.text(label)).into() };
+        let on = |id: &str, label: &str, enabled: bool| -> Node { self.item(id, locale.text(label)).enabled(enabled).into() };
         let file = vec![
             i("nav:newTab", "New Tab"),
             i("nav:closeTab", "Close Tab"),
@@ -48,14 +49,14 @@ impl App {
             Node::Separator,
             i("app.update", "Check for Updates"),
             i("app.sign_out", "Sign Out"),
-            self.item("app.exit", "Exit").role(ItemRole::Quit).into(),
+            self.item("app.exit", locale.text("Exit")).role(ItemRole::Quit).into(),
         ];
         let edit = vec![on("repo:undo", "Undo", repo), on("repo:redo", "Redo", repo)];
         let view = vec![
-            self.item("ui:leftPanel", "Show Left Panel").check(s.flag("showLeft", true)).into(),
-            self.item("ui:detailPanel", "Show Commit Details Panel").check(s.flag("showRight", true)).into(),
-            self.item("ui:toolbarLabels", "Show Toolbar Labels").check(s.flag("toolbarLabels", true)).into(),
-            self.item("ui:terminalPanel", "Show Terminal Panel").check(s.flag("showTerminal", false)).into(),
+            self.item("ui:leftPanel", locale.text("Show Left Panel")).check(s.flag("showLeft", true)).into(),
+            self.item("ui:detailPanel", locale.text("Show Commit Details Panel")).check(s.flag("showRight", true)).into(),
+            self.item("ui:toolbarLabels", locale.text("Show Toolbar Labels")).check(s.flag("toolbarLabels", true)).into(),
+            self.item("ui:terminalPanel", locale.text("Show Terminal Panel")).check(s.flag("showTerminal", false)).into(),
             Node::Separator,
             i("ui:zoomIn", "Increase Zoom"),
             i("ui:zoomOut", "Decrease Zoom"),
@@ -77,10 +78,10 @@ impl App {
         ];
         MenuBar {
             menus: vec![
-                Menu::new("File", file).role(MenuRole::File),
-                Menu::new("Edit", edit).role(MenuRole::Edit),
-                Menu::new("View", view).role(MenuRole::View),
-                Menu::new("Help", help).role(MenuRole::Help),
+                Menu::new(locale.text("File"), file).role(MenuRole::File),
+                Menu::new(locale.text("Edit"), edit).role(MenuRole::Edit),
+                Menu::new(locale.text("View"), view).role(MenuRole::View),
+                Menu::new(locale.text("Help"), help).role(MenuRole::Help),
             ],
             documents: Vec::new(),
         }
