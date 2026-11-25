@@ -11,6 +11,7 @@ on:
         options:
           - preview
           - stable
+          - macos-dry-run
       highlights:
         description: Optional Markdown overview for the GitHub release
         required: false
@@ -21,21 +22,28 @@ permissions:
 
 # Keep preview and stable publication ordered.
 concurrency:
-  group: gitcraft-release
+  group: ${{ inputs.channel == 'macos-dry-run' && format('gitcraft-macos-dry-run-{0}', github.ref) || 'gitcraft-release' }}
   queue: max
 
 jobs:
   tests:
-    if: github.ref == 'refs/heads/main'
+    needs: version
+    if: inputs.channel != 'macos-dry-run' && needs.version.outputs.tested != 'true'
     uses: ./.github/workflows/test.yml
 
   version:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || inputs.channel == 'macos-dry-run'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       number: ${{ steps.version.outputs.number }}
+      tested: ${{ steps.tests.outputs.tested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -61,9 +69,40 @@ jobs:
           NODE
           )
           echo "number=$number" >> "$GITHUB_OUTPUT"
+      - name: Reuse passing push tests for this commit
+        id: tests
+        if: inputs.channel != 'macos-dry-run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/test.yml/runs" \
+              -f branch=main -f event=push -f "head_sha=$GITHUB_SHA" -F per_page=1 \
+              --jq '.workflow_runs[0]') &&
+            jq -e --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" '
+              .head_sha == $sha and .head_branch == "main" and .head_repository.full_name == $repo and
+              .event == "push" and .status == "completed" and .conclusion == "success"
+            ' <<< "$run" >/dev/null; then
+            echo "tested=true" >> "$GITHUB_OUTPUT"
+            echo "Using passing push CI from $(jq -r .html_url <<< "$run")."
+          else
+            echo "No passing push CI result for $GITHUB_SHA. Running the test matrix."
+          fi
+
+  release-ready:
+    needs: [version, tests]
+    if: >-
+      ${{ !cancelled() && needs.version.result == 'success' &&
+          (needs.tests.result == 'success' ||
+            (needs.tests.result == 'skipped' &&
+              (needs.version.outputs.tested == 'true' || inputs.channel == 'macos-dry-run'))) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Ready to build"
 
   build:
-    needs: [version, tests]
+    needs: [version, release-ready]
+    if: inputs.channel != 'macos-dry-run'
     strategy:
       fail-fast: false
       matrix:
@@ -71,129 +110,86 @@ jobs:
           - runner: windows-2022
             platform: windows
             target: x86_64-pc-windows-msvc
-            rust-targets: x86_64-pc-windows-msvc
             formats: nsis,wix
           - runner: windows-11-arm
             platform: windows-arm64
             target: aarch64-pc-windows-msvc
-            rust-targets: aarch64-pc-windows-msvc
             formats: nsis
-          - runner: macos-latest
-            platform: macos
-            target: universal-apple-darwin
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            formats: app,dmg
           - runner: ubuntu-22.04
             platform: linux
             target: x86_64-unknown-linux-gnu
-            rust-targets: x86_64-unknown-linux-gnu
             formats: deb,appimage
-            rpm: true
           - runner: ubuntu-22.04-arm
             platform: linux-arm64
             target: aarch64-unknown-linux-gnu
-            rust-targets: aarch64-unknown-linux-gnu
             formats: deb,appimage
-            rpm: true
-    runs-on: ${{ matrix.runner }}
+    uses: ./.github/workflows/package-release.yml
+    with:
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      formats: ${{ matrix.formats }}
+      version: ${{ needs.version.outputs.number }}
+    secrets:
+      updater-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      updater-password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+  macos-binaries:
+    name: Compile macOS (${{ matrix.target }})
+    needs: [version, release-ready]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Install Linux build packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev patchelf file
-
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-
-      # Third-party actions are pinned to a full commit hash, so a moved tag or branch can't change what runs in the
-      # release build. To update: look up the new commit (for example `gh api repos/dtolnay/rust-toolchain/commits/stable`)
-      # and change the hash and the comment together.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-          targets: ${{ matrix.rust-targets }}
-
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
-
-      - name: Build installers and sign updates
-        shell: bash
+      - name: Compile GitCraft
         env:
-          VERSION: ${{ needs.version.outputs.number }}
           TARGET: ${{ matrix.target }}
-          FORMATS: ${{ matrix.formats }}
-          RPM: ${{ matrix.rpm }}
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.version.outputs.number }}
         run: |
-          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
-            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. See RELEASING.md."
-            exit 1
-          fi
           node scripts/set-version.mjs "$VERSION"
-          cargo install cargo-packager --locked --version 0.11.8
-          bin_dir="target/$TARGET/release"
-          if [[ "$TARGET" == universal-apple-darwin ]]; then
-            for arch in aarch64-apple-darwin x86_64-apple-darwin; do
-              cargo build --release --locked -p gitcraft --target "$arch"
-            done
-            mkdir -p "$bin_dir"
-            lipo -create -output "$bin_dir/gitcraft" target/aarch64-apple-darwin/release/gitcraft target/x86_64-apple-darwin/release/gitcraft
-          else
-            cargo build --release --locked -p gitcraft --target "$TARGET"
-          fi
-          # cargo-packager 0.11.8 parses --binaries-dir without using it: --target is what points it
-          # at target/<triple>/release. It also changes into crates/gitcraft before packaging, so the
-          # output folder is made absolute here.
-          out_dir="$PWD/$bin_dir/bundle/packager"
-          mkdir -p "$out_dir"
-          cargo packager --release -p gitcraft --target "$TARGET" --formats "$FORMATS" --out-dir "$out_dir"
-          if ! compgen -G "$out_dir/*" >/dev/null; then
-            echo "::error::cargo packager left nothing in $out_dir."
-            exit 1
-          fi
-          # The packager makes no RPM packages.
-          if [[ "$RPM" == true ]]; then
-            cargo install cargo-generate-rpm --locked --version 0.21.1
-            # cargo-generate-rpm treats the output as a filename unless the directory exists.
-            rpm_dir="$bin_dir/bundle/rpm"
-            mkdir -p "$rpm_dir"
-            cargo generate-rpm -p crates/gitcraft --target "$TARGET" -o "$rpm_dir"
-          fi
-
-      - name: Verify the Windows MSI upgrade identity
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: ./scripts/check-msi-upgrade.ps1 -Directory "target/${{ matrix.target }}/release/bundle/packager"
-
+          cargo build --release --locked -p gitcraft --target "$TARGET"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-${{ matrix.platform }}
-          path: |
-            target/${{ matrix.target }}/release/bundle/*/*-setup.exe
-            target/${{ matrix.target }}/release/bundle/*/*.msi
-            target/${{ matrix.target }}/release/bundle/*/*.dmg
-            target/${{ matrix.target }}/release/bundle/*/*.app.tar.gz
-            target/${{ matrix.target }}/release/bundle/*/*.AppImage
-            target/${{ matrix.target }}/release/bundle/*/*.deb
-            target/${{ matrix.target }}/release/bundle/*/*.rpm
-            target/${{ matrix.target }}/release/bundle/*/*.sig
+          name: macos-binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/gitcraft
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
           overwrite: true
 
+  macos:
+    needs: [version, macos-binaries]
+    uses: ./.github/workflows/package-release.yml
+    with:
+      runner: macos-latest
+      platform: macos
+      target: universal-apple-darwin
+      formats: app,dmg
+      version: ${{ needs.version.outputs.number }}
+      sign: ${{ inputs.channel != 'macos-dry-run' }}
+    secrets:
+      updater-key: ${{ inputs.channel != 'macos-dry-run' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      updater-password: ${{ inputs.channel != 'macos-dry-run' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+
   publish:
-    needs: [version, build, tests]
+    needs: [version, build, macos]
+    if: github.ref == 'refs/heads/main' && (inputs.channel == 'preview' || inputs.channel == 'stable')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -209,6 +205,10 @@ jobs:
         with:
           pattern: release-*
           path: bundles
+      - name: Install the update signature verifier
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
       - name: Prepare installers and the update manifest
         env:
           VERSION: ${{ needs.version.outputs.number }}

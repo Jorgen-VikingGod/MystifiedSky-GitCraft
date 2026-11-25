@@ -34,11 +34,12 @@ jobs:
 
           # At most one successful announcement per user within 24 hours.
           # Fail closed if run history cannot be checked.
-          recent_runs=$(gh api --paginate \
-            "repos/${REPOSITORY}/actions/workflows/discord-stars.yml/runs?event=watch&actor=${STAR_ACTOR}&per_page=100" \
+          now=$(date -u +%s)
+          cutoff=$(date -u -d "@$((now - 86400))" +%FT%TZ)
+          recent_runs=$(gh api --method GET --paginate "repos/${REPOSITORY}/actions/workflows/discord-stars.yml/runs" \
+            -f event=watch -f "actor=$STAR_ACTOR" -f "created=>=$cutoff" -f status=success -F per_page=100 \
             --jq '.workflow_runs[] | [.id, .conclusion, .created_at] | @tsv')
 
-          now=$(date -u +%s)
           while IFS=$'\t' read -r run_id conclusion created_at; do
             [ -n "$run_id" ] || continue
             [ "$run_id" != "$CURRENT_RUN_ID" ] || continue

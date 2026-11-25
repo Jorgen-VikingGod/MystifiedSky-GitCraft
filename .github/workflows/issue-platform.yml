@@ -2,7 +2,7 @@ name: Label bugs by operating system
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, labeled]
 
 permissions:
   issues: write
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   label:
-    if: contains(github.event.issue.labels.*.name, 'bug')
+    if: contains(github.event.issue.labels.*.name, 'bug') && (github.event.action != 'labeled' || github.event.label.name == 'bug')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
