@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: GitHub release channel
+        description: GitHub release channel or macOS packaging dry run
         required: true
         default: preview
         type: choice

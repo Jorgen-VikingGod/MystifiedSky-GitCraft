@@ -45,7 +45,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
-- Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing.
+- Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing. ([#55](https://github.com/MystifiedSky/GitCraft/pull/55))
 
 - Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
 - Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
