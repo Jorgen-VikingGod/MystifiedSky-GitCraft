@@ -435,7 +435,8 @@ impl App {
         for t in &self.tabs {
             if let (TabKind::Repo(p), Some(r)) = (&t.kind, self.repos.get(&t.id))
                 && r.view.as_ref().is_some_and(|v| !v.data.remotes.is_empty())
-                && !paths.iter().any(|(_, q)| q == p)
+                && !self.repo_pull_busy(p)
+                && !paths.iter().any(|(_, q)| same_folder(q, p))
             {
                 paths.push((t.id, p.clone()));
             }
@@ -447,14 +448,12 @@ impl App {
         self.background_repos.extend(paths.iter().map(|(_, p)| p.clone()));
         let prune = self.settings.flag("autoPrune", false);
         let engine = self.engine.clone();
+        let inbox = self.inbox.clone();
+        let repaint = ctx.clone();
         self.spawn(move || {
-            let results: Vec<(u64, String, gitcraft_core::actions::ActionResult)> = paths.into_iter().map(|(tab, p)| {
-                let r = engine.perform(&p, Action::AutoFetch { prune });
-                (tab, p, r)
-            }).collect();
-            Msg::Apply(Box::new(move |app: &mut App| {
-                app.fetching = false;
-                for (tab, path, r) in results {
+            for (tab, path) in paths {
+                let r = engine.perform(&path, Action::AutoFetch { prune });
+                inbox.post(Msg::Apply(Box::new(move |app: &mut App| {
                     app.finish_background_repo(&path);
                     if r.ok {
                         app.fetch_warned.remove(&path);
@@ -464,9 +463,16 @@ impl App {
                     } else if app.fetch_warned.insert(path) {
                         app.toast(false, r.message);
                     }
-                }
-            }))
+                })));
+                repaint.request_repaint();
+            }
+            Msg::Apply(Box::new(|app: &mut App| app.fetching = false))
         });
+    }
+
+    fn repo_pull_busy(&self, path: &str) -> bool {
+        let running = self.repos.values().any(|r| r.running.is_some() && same_folder(&r.path, path));
+        repo::pull_busy(running, &self.background_repos, path)
     }
 
     fn finish_background_repo(&mut self, path: &str) {

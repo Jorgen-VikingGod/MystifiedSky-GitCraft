@@ -201,7 +201,7 @@ impl RepoTab {
     }
 
     fn queue_action(&mut self, action: Action, quiet: bool, busy: bool) -> bool {
-        if busy && matches!(&action, Action::Fetch | Action::Pull { .. }) {
+        if busy && matches!(&action, Action::Fetch | Action::FetchRemote { .. } | Action::FetchHistory { .. } | Action::Pull { .. }) {
             return false;
         }
         self.queue.push_back((action, quiet));
@@ -722,7 +722,7 @@ impl App {
         if let Action::Commit { strip_comments, .. } = &mut action {
             *strip_comments = self.settings.flag("stripComments", false);
         }
-        let busy = self.repo(tab).is_some_and(|r| pull_busy(r.running.is_some(), &self.background_repos, &r.path));
+        let busy = self.repo(tab).is_some_and(|r| self.repo_pull_busy(&r.path));
         let Some(r) = self.repo_mut(tab) else { return };
         if !r.queue_action(action, quiet, busy) {
             return;
@@ -1109,7 +1109,12 @@ fn headless_busy_pull_fetch_dispatch_is_rejected() {
     }
 
     for quiet in [false, true] {
-        for action in [Action::Fetch, Action::Pull { mode: "ff".into(), autostash: None }] {
+        for action in [
+            Action::Fetch,
+            Action::FetchRemote { remote: "origin".into() },
+            Action::FetchHistory { remote: "origin".into(), mode: "deepen".into() },
+            Action::Pull { mode: "ff".into(), autostash: None },
+        ] {
             let mut repo = RepoTab::new("/repo");
             let background = vec!["/repo/".into()];
             let busy = pull_busy(repo.running.is_some(), &background, &repo.path);

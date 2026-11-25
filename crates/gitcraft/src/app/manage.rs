@@ -404,6 +404,9 @@ impl App {
         if self.bulk.is_some() {
             return self.toast(false, "Wait for the repositories being pulled or fetched to finish");
         }
+        if paths.iter().any(|path| self.repo_pull_busy(path)) {
+            return self.toast(false, "Wait for the current repository operation to finish before fetching or pulling this selection");
+        }
         self.bulk_batch += 1;
         let batch = self.bulk_batch;
         self.bulk = Some((batch, 0));
