@@ -71,6 +71,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- "Automatically group worktree tabs together" now works: tabs of worktrees of the same repository sit side by side and share a colored line.
 - Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect.
 - Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
