@@ -410,7 +410,7 @@ impl App {
         self.bulk_batch += 1;
         let batch = self.bulk_batch;
         self.bulk = Some((batch, 0));
-        self.background_repos.extend(paths.iter().cloned());
+        self.busy_repos.extend(paths.iter().cloned());
         // Each repository's pull mode, and its autostash preference for a rebase pull.
         let modes: Vec<PullMode> = paths.iter().map(|p| {
             let m = self.pull_mode(p);
@@ -440,7 +440,7 @@ impl App {
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     // Counts arrive from several workers: only a higher count of this batch shows.
                     inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| {
-                        app.finish_background_repo(&path);
+                        app.finish_busy_repo(&path);
                         if let Some((b, shown)) = app.bulk.as_mut()
                             && *b == batch
                             && n > *shown

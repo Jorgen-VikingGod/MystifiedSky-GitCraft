@@ -804,11 +804,13 @@ impl App {
             v.data.status = guess;
         }
         let path = r.path.clone();
+        // The operation can outlive its tab. Keep its reservation until completion.
+        self.busy_repos.push(path.clone());
         self.update_busy();
         let sent = action.clone();
         self.spawn(move || {
             let result = engine.perform(&path, sent);
-            Msg::Acted { tab, action: Box::new(action), quiet, result }
+            Msg::Acted { tab, path, action: Box::new(action), quiet, result }
         });
     }
 
