@@ -296,9 +296,12 @@ impl App {
         let (path, token, editor, edits) = (r.path.clone(), r.diff_ui.token.clone(), r.diff_ui.editor, r.diff_ui.edits);
         self.spawn(move || {
             let dir = std::path::Path::new(&path);
-            let result = gitcraft_core::files::save_checked_mode(dir, &target.file, &draft, token.as_deref(), utf8);
-            // What is on disk now, for the next save of edits made meanwhile.
-            let token = result.is_ok().then(|| gitcraft_core::files::content_token(std::fs::read(dir.join(&target.file)).ok().as_deref()));
+            // The token is of the bytes this save wrote, for the next save of edits made meanwhile.
+            let saved = gitcraft_core::files::save_checked_token(dir, &target.file, &draft, token.as_deref(), utf8);
+            let (token, result) = match saved {
+                Ok(token) => (Some(token), Ok(())),
+                Err(error) => (None, Err(error)),
+            };
             super::Msg::Saved { tab, file: target.file, editor, edits, token, result }
         });
         true
@@ -333,13 +336,14 @@ impl App {
                 self.left_saved(tab, super::guard::Editor::File, all_saved);
             }
             Err(e) if e.contains("ENCODING_UNREPRESENTABLE") || e.contains("ENCODING_DECODE_LOSS") => {
-                self.left_saved(tab, super::guard::Editor::File, false);
+                let held = self.hold_for_conversion(tab, super::guard::Editor::File);
                 self.dialog = Some(super::dialogs::Dialog::confirm_with(
                     "Save this file as UTF-8?",
                     "The current encoding cannot represent every character. The original file is unchanged. Convert this file to UTF-8 with a byte-order mark to preserve your text?",
                     "Save as UTF-8",
                     false,
                     move |app, _| {
+                        app.resume_after_conversion(&held);
                         app.save_draft(tab, true);
                     },
                 ));
@@ -1166,8 +1170,18 @@ pub(super) fn compare_view(ui: &mut Ui, id: egui::Id, revision: (u64, bool), cmp
                 .into_iter().flatten()
                 .map(|r| (r, if old { BAD.gamma_multiply(0.45) } else { GOOD.gamma_multiply(0.45) }));
             let find = search.as_ref().and_then(|search| {
-                let line = if search.original == old { Some(i) } else if search.original { same_old } else { None };
-                line.and_then(|line| search.hit.mark(line, text))
+                if search.original == old {
+                    return search.hit.mark(i, text);
+                }
+                // A row shown from the modified side that matched in the original: the two differ only in
+                // whitespace (with Ignore Whitespace), so the match is mapped onto the text shown.
+                let line = if search.original { same_old? } else { return None };
+                let original = indices[0].line(source.texts[0], line)?;
+                if original == text {
+                    return search.hit.mark(line, text);
+                }
+                let (range, color) = search.hit.mark(line, original)?;
+                Some((remap_ignoring_whitespace(&range, original, text)?, color))
             });
             let marks: Vec<_> = find.into_iter().chain(marks).collect();
             let runs = if !prefs.syntax { None } else if old { old_hl.get(i) } else { new_hl.get(i) };
@@ -1703,7 +1717,7 @@ fn image_diff(ui: &mut Ui, key: &str, before: Option<&[u8]>, after: Option<&[u8]
                                 bytes.hash(&mut h);
                                 h.finish()
                             };
-                            let img = egui::Image::from_bytes(format!("bytes://{key}-{side}-{id:016x}"), bytes.to_vec()).max_size(rect.size()).maintain_aspect_ratio(true);
+                            let img = egui::Image::from_bytes(preview_uri(&key, side, id, bytes), bytes.to_vec()).max_size(rect.size()).maintain_aspect_ratio(true);
                             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)));
                             child.add(img);
                         }
@@ -1733,4 +1747,33 @@ mod tests {
         assert_eq!(visible_rows(&tops, 0.0, LINE * 10.0), 0..3);
         assert_eq!(visible_rows(&tops, LINE * 4.5, LINE * 10.0), 2..3);
     }
+}
+
+/// `range` of `from`, moved to the same non-whitespace characters of `to` (the same text apart from whitespace).
+fn remap_ignoring_whitespace(range: &std::ops::Range<usize>, from: &str, to: &str) -> Option<std::ops::Range<usize>> {
+    let before = from.get(..range.start)?.chars().filter(|c| !c.is_whitespace()).count();
+    let inside = from.get(range.clone())?.chars().filter(|c| !c.is_whitespace()).count();
+    if inside == 0 {
+        return None;
+    }
+    let mut seen = 0;
+    let (mut start, mut end) = (None, None);
+    for (at, c) in to.char_indices().filter(|(_, c)| !c.is_whitespace()) {
+        if seen == before {
+            start = Some(at);
+        }
+        seen += 1;
+        if seen == before + inside {
+            end = Some(at + c.len_utf8());
+            break;
+        }
+    }
+    Some(start?..end?)
+}
+
+/// The cache name of a previewed picture. egui's loaders pick a decoder from the extension, so an SVG's name ends in
+/// `.svg`, after the content hash that keeps a changed picture from being shown from the cache.
+fn preview_uri(key: &str, side: impl std::fmt::Display, id: u64, bytes: &[u8]) -> String {
+    let svg = key.to_ascii_lowercase().ends_with(".svg") || bytes.iter().take(2048).copied().collect::<Vec<u8>>().windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg"));
+    format!("bytes://{key}-{side}-{id:016x}{}", if svg { ".svg" } else { "" })
 }

@@ -106,10 +106,23 @@ pub(super) fn diff_position(
     anchor: (usize, f32),
     rows: usize,
 ) -> f32 {
+    mapped_position(index, side, anchor, rows).unwrap_or(rows as f32)
+}
+
+/// Where `anchor` is in the comparison: the end of the document is at its last row, but a line the comparison
+/// doesn't cover (the text changed since it was made) can't be placed, so it is `None`.
+pub(super) fn mapped_position(
+    index: &SplitIndex,
+    side: usize,
+    anchor: (usize, f32),
+    rows: usize,
+) -> Option<f32> {
     let (line, within) = anchor;
-    index.lines[side]
-        .row(line)
-        .map_or(rows as f32, |row| row as f32 + within)
+    match index.lines[side].row(line) {
+        Some(row) => Some(row as f32 + within),
+        None if line == index.lines[side].lines() => Some(rows as f32),
+        None => None,
+    }
 }
 
 pub(super) fn pane_offset(index: &SplitIndex, side: usize, position: f32, pane: &Pane) -> f32 {
@@ -156,7 +169,15 @@ impl Sync {
             let expected = self.pending[side].unwrap_or(previous[side]);
             (scroll.top - scroll.clamp(expected)).abs() > 0.75
         });
-        self.previous = Some(panes.map(|pane| pane.scroll.top));
+        // The reference moves only when a pane really moved or was set by a correction, so slow movement adds up
+        // against the last synchronized position instead of being forgotten frame by frame.
+        let mut reference = previous;
+        for side in 0..2 {
+            if moved[side] || self.pending[side].is_some() {
+                reference[side] = panes[side].scroll.top;
+            }
+        }
+        self.previous = Some(reference);
         self.pending = [None; 2];
         let reflow = self.layout_key.replace(layout) != Some(layout);
         if moved[preferred] {

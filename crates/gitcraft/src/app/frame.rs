@@ -44,10 +44,12 @@ fn all_buttons(layout: &Layout) -> Layout {
         }
         let side = if on_left { &mut out.left } else { &mut out.right };
         let close = side.iter().position(|x| *x == Button::Close);
+        let maximize = side.iter().position(|x| *x == Button::Maximize);
         match (on_left, close) {
             // Close on the left is outermost, so the others go to its right.
             (true, Some(i)) => side.insert(i + 1, b),
-            (false, Some(i)) => side.insert(i, b),
+            // On the right, Close is outermost, so Maximize goes before it and Minimize before Maximize.
+            (false, Some(i)) => side.insert(maximize.filter(|_| b == Button::Minimize).unwrap_or(i), b),
             (_, None) => side.push(b),
         }
     }

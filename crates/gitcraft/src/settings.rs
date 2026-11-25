@@ -275,10 +275,15 @@ impl Store {
             return Ok(());
         }
         // Waiting briefly: a lock another window holds is tried again later, quietly.
-        match self.flush_within(Some(std::time::Duration::from_millis(50))) {
+        let result = match self.flush_within(Some(std::time::Duration::from_millis(50))) {
             Err(e) if e == gitcraft_core::settings_file::LOCK_BUSY => Ok(()),
             other => other,
+        };
+        // Still pending (a busy lock or a failed write): come back for it even if nothing else repaints.
+        if let Some(due) = self.due {
+            ctx.request_repaint_after(due.saturating_duration_since(Instant::now()).max(std::time::Duration::from_millis(100)));
         }
+        result
     }
 
     /// Write what has not been written yet (before quitting or restarting), waiting a few

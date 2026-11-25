@@ -202,6 +202,33 @@ pub fn conflict_marker_size(dir: &Path, file: &str) -> usize {
     out.stdout.lines().next().and_then(|l| l.rsplit(": ").next()).and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(7)
 }
 
+/// The marker length to use for `text`: the attribute's, unless the attribute changed after the conflict was
+/// written and the file holds only complete blocks (`<<<`, `===` and `>>>` of one equal length) of another length.
+/// Incomplete marker sequences are never taken as blocks.
+fn marker_size_for(attribute: usize, text: &str) -> usize {
+    let run = |l: &str, ch: char| {
+        let n = l.chars().take_while(|c| *c == ch).count();
+        (n >= 3 && (l.len() == n || l[n..].starts_with(' '))).then_some(n)
+    };
+    let mut found = Vec::new();
+    let mut open: Option<(usize, bool)> = None;
+    for l in text.lines().map(|l| l.trim_end_matches('\r')) {
+        if let Some(n) = run(l, '<') {
+            open = Some((n, false));
+        } else if let Some((n, _)) = open {
+            if l.len() == n && l.chars().all(|c| c == '=') {
+                open = Some((n, true));
+            } else if let (Some(m), true) = (run(l, '>'), open.is_some_and(|o| o.1)) {
+                if m == n {
+                    found.push(n);
+                }
+                open = None;
+            }
+        }
+    }
+    if found.contains(&attribute) { attribute } else { found.first().copied().unwrap_or(attribute) }
+}
+
 /// The names shown for "current" and "incoming": during a merge HEAD's branch and MERGE_HEAD's
 /// name; during a rebase the branch being rebased onto and the commit being replayed.
 pub fn conflict_labels(dir: &Path) -> (String, String) {
@@ -240,6 +267,7 @@ pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
     let binary = !utf16 && working.as_deref().map(crate::files::is_binary).unwrap_or(false);
     let (ours_label, theirs_label) = conflict_labels(dir);
     let working_token=crate::files::content_token(working.as_deref());
+    let marker_size = marker_size_for(conflict_marker_size(dir, file), working.as_deref().map(String::from_utf8_lossy).as_deref().unwrap_or(""));
     let mut decoding_loss=false;
     let mut decoded=[working,crate::files::contents(dir,":1",file),crate::files::contents(dir,":2",file),crate::files::contents(dir,":3",file)].into_iter().map(|bytes|bytes.map(|bytes| {
         let (text,loss)=crate::prefs::decode_preview(&bytes,encoding);decoding_loss|=loss;text
@@ -248,7 +276,7 @@ pub fn conflict_info(dir: &Path, file: &str) -> ConflictInfo {
         working_token,decoding_loss,
         working:decoded.next().unwrap(),base:decoded.next().unwrap(),ours:decoded.next().unwrap(),theirs:decoded.next().unwrap(),
         ours_label,theirs_label,binary,
-        marker_size: conflict_marker_size(dir, file),
+        marker_size,
     }
 }
 

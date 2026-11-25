@@ -109,7 +109,7 @@ def cpu_ticks(pid):
         try:
             with open(f"/proc/{p}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
-                total += int(fields[11]) + int(fields[12])
+                total += sum(int(fields[i]) for i in (11, 12, 13, 14))  # utime, stime, cutime, cstime
         except (OSError, IndexError, ValueError):
             pass
     return total
@@ -121,18 +121,25 @@ def scroll(name, frames, repo, cmd, runs=3):
     for _ in range(runs):
         proc, out, start, home = launch(cmd, repo, {"GITCRAFT_BENCH_SCROLL": str(frames)})
         deadline = time.time() + 300
-        begin = end = None
+        end = None
         while time.time() < deadline and end is None:
-            text = lines(out)
-            if begin is None and any(l.startswith("mark scroll-start") for l in text):
-                begin = (cpu_ticks(proc.pid), time.time())
-            if begin is not None and any(l.startswith("mark scroll-end") for l in text):
-                end = (cpu_ticks(proc.pid), time.time())
-            time.sleep(0.002)
-        details.append([l for l in lines(out) if not l.startswith("mark") and not l.startswith("ready")])
+            if any(l.startswith("mark scroll-end") for l in lines(out)):
+                end = True
+            time.sleep(0.05)
+        text = lines(out)
+        details.append([l for l in text if not l.startswith("mark") and not l.startswith("ready")])
         stop(proc, home)
-        if begin and end:
-            results.append({"cpu_ms_per_frame": round((end[0] - begin[0]) * 1000 / hz / frames, 3), "wall_s": round(end[1] - begin[1], 2)})
+        # The app writes its own CPU time into each mark, so the phase is bracketed exactly even if the
+        # runner was late to see the marks; a run whose marks lack it is dropped.
+        def mark_at(step):
+            for l in text:
+                f = l.split()
+                if f[:2] == ["mark", step] and len(f) >= 4 and f[3].startswith("cpu="):
+                    return int(f[2]), int(f[3][4:])
+            return None
+        begin, finish = mark_at("scroll-start"), mark_at("scroll-end")
+        if begin and finish:
+            results.append({"cpu_ms_per_frame": round((finish[1] - begin[1]) * 1000 / hz / frames, 3), "wall_s": round((finish[0] - begin[0]) / 1000, 2)})
     print(json.dumps({"name": name, "repo": os.path.basename(repo), "frames": frames, "runs": results, "app": details[-1] if details else []}))
 
 if __name__ == "__main__":

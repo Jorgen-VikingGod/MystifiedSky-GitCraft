@@ -91,7 +91,13 @@ impl App {
             }
             ui.add_space(8.0);
             let now = chrono::Local::now().timestamp();
-            let min_age = days.parse::<i64>().unwrap_or(0) * 86400;
+            // An age that isn't a number of days, or that overflows, deletes nothing until it is fixed.
+            let min_age = days.trim().parse::<i64>().ok().and_then(|d| d.checked_mul(86400)).filter(|d| *d >= 0);
+            if min_age.is_none() {
+                ui.label(egui::RichText::new("Enter the age in whole days.").size(12.0).color(REMOVED));
+            }
+            let age_valid = min_age.is_some();
+            let min_age = min_age.unwrap_or(i64::MAX);
             let all = list.lock().unwrap_or_else(|e| e.into_inner()).1.clone();
             let shown: Vec<CleanupBranch> = all.clone().unwrap_or_default().into_iter().filter(|b| {
                 now - b.time >= min_age
@@ -153,7 +159,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let n = picked.len();
-                    if widgets::button(ui, Kind::Danger, None, &format!("Delete {n} branch{}", if n == 1 { "" } else { "es" }), 28.0, n > 0).clicked() {
+                    if widgets::button(ui, Kind::Danger, None, &format!("Delete {n} branch{}", if n == 1 { "" } else { "es" }), 28.0, n > 0 && age_valid).clicked() {
                         let names: Vec<String> = picked.iter().cloned().collect();
                         // Each remote branch as reviewed here, so a changed upstream isn't deleted.
                         let ups: Vec<RemoteBranch> = all.iter().flatten().filter(|b| picked.contains(&b.name) && remotes.contains(&b.name) && !b.upstream.is_empty() && !b.upstream_gone).map(|b| RemoteBranch { branch: b.name.clone(), remote: b.remote.clone(), reference: b.remote_ref.clone() }).collect();
@@ -411,7 +417,8 @@ impl App {
         let engine = self.engine.clone();
         let total = paths.len();
         let verb = if pull { "Pulling" } else { "Fetching" };
-        self.busy = Some(format!("{verb} repositories (0 of {total} complete)…"));
+        self.bulk_message = Some(format!("{verb} repositories (0 of {total} complete)…"));
+        self.update_busy();
         let inbox = self.inbox.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -434,7 +441,8 @@ impl App {
                             && n > *shown
                         {
                             *shown = n;
-                            app.busy = Some(format!("{verb} repositories ({n} of {total} complete)…"));
+                            app.bulk_message = Some(format!("{verb} repositories ({n} of {total} complete)…"));
+                            app.update_busy();
                         }
                     })));
                     ctx.request_repaint();
@@ -447,7 +455,8 @@ impl App {
             inbox.post(super::Msg::Apply(Box::new(move |app: &mut App| {
                 if app.bulk.is_some_and(|(b, _)| b == batch) {
                     app.bulk = None;
-                    app.busy = None;
+                    app.bulk_message = None;
+                    app.update_busy();
                 }
                 refresh.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 let what = if pull { "Pulled" } else { "Fetched" };

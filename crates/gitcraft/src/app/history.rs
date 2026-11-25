@@ -270,8 +270,7 @@ impl App {
                             dui.label(egui::RichText::new(e).size(13.0).color(REMOVED));
                         }
                         Some(Loaded::Ready(lines)) => {
-                            let lines = lines.clone();
-                            if let Some(sha) = blame_view(&mut dui, &lines, &mut h.hover, self.settings.flag("wordWrap", false), later) {
+                            if let Some(sha) = blame_view(&mut dui, lines, &mut h.hover, self.settings.flag("wordWrap", false), later) {
                                 on_graph = Some(sha);
                             }
                         }
@@ -354,16 +353,56 @@ impl App {
     }
 }
 
+/// What a blame result's drawing needs that doesn't change from frame to frame.
+struct BlameMeta {
+    colors: HashMap<String, Color32>,
+    longest: f32,
+}
+
 /// Blame: each run of lines from one commit has a coloured bar with its author, age and sha.
 /// Returns a commit to show on the graph.
-fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, _wrap: bool, later: &mut Vec<Later>) -> Option<String> {
+fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, wrap: bool, later: &mut Vec<Later>) -> Option<String> {
     let c = p();
     let font = FontId::monospace(12.0);
-    let mut colors: HashMap<&str, Color32> = HashMap::new();
-    for l in lines {
-        let n = colors.len();
-        colors.entry(l.sha.as_str()).or_insert_with(|| lane_color(n));
-    }
+    // What is worked out once for a blame result (found again by where its lines are) rather than every frame.
+    let result = ui.scope_id().with(("blame_meta", lines.as_ptr().addr(), lines.len()));
+    let meta: std::sync::Arc<BlameMeta> = match ui.data(|d| d.get_temp(result)) {
+        Some(meta) => meta,
+        None => {
+            let mut colors: HashMap<String, Color32> = HashMap::new();
+            for l in lines {
+                let n = colors.len();
+                colors.entry(l.sha.clone()).or_insert_with(|| lane_color(n));
+            }
+            let longest = lines.iter().map(|l| l.text.len()).max().unwrap_or(0) as f32 * 7.3 + 300.0;
+            let meta = std::sync::Arc::new(BlameMeta { colors, longest });
+            ui.data_mut(|d| d.insert_temp(result, meta.clone()));
+            meta
+        }
+    };
+    let colors = &meta.colors;
+    // With word wrap a long line takes several rows; the tops of all lines come from laying them out once per width.
+    let text_width = (ui.available_width() - 294.0).max(120.0);
+    let tops: Option<std::sync::Arc<Vec<f32>>> = wrap.then(|| {
+        let id = result.with(text_width.to_bits());
+        if let Some(tops) = ui.data(|d| d.get_temp::<std::sync::Arc<Vec<f32>>>(id)) {
+            return tops;
+        }
+        let mut tops = Vec::with_capacity(lines.len() + 1);
+        let mut y = 0.0;
+        for l in lines {
+            tops.push(y);
+            let g = ui.painter().layout(l.text.clone(), font.clone(), Color32::WHITE, text_width);
+            y += g.size().y.max(19.0);
+        }
+        tops.push(y);
+        let tops = std::sync::Arc::new(tops);
+        ui.data_mut(|d| d.insert_temp(id, tops.clone()));
+        tops
+    });
+    let row_top = |i: usize| tops.as_ref().map_or(i as f32 * 19.0, |t| t[i]);
+    let row_height = |i: usize| tops.as_ref().map_or(19.0, |t| t[i + 1] - t[i]);
+    let total_height = row_top(lines.len());
     let uncommitted = |l: &BlameLine| !l.sha.is_empty() && l.sha.bytes().all(|b| b == b'0');
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
     let text = format!("{} lines · ", lines.len());
@@ -377,17 +416,23 @@ fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, _wra
     }
     let mut pick = None;
     let now = chrono::Local::now().timestamp();
-    let longest = lines.iter().map(|l| l.text.len()).max().unwrap_or(0) as f32 * 7.3 + 300.0;
+    let longest = if wrap { 0.0 } else { meta.longest };
     let mut new_hover = None;
     egui::ScrollArea::both().id_salt("blame").auto_shrink([false, false]).content_margin(0).show_viewport(ui, |ui, viewport| {
         let width = longest.max(ui.available_width());
-        let (_, _) = ui.allocate_exact_size(vec2(width, lines.len() as f32 * 19.0), Sense::hover());
+        let (_, _) = ui.allocate_exact_size(vec2(width, total_height), Sense::hover());
         let origin = ui.min_rect().min;
-        let first = (viewport.top() / 19.0).floor().max(0.0) as usize;
-        let last = ((viewport.bottom() / 19.0).ceil() as usize + 1).min(lines.len());
+        let (first, last) = match &tops {
+            Some(tops) => (
+                tops.partition_point(|top| *top <= viewport.top()).saturating_sub(1).min(lines.len()),
+                tops.partition_point(|top| *top < viewport.bottom()).min(lines.len()),
+            ),
+            None => ((viewport.top() / 19.0).floor().max(0.0) as usize, ((viewport.bottom() / 19.0).ceil() as usize + 1).min(lines.len())),
+        };
         for i in first..last {
             let l = &lines[i];
-            let row = Rect::from_min_size(origin + vec2(0.0, i as f32 * 19.0), vec2(width, 19.0));
+            let height = row_height(i);
+            let row = Rect::from_min_size(origin + vec2(0.0, row_top(i)), vec2(width, height));
             let resp = ui.interact(row, ui.scope_id().with(("blame_row", i)), Sense::hover());
             if resp.hovered() {
                 new_hover = Some(l.sha.clone());
@@ -400,7 +445,7 @@ fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, _wra
                 ui.painter().line_segment([row.left_top(), row.right_top()], Stroke::new(1.0, c.white(0.05)));
             }
             let color = if uncommitted(l) { Color32::from_gray(0x88) } else { colors[l.sha.as_str()] };
-            ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(3.0, 19.0)), CornerRadius::ZERO, color);
+            ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(3.0, height)), CornerRadius::ZERO, color);
             if starts || i == first {
                 let small = FontId::proportional(11.5);
                 let who = if uncommitted(l) { "You".to_owned() } else { l.author.clone() };
@@ -412,16 +457,23 @@ fn blame_view(ui: &mut Ui, lines: &[BlameLine], hover: &mut Option<String>, _wra
                 if !uncommitted(l) {
                     ui.painter().text(pos2(row.left() + 222.0, row.center().y), Align2::RIGHT_CENTER, l.sha.chars().take(6).collect::<String>(), FontId::monospace(11.5), c.link);
                 }
-                let meta = Rect::from_min_size(row.min, vec2(230.0, 19.0));
-                let mresp = ui.interact(meta, ui.scope_id().with(("blame_meta", i)), Sense::click());
+                let meta_rect = Rect::from_min_size(row.min, vec2(230.0, 19.0));
+                let mresp = ui.interact(meta_rect, ui.scope_id().with(("blame_meta", i)), Sense::click());
                 let tip = if uncommitted(l) { "Not committed yet".to_owned() } else { format!("{}\n{}\nClick to view on the graph", l.summary, widgets::format_date(l.time, "MM/DD/YYYY @ h:mm A")) };
                 if mresp.tip(tip).clicked() && !uncommitted(l) {
                     pick = Some(l.sha.clone());
                 }
             }
-            ui.painter().text(pos2(row.left() + 230.0 + 44.0 - 8.0, row.center().y), Align2::RIGHT_CENTER, l.line.to_string(), font.clone(), c.fg3);
+            // The line number and text start at the row's first line when the text wraps.
+            let first_line_y = row.top() + 9.5;
+            ui.painter().text(pos2(row.left() + 230.0 + 44.0 - 8.0, first_line_y), Align2::RIGHT_CENTER, l.line.to_string(), font.clone(), c.fg3);
             ui.painter().line_segment([pos2(row.left() + 274.0, row.top()), pos2(row.left() + 274.0, row.bottom())], Stroke::new(1.0, c.white(0.05)));
-            ui.painter().text(pos2(row.left() + 286.0, row.center().y), Align2::LEFT_CENTER, &l.text, font.clone(), c.white(0.85));
+            if wrap {
+                let g = ui.painter().layout(l.text.clone(), font.clone(), c.white(0.85), text_width);
+                ui.painter().galley(pos2(row.left() + 286.0, row.top() + (19.0 - font.size) / 2.0 - 1.0), g, c.white(0.85));
+            } else {
+                ui.painter().text(pos2(row.left() + 286.0, first_line_y), Align2::LEFT_CENTER, &l.text, font.clone(), c.white(0.85));
+            }
         }
     });
     *hover = new_hover;

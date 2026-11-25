@@ -282,6 +282,9 @@ impl App {
         r.ui.diff = None;
         r.ui.history = None;
         r.ui.conflict = None;
+        // A pull request or issue in the centre makes way too: the search is over the graph.
+        r.ui.pr = None;
+        r.ui.issue = None;
         r.ui.search_open = true;
         r.ui.focus_search = true;
     }

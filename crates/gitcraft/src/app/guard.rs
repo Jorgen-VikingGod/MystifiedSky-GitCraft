@@ -27,6 +27,9 @@ pub struct Leaving {
 
 type Then = Rc<RefCell<Option<Box<dyn FnOnce(&mut App)>>>>;
 
+/// What a save prompt waits for while the user decides about a UTF-8 conversion.
+pub type Held = Rc<RefCell<Option<Leaving>>>;
+
 pub fn file_dirty(d: &DiffUi) -> bool {
     d.editing && d.draft.is_some()
 }
@@ -148,6 +151,7 @@ impl App {
         if self.discarding {
             return false;
         }
+        self.drop_stale_leaving();
         let mut pending: Vec<(u64, Editor, String)> = Vec::new();
         let mut ids: Vec<&u64> = self.repos.keys().filter(|id| tabs.is_empty() || tabs.contains(id)).collect();
         ids.sort();
@@ -202,6 +206,28 @@ impl App {
         true
     }
 
+    /// A save that something waits on needs the user's decision about converting to UTF-8: what waits is kept with
+    /// that question instead of being dropped, and goes on when the retried save finishes; declining drops it.
+    pub(crate) fn hold_for_conversion(&mut self, tab: u64, editor: Editor) -> Held {
+        let held = self.leaving.take_if(|l| l.waiting.contains(&(tab, editor)));
+        Rc::new(RefCell::new(held))
+    }
+
+    /// The conversion was confirmed: what waited on the save waits on its retry.
+    pub(crate) fn resume_after_conversion(&mut self, held: &Held) {
+        if self.leaving.is_none() {
+            self.leaving = held.borrow_mut().take();
+        }
+    }
+
+    /// A prompt that Save started can end without a save (its conversion question was declined): then nothing
+    /// waits any more.
+    fn drop_stale_leaving(&mut self) {
+        if self.leaving.is_some() && self.dialog.is_none() && !self.repos.values().any(|r| r.diff_ui.saving || r.conflict_ui.saving) {
+            self.leaving = None;
+        }
+    }
+
     /// A save asked for by the prompt finished. A failure keeps the text and drops what waited;
     /// the last success runs it.
     pub(crate) fn left_saved(&mut self, tab: u64, editor: Editor, ok: bool) {
@@ -222,10 +248,21 @@ impl App {
     /// The window was asked to close: hold it while editor text is unsaved. Runs in `logic`,
     /// which also runs while the window is minimized.
     pub(crate) fn guard_close(&mut self, ctx: &egui::Context) {
-        if self.discarding || !ctx.input(|i| i.viewport().close_requested()) || !self.has_unsaved(None) {
+        let requested = ctx.input(|i| i.viewport().close_requested());
+        if self.discarding || !(requested || self.close_pending) || !self.has_unsaved(None) {
+            self.close_pending = false;
             return;
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        // Another dialog is open: it keeps its place, and the close prompt follows once it is answered.
+        if self.dialog.is_some() {
+            self.close_pending = true;
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        self.close_pending = false;
         self.ask_unsaved(Vec::new(), false, Box::new(|app: &mut App| app.ctx.send_viewport_cmd(egui::ViewportCommand::Close)));
         ctx.request_repaint();
     }

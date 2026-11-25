@@ -49,7 +49,11 @@ pub fn texture(ctx: &egui::Context, email: &str) -> Option<TextureHandle> {
             return Some(t.clone());
         }
         Some(State::Loading) => return None,
-        Some(State::Missing(at)) if at.elapsed() < RETRY_AFTER => return None,
+        Some(State::Missing(at)) if at.elapsed() < RETRY_AFTER => {
+            // Asked again once the cooldown ends, even if nothing else repaints.
+            ctx.request_repaint_after(RETRY_AFTER.saturating_sub(at.elapsed()));
+            return None;
+        }
         _ => {}
     }
     if RUNNING.load(Ordering::Relaxed) >= IN_FLIGHT {

@@ -45,9 +45,31 @@ pub fn show(ui: &mut Ui, text: &str, base: &str) -> Option<String> {
         let mut j = std::mem::take(job);
         j.wrap.max_width = (width - indent).max(50.0);
         let galley = ui.fonts_mut(|f| f.layout_job(j));
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, galley.size().y), egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, galley.size().y), if links.is_empty() { egui::Sense::hover() } else { egui::Sense::click() });
         let origin = egui::pos2(rect.left() + indent, rect.top());
         ui.painter().galley(origin, galley.clone(), c.fg);
+        // Each link is a target of its own, so the keyboard can reach and activate it (Tab, then Enter or Space).
+        for (i, (range, url)) in links.iter().enumerate() {
+            let chars = |byte: usize| galley.job.text.get(..byte).map_or(0, |head| head.chars().count());
+            let start = galley.pos_from_cursor(egui::text::CCursor::new(chars(range.start)));
+            let end = galley.pos_from_cursor(egui::text::CCursor::new(chars(range.end)));
+            let local = if (start.top() - end.top()).abs() < 1.0 {
+                egui::Rect::from_min_max(start.left_top(), egui::pos2(end.left().max(start.left() + 4.0), end.bottom()))
+            } else {
+                egui::Rect::from_min_max(egui::pos2(0.0, start.top()), egui::pos2((width - indent).max(4.0), end.bottom()))
+            };
+            let link_rect = local.translate(origin.to_vec2()).intersect(rect);
+            let target = ui.interact(link_rect, resp.id.with(("link", i)), egui::Sense::click());
+            if target.has_focus() {
+                ui.painter().rect_stroke(link_rect.expand(1.0), egui::CornerRadius::same(2), egui::Stroke::new(1.0, super::theme::ACCENT), egui::StrokeKind::Outside);
+            }
+            if target.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if target.clicked() {
+                *clicked = Some(url.clone());
+            }
+        }
         if !links.is_empty() {
             if let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) {
                 let cursor = galley.cursor_from_pos(pos - origin);

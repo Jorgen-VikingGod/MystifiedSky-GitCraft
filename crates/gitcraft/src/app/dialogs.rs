@@ -550,14 +550,15 @@ impl App {
                 let body_height = (max_height - 40.0 - 56.0).max(120.0);
                 ui.horizontal_top(|ui| {
                     if let Some((items, active)) = dialog.sidebar.as_mut() {
-                        let (side, _) = ui.allocate_exact_size(vec2(195.0, 320.0_f32.max(0.0)), Sense::hover());
+                        // Its own scroll area, so every source stays reachable when the dialog is short.
+                        let view = 320.0_f32.min(body_height);
+                        ui.set_width(195.0);
+                        egui::ScrollArea::vertical().id_salt("sources").max_height(view).auto_shrink([false, false]).show(ui, |ui| {
+                        let (side, _) = ui.allocate_exact_size(vec2(195.0, (items.len() as f32 * 31.0 + 2.0).max(view)), Sense::hover());
                         ui.painter().rect_filled(side, CornerRadius::ZERO, Color32::from_black_alpha(50));
                         ui.painter().line_segment([side.right_top(), side.right_bottom()], Stroke::new(1.0, c.line));
                         for (i, (id, label, enabled)) in items.iter().enumerate() {
                             let row = Rect::from_min_size(pos2(side.left(), side.top() + 1.0 + i as f32 * 31.0), vec2(side.width() - 1.0, 31.0));
-                            if row.bottom() > side.bottom() {
-                                break;
-                            }
                             let r = ui.interact(row, ui.scope_id().with(("source", i)), if *enabled { Sense::click() } else { Sense::hover() });
                             let on = active == id;
                             if on {
@@ -581,6 +582,7 @@ impl App {
                                 *active = id.clone();
                             }
                         }
+                        });
                     }
                     ui.vertical(|ui| {
                         egui::Frame::new().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
@@ -589,7 +591,7 @@ impl App {
                                 let source = dialog.sidebar.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
                                 if source != "url" && source != "local" && !source.is_empty() {
                                     ui.horizontal_wrapped(|ui| {
-                                        ui.label(RichText::new("This service is not connected yet. Connect it to pick from your repositories, or paste a URL below.").size(12.0).color(c.fg3));
+                                        ui.label(RichText::new("Browsing this service's repositories isn't available yet. Paste the repository URL below.").size(12.0).color(c.fg3));
                                     });
                                     ui.add_space(8.0);
                                 }
@@ -678,7 +680,6 @@ impl App {
 fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>, chosen: &mut Option<usize>) {
     let c = p();
     let first = dialog.first_frame;
-    let can_submit = dialog.check.as_ref().and_then(|f| f(&dialog.values)).is_none() && dialog.busy.is_none();
     let last = dialog.choices.len().checked_sub(1);
     if let Body::Pick { hint, filter, rows, button, on_pick } = &mut dialog.body {
         let w = ui.available_width();
@@ -843,7 +844,8 @@ fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>,
                     row(ui, &mut dialog.values);
                 }
                 ui.add_space(12.0);
-                if submit && can_submit {
+                // Checked against the values as edited this frame, not as they were before the key press.
+                if submit && dialog.busy.is_none() && dialog.check.as_ref().and_then(|f| f(&dialog.values)).is_none() {
                     *chosen = last;
                 }
             }

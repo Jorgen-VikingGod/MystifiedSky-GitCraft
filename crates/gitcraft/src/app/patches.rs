@@ -18,7 +18,16 @@ pub fn patch_name(summary: &str) -> String {
         }
     }
     let trimmed: String = out.trim_matches('-').chars().take(52).collect();
-    format!("{}.patch", if trimmed.is_empty() { "changes" } else { &trimmed })
+    // Windows can't create files named after its devices, even with an extension (`aux.patch`).
+    let reserved = matches!(trimmed.as_str(), "con" | "prn" | "aux" | "nul")
+        || (trimmed.len() == 4 && (trimmed.starts_with("com") || trimmed.starts_with("lpt")) && trimmed.ends_with(|c: char| ('1'..='9').contains(&c)));
+    if trimmed.is_empty() {
+        "changes.patch".to_owned()
+    } else if reserved {
+        format!("patch-{trimmed}.patch")
+    } else {
+        format!("{trimmed}.patch")
+    }
 }
 
 /// Write `bytes` to `file`, replacing an existing file only once the new one is completely written.

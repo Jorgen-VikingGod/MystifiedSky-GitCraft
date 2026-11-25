@@ -553,7 +553,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
     // The ten reads don't depend on each other, and on Windows each Git process costs 20-50 ms just to start,
     // so they run at the same time instead of one after another. The history (resolving its
     // branches first) and the status take longest, so they start first.
-    let ((revs, log, date_order), refs, head, head_sha, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
+    let ((revs, log, mut date_order), refs, head, head_sha, st, wt, sm, remotes, work, gitdir) = std::thread::scope(|s| {
         let log = s.spawn(crate::read_jobs::inherit(|| {
             let mut resolve_args = vec!["rev-parse", "--revs-only"];
             resolve_args.extend(requested_revs.iter().map(String::as_str));
@@ -667,9 +667,12 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
             let mut resolve = vec!["rev-parse", "--revs-only"];
             resolve.extend(start.iter().map(String::as_str));
             d.history_revs = run(dir, &resolve).stdout.lines().map(str::to_owned).collect();
+            // The recovery log is read in date order, so later pages must continue in that order.
+            date_order = true;
             result
         }
     };
+    d.history_date_order = date_order;
 
     crate::read_jobs::check()?;
     if !log.ok && head_sha.ok { return Err(log.message()); }

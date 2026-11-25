@@ -10,16 +10,13 @@ pub fn desktop_notification(title: &str, body: &str) {
             let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
             Command::new("osascript").args(["-e", &format!("display notification \"{}\" with title \"{}\"", quote(&body), quote(&title))]).status()
         } else if cfg!(windows) {
-            let quote = |s: &str| s.replace('\'', "''");
-            let script = format!(
-                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; \
+            // The text goes in through the environment, never into the script, so it can't be taken for code. The
+            // notifier is named by the AppUserModelID the installer's shortcut registers.
+            let script = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; \
                  $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
-                 $x = $t.GetElementsByTagName('text'); $x.Item(0).AppendChild($t.CreateTextNode('{}')) > $null; $x.Item(1).AppendChild($t.CreateTextNode('{}')) > $null; \
-                 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('GitCraft').Show([Windows.UI.Notifications.ToastNotification]::new($t))",
-                quote(&title),
-                quote(&body)
-            );
-            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status()
+                 $x = $t.GetElementsByTagName('text'); $x.Item(0).AppendChild($t.CreateTextNode($env:GITCRAFT_NOTIFY_TITLE)) > $null; $x.Item(1).AppendChild($t.CreateTextNode($env:GITCRAFT_NOTIFY_BODY)) > $null; \
+                 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('dev.gitcraft.desktop').Show([Windows.UI.Notifications.ToastNotification]::new($t))";
+            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).env("GITCRAFT_NOTIFY_TITLE", &title).env("GITCRAFT_NOTIFY_BODY", &body).status()
         } else {
             Command::new("notify-send").args(["--app-name=GitCraft", &title, &body]).status()
         };

@@ -20,23 +20,29 @@ pub fn web_base(remote_url: &str) -> Option<String> {
         return None;
     }
     let (mut host, mut path): (String, String);
+    // Plain http stays http; SSH and Git transports have a site on https.
+    let mut site_scheme = "https";
     let scp = url.split_once('@').filter(|(user, _)| !user.contains('/') && !user.contains(':')).and_then(|(_, rest)| rest.split_once(':')).filter(|(h, p)| !h.contains('/') && !p.starts_with('/'));
     if let (Some((h, p)), false) = (scp, url.contains("://")) {
         host = h.to_owned();
         path = p.to_owned();
     } else {
-        let (scheme, rest) = url.split_once("://")?;
-        if !matches!(scheme.to_lowercase().as_str(), "ssh" | "git" | "http" | "https" | "git+ssh") {
+        // Parsed as a URL, so a bracketed IPv6 host stays whole and only an SSH port is left out.
+        let parsed = url::Url::parse(url).ok()?;
+        let scheme = parsed.scheme().to_lowercase();
+        if !matches!(scheme.as_str(), "ssh" | "git" | "http" | "https" | "git+ssh") {
             return None;
         }
-        let rest = rest.split_once('@').filter(|(u, _)| !u.contains('/')).map_or(rest, |(_, r)| r);
-        let (authority, p) = rest.split_once('/')?;
-        let (h, port) = authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
-        host = h.to_owned();
-        if scheme.starts_with("http")
-            && let Some(port) = port
-        {
-            host = format!("{host}:{port}");
+        host = parsed.host_str()?.to_owned();
+        if scheme.starts_with("http") {
+            site_scheme = if scheme == "http" { "http" } else { "https" };
+            if let Some(port) = parsed.port() {
+                host = format!("{host}:{port}");
+            }
+        }
+        let p = parsed.path().trim_start_matches('/');
+        if p.is_empty() {
+            return None;
         }
         path = p.to_owned();
     }
@@ -60,7 +66,7 @@ pub fn web_base(remote_url: &str) -> Option<String> {
     if !path.contains('/') {
         return None;
     }
-    Some(format!("https://{host}/{path}"))
+    Some(format!("{site_scheme}://{host}/{path}"))
 }
 
 fn enc(s: &str) -> String {

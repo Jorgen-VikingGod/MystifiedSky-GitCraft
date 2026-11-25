@@ -418,6 +418,11 @@ impl App {
                 later.push(Box::new(|app| app.settings.set("showTerminal", false)));
                 return;
             }
+            // The same terminal stays selected: only a tab closed before it moves its index, and closing the
+            // selected one picks the neighbour that took its place.
+            if i < panel.active {
+                panel.active -= 1;
+            }
             panel.active = panel.active.min(panel.sessions.len() - 1);
         }
         let panel = self.term_panels.get_mut(&tab).expect("panel");
@@ -464,9 +469,20 @@ impl App {
             let app_cursor = s.term.mode().contains(TermMode::APP_CURSOR);
             let events = ui.input(|i| i.events.clone());
             let mut out = String::new();
+            // The input method is anchored at the cursor's cell, so its candidate window opens there.
+            {
+                let cursor = s.term.grid().cursor.point;
+                let row = (cursor.line.0 + s.term.grid().display_offset() as i32).clamp(0, rows as i32 - 1) as f32;
+                let cell = Rect::from_min_size(pos2(screen.left() + cursor.column.0 as f32 * cell_w, screen.top() + row * cell_h), vec2(cell_w, cell_h));
+                ui.output_mut(|o| o.ime = Some(egui::output::IMEOutput::new(id, 1, egui::IMEPurpose::Terminal, screen, cell)));
+            }
+            // Committed IME text is sent once, even if the platform also reports it as typed text.
+            let committed: Vec<String> = events.iter().filter_map(|e| if let egui::Event::Ime(egui::ImeEvent::Commit(t)) = e { Some(t.clone()) } else { None }).collect();
             for e in events {
                 match e {
+                    egui::Event::Text(t) if committed.contains(&t) => {}
                     egui::Event::Text(t) => out.push_str(&t),
+                    egui::Event::Ime(egui::ImeEvent::Commit(t)) => out.push_str(&t),
                     egui::Event::Paste(t) => {
                         if s.term.mode().contains(TermMode::BRACKETED_PASTE) {
                             out.push_str(&format!("\x1b[200~{t}\x1b[201~"));
@@ -474,12 +490,14 @@ impl App {
                             out.push_str(&t.replace("\r\n", "\r").replace('\n', "\r"));
                         }
                     }
-                    // Cmd+C on macOS copies; elsewhere Ctrl+C goes to the shell (Ctrl+Shift+C copies).
+                    // Cmd+C on macOS copies; elsewhere Ctrl+C goes to the shell as an interrupt (Ctrl+Shift+C copies).
                     egui::Event::Copy => {
-                        if cfg!(target_os = "macos")
-                            && let Some(text) = s.term.selection_to_string()
-                        {
-                            ui.ctx().copy_text(text);
+                        if cfg!(target_os = "macos") {
+                            if let Some(text) = s.term.selection_to_string() {
+                                ui.ctx().copy_text(text);
+                            }
+                        } else {
+                            out.push('\x03');
                         }
                     }
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -533,7 +551,11 @@ impl App {
                 } else if resp.double_clicked() {
                     s.term.selection = Some(Selection::new(SelectionType::Semantic, point, side));
                 } else if resp.drag_started_by(egui::PointerButton::Primary) {
-                    s.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                    // The drag begins where the button went down, not where the drag threshold was crossed.
+                    let (start, start_side) = ui.input(|i| i.pointer.press_origin()).map_or((point, side), |origin| at(origin, &s.term));
+                    let mut selection = Selection::new(SelectionType::Simple, start, start_side);
+                    selection.update(point, side);
+                    s.term.selection = Some(selection);
                 } else if resp.dragged_by(egui::PointerButton::Primary) {
                     if pos.y < screen.top() {
                         s.term.scroll_display(Scroll::Delta(1));

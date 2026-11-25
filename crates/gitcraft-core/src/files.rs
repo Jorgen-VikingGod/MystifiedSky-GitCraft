@@ -443,6 +443,12 @@ pub fn content_token(bytes: Option<&[u8]>) -> String {
 }
 
 pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option<&str>, utf8: bool) -> Result<(), String> {
+    save_checked_token(dir, file, content, expected, utf8).map(|_| ())
+}
+
+/// [`save_checked_mode`], returning the content token of the exact bytes it wrote, so a later save can expect them
+/// without reading the file again (which could pick up an edit made meanwhile by another program).
+pub fn save_checked_token(dir: &Path, file: &str, content: &str, expected: Option<&str>, utf8: bool) -> Result<String, String> {
     let root = dir.canonicalize().map_err(|error| error.to_string())?;
     let path = repo_file(&root, file)?;
     let destination = match std::fs::symlink_metadata(&path) {
@@ -488,7 +494,7 @@ pub fn save_checked_mode(dir: &Path, file: &str, content: &str, expected: Option
     save_mode(dir, &destination, content, utf8)
 }
 
-fn save_mode(dir: &Path, p: &Path, content: &str, utf8: bool) -> Result<(), String> {
+fn save_mode(dir: &Path, p: &Path, content: &str, utf8: bool) -> Result<String, String> {
     // Keep the file's existing line endings.
     let before = match std::fs::read(p) {
         Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Vec::new(),Err(error)=>return Err(error.to_string()),
@@ -504,7 +510,8 @@ fn save_mode(dir: &Path, p: &Path, content: &str, utf8: bool) -> Result<(), Stri
         Some(e) => crate::prefs::encode(&text, e, before.starts_with(&[0xFF, 0xFE]) || before.starts_with(&[0xFE, 0xFF]))?,
         None => text.into_bytes(),
     } };
-    replace_file_at(p, |file| std::io::Write::write_all(file, &bytes)).map_err(|e| e.to_string())
+    replace_file_at(p, |file| std::io::Write::write_all(file, &bytes)).map_err(|e| e.to_string())?;
+    Ok(content_token(Some(&bytes)))
 }
 
 /// Follow an existing symlink while keeping the link itself intact. A same-directory

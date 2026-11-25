@@ -452,9 +452,18 @@ impl App {
 
     /// After a worktree action succeeded: a new worktree opens in a tab of its own, and a removed
     /// one's tab closes.
-    pub(crate) fn worktree_done(&mut self, action: &Action) {
+    pub(crate) fn worktree_done(&mut self, tab: u64, action: &Action) {
         match action {
-            Action::WorktreeAdd { path, .. } if Path::new(path).is_dir() => self.open_repo(path),
+            Action::WorktreeAdd { path, .. } => {
+                // Git resolves a relative folder against the repository, not against GitCraft's own folder.
+                let folder = match self.repo(tab) {
+                    Some(r) => Path::new(&r.path).join(path),
+                    None => Path::new(path).to_path_buf(),
+                };
+                if folder.is_dir() {
+                    self.open_repo(&folder.to_string_lossy());
+                }
+            }
             Action::WorktreeRemove { path, .. } => {
                 if let Some(t) = self.tab_of(path) {
                     self.close_tab(t);

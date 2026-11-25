@@ -410,7 +410,11 @@ impl App {
             }
             if teams_open {
                 match conflicts {
-                    None => note(ui, "Conflict prevention is off for this repository."),
+                    None => {
+                        // Off for this repository, or the check hasn't finished yet.
+                        let detecting = self.settings.flag("conflictDetection", true) && self.repo_pref(&r.path, "conflictDetection").and_then(|v| v.as_bool()).unwrap_or(true);
+                        note(ui, if detecting { "Checking for conflicts…" } else { "Conflict prevention is off for this repository." });
+                    }
                     Some(cc) if cc.files.is_empty() => note(ui, &cc.note.clone().unwrap_or_else(|| format!("No conflicts with {}.", cc.target))),
                     Some(cc) => {
                         note(ui, &format!("{} file{} would conflict with {}:", cc.files.len(), if cc.files.len() == 1 { "" } else { "s" }, cc.target));
@@ -704,15 +708,19 @@ fn section(ui: &mut Ui, title: &str, icon: Icon, count: Option<usize>, open: boo
         right -= 8.0;
     }
     let mut action_clicked = false;
-    if let Some((icon, tip)) = action
-        && hovered
-    {
+    if let Some((icon, tip)) = action {
+        // Always there for the keyboard; the icon is drawn only while the header is hovered or the action focused.
         let ar = Rect::from_min_size(pos2(right - 18.0, rect.center().y - 9.0), Vec2::splat(18.0));
         let aresp = ui.interact(ar, ui.scope_id().with(("section_action", title)), Sense::click());
-        if aresp.hovered() {
-            ui.painter().rect_filled(ar, CornerRadius::same(3), c.white(0.1));
+        if hovered || aresp.has_focus() {
+            if aresp.hovered() {
+                ui.painter().rect_filled(ar, CornerRadius::same(3), c.white(0.1));
+            }
+            if aresp.has_focus() {
+                ui.painter().rect_stroke(ar, CornerRadius::same(3), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+            }
+            icons::paint(ui, ar, icon, 13.0, if aresp.hovered() { c.white(1.0) } else { c.white(0.7) });
         }
-        icons::paint(ui, ar, icon, 13.0, if aresp.hovered() { c.white(1.0) } else { c.white(0.7) });
         if aresp.tip(tip).clicked() {
             action_clicked = true;
             on_action(ui);

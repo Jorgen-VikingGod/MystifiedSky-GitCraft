@@ -104,6 +104,31 @@ fn alpha(rgb: Color32, a: f32) -> Color32 {
 }
 
 impl Palette {
+    /// A success colour for small text drawn over this theme's selected rows: the bright green on dark themes, a
+    /// darker one on light themes, where the bright one is hard to read.
+    pub fn good_text(&self) -> Color32 {
+        // The row is translucent: what shows is its colour laid over the panel.
+        let [r, g, b, a] = self.selrow.to_srgba_unmultiplied();
+        let a = f32::from(a) / 255.0;
+        let mix = |top: u8, under: u8| (f32::from(top) * a + f32::from(under) * (1.0 - a)).round() as u8;
+        let row = Color32::from_rgb(mix(r, self.panel.r()), mix(g, self.panel.g()), mix(b, self.panel.b()));
+        let luminance = |c: Color32| {
+            let lin = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+        };
+        let ratio = |fg: Color32| {
+            let (l1, l2) = (luminance(fg), luminance(row));
+            (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05)
+        };
+        [GOOD, Color32::from_rgb(0x10, 0x58, 0x22), Color32::from_rgb(0x8a, 0xe0, 0x8a)]
+            .into_iter()
+            .find(|c| ratio(*c) >= 4.5)
+            .unwrap_or(GOOD)
+    }
+
     pub fn of(theme: Theme) -> Palette {
         let white = Color32::WHITE;
         let black = Color32::BLACK;
@@ -405,6 +430,19 @@ mod tests {
                 assert!(contrast(c.fg, bg) >= 7.0, "{theme:?}: body text {:.1}", contrast(c.fg, bg));
                 assert!(contrast(c.fg2, bg) >= 4.5, "{theme:?}: secondary text {:.1}", contrast(c.fg2, bg));
             }
+        }
+    }
+
+    #[test]
+    fn success_text_is_readable_on_selected_rows() {
+        for theme in Theme::ALL {
+            let c = Palette::of(theme);
+            // The selected row is translucent: what shows is that colour laid over the panel.
+            let [r, g, b, a] = c.selrow.to_srgba_unmultiplied();
+            let a = f32::from(a) / 255.0;
+            let mix = |top: u8, under: u8| (f32::from(top) * a + f32::from(under) * (1.0 - a)).round() as u8;
+            let row = Color32::from_rgb(mix(r, c.panel.r()), mix(g, c.panel.g()), mix(b, c.panel.b()));
+            assert!(contrast(c.good_text(), row) >= 4.5, "{theme:?}: success text {:.1}", contrast(c.good_text(), row));
         }
     }
 

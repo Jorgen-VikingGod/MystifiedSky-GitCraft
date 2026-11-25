@@ -162,6 +162,11 @@ impl SplitLines {
         self.len += 1;
     }
 
+    /// How many document lines the comparison covers.
+    pub fn lines(&self) -> usize {
+        self.len
+    }
+
     pub fn row(&self, line: usize) -> Option<usize> {
         if line >= self.len {
             return None;
@@ -231,7 +236,9 @@ fn keyed_lines(text: &str, ignore_ws: bool) -> (Vec<String>, Vec<String>) {
         let ended = raw.ends_with('\n');
         let line = raw.strip_suffix('\n').map_or(raw, |l| l.strip_suffix('\r').unwrap_or(l));
         let key = if ignore_ws { line.trim() } else { line };
-        keys.push(if ended { key.to_owned() } else { format!("{key}\0no newline") });
+        // Exact comparison also tells CRLF from LF line breaks (the shown text has neither); Ignore Whitespace doesn't.
+        let crlf = ended && raw.ends_with("\r\n") && !ignore_ws;
+        keys.push(if !ended { format!("{key}\0no newline") } else if crlf { format!("{key}\0crlf") } else { key.to_owned() });
         shown.push(line.to_owned());
     }
     (shown, keys)

@@ -116,7 +116,7 @@ pub enum Msg {
     Acted { tab: u64, action: Box<Action>, quiet: bool, result: ActionResult },
     CommitFiles { tab: u64, sha: String, files: Vec<gitcraft_core::git::CommitFile>, signature: String },
     CommitDetails { tab: u64, sha: String, result: Result<gitcraft_core::git::Commit, String> },
-    RangeFiles { tab: u64, key: (String, String), result: Result<Vec<gitcraft_core::git::FileChange>, String> },
+    RangeFiles { tab: u64, request: u64, key: (String, String), result: Result<Vec<gitcraft_core::git::FileChange>, String> },
     Stats { tab: u64, stats: Vec<gitcraft_core::files::Stats> },
     Side { tab: u64, side: Box<left::SideData> },
     Locks { tab: u64, result: Result<Vec<gitcraft_core::manage::LfsLock>, String> },
@@ -208,6 +208,8 @@ pub struct App {
     pub(crate) pending_drafts: Vec<(String, repo::Draft)>,
     /// What waits for the saves chosen in the unsaved-changes prompt.
     pub(crate) leaving: Option<guard::Leaving>,
+    /// The window was asked to close while another dialog was open.
+    pub(crate) close_pending: bool,
     /// Discard was chosen for a close or restart: unsaved text no longer holds it up.
     pub(crate) discarding: bool,
     /// The benchmark probe (`GITCRAFT_BENCH`).
@@ -227,6 +229,8 @@ pub struct App {
     /// shown), and how many have been started.
     pub(crate) bulk: Option<(u64, usize)>,
     pub(crate) bulk_batch: u64,
+    /// The bulk run's status-bar text, kept apart from the tabs' own so ending one never clears the other.
+    pub(crate) bulk_message: Option<String>,
     /// Counts diff reads, so a read only fills the cache entry it was started for.
     pub(crate) diff_reads: u64,
     /// Counts file-history reads, so a page is added only by the latest read.
@@ -250,8 +254,11 @@ pub struct App {
     pub(crate) term_exits: Arc<std::sync::Mutex<Vec<u32>>>,
     pub(crate) hosted: HashMap<u64, hosting::Hosted>,
     pub(crate) launchpad: hosting::Launchpad,
+    /// Counts the Launchpad resets, so a page requested before one is dropped.
+    pub(crate) launchpad_generation: u64,
     /// A Start a Pull Request dialog waiting for AI text: tab, branch, target.
-    pub(crate) pr_waiting: Option<(u64, String, String, bool)>,
+    /// The pull request form waiting for its AI text: the tab, branch, target, draft choice and the request's id.
+    pub(crate) pr_waiting: Option<(u64, String, String, bool, u64)>,
     fetched_at: Option<std::time::Instant>,
     primary: Option<Box<crate::instance::Primary>>,
     /// Clone links waiting for the dialog in front to close.
@@ -302,6 +309,7 @@ impl App {
             drafts: HashMap::new(),
             pending_drafts: Vec::new(),
             leaving: None,
+            close_pending: false,
             discarding: false,
             bench: bench::Bench::from_env(),
             notices: Vec::new(),
@@ -314,6 +322,7 @@ impl App {
             palette_request: 0,
             bulk: None,
             bulk_batch: 0,
+            bulk_message: None,
             diff_reads: 0,
             history_reads: 0,
             shortcuts: None,
@@ -331,6 +340,7 @@ impl App {
             term_exits: Default::default(),
             hosted: HashMap::new(),
             launchpad: Default::default(),
+            launchpad_generation: 0,
             pr_waiting: None,
             fetched_at: None,
             primary: None,
@@ -519,6 +529,48 @@ impl App {
             None => self.tabs.push(tab),
         }
         self.active = id;
+        self.remember_tabs();
+    }
+
+    /// A missing repository was found at `path`: its tab shows that repository in the same place, without being
+    /// counted as a closed tab. When the repository is already open in another tab, that tab is used instead.
+    fn locate_tab(&mut self, tab: u64, path: &str) {
+        let Some(at) = self.tabs.iter().position(|t| t.id == tab) else { return };
+        let known = self.tabs.iter().filter_map(|t| t.path().map(str::to_owned)).chain(self.settings.recents()).find(|p| same_folder(p, path));
+        let path = known.as_deref().unwrap_or(path).to_owned();
+        let mut recents = self.settings.recents();
+        recents.retain(|r| !same_folder(r, &path));
+        recents.insert(0, path.clone());
+        recents.truncate(20);
+        self.settings.set("recents", recents);
+        let existing = self.tabs.iter().find(|t| t.id != tab && t.path().is_some_and(|p| same_folder(p, &path))).map(|t| t.id);
+        let replacement = existing.is_none().then(|| self.repo_tab(path.clone()));
+        let old = match replacement {
+            Some(new) => {
+                if self.active == tab {
+                    self.active = new.id;
+                }
+                std::mem::replace(&mut self.tabs[at], new)
+            }
+            None => {
+                let old = self.tabs.remove(at);
+                if self.active == tab {
+                    self.active = existing.unwrap_or(0);
+                }
+                old
+            }
+        };
+        if let Some(mut r) = self.repos.remove(&old.id) {
+            r.cancel_reads();
+        }
+        if let Some(panel) = self.term_panels.remove(&old.id) {
+            for s in panel.sessions {
+                if let Some(t) = s.id {
+                    self.terminals.close("main", t);
+                }
+            }
+        }
+        self.diffs.retain(|k, _| k.0 != old.id);
         self.remember_tabs();
     }
 
@@ -806,6 +858,11 @@ impl eframe::App for App {
 impl App {
     /// Picture-taking runs: open a view of the first repository tab.
     fn show_for_picture(&mut self, view: &str) {
+        // The palette needs no repository: it shows over the Start tab too.
+        if view == "palette" {
+            self.open_palette(keys::Picker::Root);
+            return;
+        }
         let tab = self.active;
         let Some(r) = self.repo_mut(tab) else { return };
         let Some(v) = r.view.as_ref() else { return };
@@ -839,7 +896,6 @@ impl App {
                     r.ui.select(repo::Selection::Commit(sha));
                 }
             }
-            "palette" => self.open_palette(keys::Picker::Root),
             "prefs" => self.open_prefs(None),
             "terminal" => {
                 self.settings.set("showTerminal", true);
@@ -868,20 +924,42 @@ impl App {
             Msg::Toast(ok, text) => self.toast(ok, text),
             Msg::Copy(text) => self.copy(&text),
             Msg::OpenRepo(path) => self.open_repo(&path),
-            Msg::Located { tab, path } => {
-                self.close_tab(tab);
-                self.open_repo(&path);
-            }
+            Msg::Located { tab, path } => self.locate_tab(tab, &path),
             Msg::Repo { tab, generation, result } => self.repo_loaded(tab, generation, *result),
             Msg::Page { tab, generation, request, result } => self.page_loaded(tab, generation, &request, *result),
             Msg::Status { tab, generation, result } => self.status_loaded(tab, generation, result),
             Msg::Changed { path, full } => self.changed(&path, full),
             Msg::Watching { tab, result } => self.watching(tab, result),
             Msg::Acted { tab, action, quiet, result } => {
+                // The submodule list in Preferences is read again only after the change is in place, so a frame drawn
+                // meanwhile can't fill the cache with the old list.
+                if matches!(*action, Action::SubmoduleAdd { .. } | Action::SubmoduleUpdate { .. } | Action::SubmoduleRemove { .. })
+                    && let Some(p) = self.prefs.as_mut()
+                {
+                    p.submodules = None;
+                }
+                if let Action::Stash { message } = &*action
+                    && result.ok
+                    && let Some(r) = self.repo_mut(tab)
+                    && r.work.stash_message == *message
+                {
+                    // Newer text typed while the stash ran is kept.
+                    r.work.stash_message.clear();
+                }
+                if let Action::MergeSquash { branch } = &*action
+                    && result.ok
+                {
+                    self.squash_done(tab, branch);
+                }
+                if let Action::TakeSide { paths, .. } = &*action
+                    && result.ok
+                {
+                    self.take_side_done(tab, paths);
+                }
                 let worktree = (matches!(*action, Action::WorktreeAdd { .. } | Action::WorktreeRemove { .. }) && result.ok).then(|| (*action).clone());
                 self.acted(tab, *action, quiet, result);
                 if let Some(action) = worktree {
-                    self.worktree_done(&action);
+                    self.worktree_done(tab, &action);
                 }
             }
             Msg::CommitFiles { tab, sha, files, signature } => {
@@ -898,8 +976,13 @@ impl App {
                     });
                 }
             }
-            Msg::RangeFiles { tab, key, result } => {
-                if let Some(r) = self.repo_mut(tab) {
+            Msg::RangeFiles { tab, request, key, result } => {
+                if let Some(r) = self.repo_mut(tab)
+                    // Only the read the entry still waits for: one evicted or asked again meanwhile is dropped.
+                    && matches!(r.range_files.get(&key), Some(repo::Loaded::Loading))
+                    && r.range_requests.get(&key) == Some(&request)
+                {
+                    r.range_requests.remove(&key);
                     r.range_files.insert(key, match result {
                         Ok(f) => repo::Loaded::Ready(f),
                         Err(e) => repo::Loaded::Failed(e),
@@ -969,7 +1052,9 @@ pub fn unique_id() -> u64 {
 
 /// The last part of a path, as a tab title.
 pub fn folder_name(path: &str) -> String {
-    path.split(['/', '\\']).rfind(|p| !p.is_empty()).unwrap_or(path).to_owned()
+    // A backslash separates names only on Windows; elsewhere it can be part of a folder's name.
+    let name = if cfg!(windows) { path.split(['/', '\\']).rfind(|p| !p.is_empty()) } else { path.split('/').rfind(|p| !p.is_empty()) };
+    name.unwrap_or(path).to_owned()
 }
 
 /// Whether two paths name the same folder, ignoring a trailing separator (and case on Windows).
@@ -1010,7 +1095,10 @@ mod tests {
     #[test]
     fn tab_titles_are_the_folder_name() {
         assert_eq!(folder_name("/home/sam/code/gitcraft/"), "gitcraft");
+        #[cfg(windows)]
         assert_eq!(folder_name(r"C:\src\app"), "app");
+        #[cfg(not(windows))]
+        assert_eq!(folder_name(r"/home/a\b"), r"a\b");
         assert!(same_folder("/a/b/", "/a/b"));
         assert!(!same_folder("/a/b", "/a/c"));
     }

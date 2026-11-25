@@ -140,12 +140,16 @@ fn line_marks(text: &str, allowed: &[u32], limit: usize) -> Vec<Mark> {
             let offset = byte + relative;
             let pos = column;
             column += 1;
-            if (natural && relative < word.len()) || scalar.is_ascii_graphic() {
+            if scalar.is_ascii_graphic() {
                 continue;
             }
             let Some(reason) = reason(scalar, allowed) else {
                 continue;
             };
+            // A word of one script isn't a lookalike warning, but an invisible character in it still is.
+            if natural && relative < word.len() && matches!(reason, Reason::Confusable(_)) {
+                continue;
+            }
             while emoji
                 .peek()
                 .is_some_and(|(start, cluster)| *start + cluster.len() <= offset)

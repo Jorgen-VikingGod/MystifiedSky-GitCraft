@@ -178,9 +178,10 @@ pub fn check(current: &str) -> Result<Option<Update>, String> {
     })
 }
 
-/// The folder downloaded updates wait in until they are installed.
-fn download_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("gitcraft-update-{}", std::process::id()))
+/// A new folder with an unpredictable name that only this user can open, for a downloaded update to wait in
+/// until it is installed. It is kept: on Windows the installer runs after GitCraft has quit.
+fn download_dir() -> Result<PathBuf, String> {
+    tempfile::Builder::new().prefix("gitcraft-update-").tempdir().map(tempfile::TempDir::keep).map_err(|e| format!("Could not save the update: {e}"))
 }
 
 fn file_name(url: &str) -> String {
@@ -213,8 +214,7 @@ pub fn download(update: &Update, progress: impl Fn(Option<u32>) + Send) -> Resul
         Ok::<_, String>(data)
     })?;
     verify(&bytes, &update.signature, PUBLIC_KEY, &update.version)?;
-    let dir = download_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not save the update: {e}"))?;
+    let dir = download_dir()?;
     let path = dir.join(file_name(&update.url));
     std::fs::write(&path, &bytes).map_err(|e| format!("Could not save the update: {e}"))?;
     Ok(path)

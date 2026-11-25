@@ -257,4 +257,7 @@ fn headless_commit_spelling_preserves_unicode_and_suggests_corrections() {
     let spanish = Language::Spanish.load().expect("Spanish dictionary");
     assert!(spanish.check("solución"));
     assert!(!spanish.check("soluccción"));
+    // Affix flags are single characters: each rule keeps its own, so one rule's suffix never leaks into another.
+    assert!(spanish.check("telepáticamente"));
+    assert!(!spanish.check("telepáticísimo"));
 }

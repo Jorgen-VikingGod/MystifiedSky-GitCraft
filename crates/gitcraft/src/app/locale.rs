@@ -14,6 +14,11 @@ impl App {
 }
 
 impl Locale {
+    /// "Open Repo in {editor}", with the editor's own name kept as it is.
+    pub(super) fn open_in_editor(self, editor: &str) -> String {
+        if self.spanish { format!("Abrir repositorio en {editor}") } else { format!("Open Repo in {editor}") }
+    }
+
     pub(super) fn text(self, label: &str) -> &str {
         if !self.spanish {
             return label;
@@ -35,6 +40,7 @@ impl Locale {
             "Open in File Manager" => "Abrir en el gestor de archivos",
             "File History / Blame..." => "Historial y autoría del archivo…",
             "Preferences..." => "Preferencias…",
+            "Check for Updates" => "Buscar actualizaciones",
             "Sign Out" => "Cerrar sesión",
             "Exit" => "Salir",
             "Undo" => "Deshacer",

@@ -377,9 +377,11 @@ pub(super) fn edit_comparison(
         scroll_comparison.map_or_else(
             || panes[to].offset(anchor.0, anchor.1),
             |cmp| {
-                let diff =
-                    split_view::diff_position(&cmp.split_index, from, anchor, cmp.split.len());
-                split_view::pane_offset(&cmp.split_index, to, diff, panes[to])
+                // Before the comparison catches up with an edit, the other pane stays where it is.
+                match split_view::mapped_position(&cmp.split_index, from, anchor, cmp.split.len()) {
+                    Some(diff) => split_view::pane_offset(&cmp.split_index, to, diff, panes[to]),
+                    None => panes[to].scroll.top,
+                }
             },
         )
     };
@@ -1333,8 +1335,22 @@ fn editor(
         }
         d.draft = Some(working);
         d.edits += 1;
-    } else if had_draft {
-        d.draft = Some(text.into_owned());
+    } else {
+        // A command that only moved the caret (such as going to the matching bracket) leaves the text alone: the
+        // folds opened for it come back, except the one hiding the caret.
+        if let Some((before, snapshot)) = restore_folds {
+            d.folds.restore_after_edit(&before, &text, snapshot);
+            if d.folds.has_collapsed()
+                && let Some(cursor) = egui::TextEdit::load_state(ui.ctx(), id).and_then(|state| state.cursor.char_range())
+            {
+                let byte = byte_at(&text, cursor.primary.index.0);
+                let row = text[..byte].bytes().filter(|&b| b == b'\n').count();
+                d.folds.reveal(row);
+            }
+        }
+        if had_draft {
+            d.draft = Some(text.into_owned());
+        }
     }
     Pane {
         scroll: Scroll::from_output(&output),

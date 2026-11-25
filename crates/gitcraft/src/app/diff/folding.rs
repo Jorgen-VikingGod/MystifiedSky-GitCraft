@@ -122,7 +122,13 @@ impl Folds {
         for (row, bytes) in snapshot.0 {
             let unchanged = if bytes.end <= prefix {
                 Some(row)
-            } else if bytes.start > old_end {
+            } else if bytes.start > old_end
+                // A header right at the end of the edit moves along only if it still begins a line there.
+                || bytes.start == old_end && {
+                    let start = bytes.start + new_end - old_end;
+                    start == 0 || new.as_bytes().get(start - 1) == Some(&b'\n')
+                }
+            {
                 Some(row + new_lines - old_lines)
             } else {
                 None

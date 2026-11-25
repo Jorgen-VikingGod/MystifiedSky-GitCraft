@@ -167,6 +167,7 @@ impl App {
             Ok(true) => {
                 if let Err(e) = updates::relaunch() {
                     self.discarding = false;
+                    self.resume_launches();
                     self.toast(false, e);
                     return;
                 }
@@ -176,8 +177,16 @@ impl App {
             Ok(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => {
                 self.discarding = false;
+                self.resume_launches();
                 self.toast(false, format!("The update could not be installed: {e}"));
             }
+        }
+    }
+
+    /// The window stays open after all: it takes launches from other copies again.
+    fn resume_launches(&mut self) {
+        if let Some(p) = self.primary.as_mut() {
+            p.resume();
         }
     }
 }

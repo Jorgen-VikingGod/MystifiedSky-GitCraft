@@ -88,12 +88,9 @@ pub fn attach(response: &egui::Response, later: &mut Vec<Later>, build: impl FnO
 
 /// Which remote a remote-tracking name (origin/feature/x) belongs to; remote names can hold "/" too.
 pub fn split_remote(repo: &RepoView, name: &str) -> Option<(String, String)> {
-    let mut remotes = repo.data.remotes.clone();
-    remotes.sort_by_key(|r| std::cmp::Reverse(r.len()));
-    remotes.into_iter().find(|r| name.starts_with(&format!("{r}/"))).map(|r| {
-        let branch = name[r.len() + 1..].to_owned();
-        (r, branch)
-    })
+    // The longest remote name that ends at a "/" wins, so `team` never shadows `team/forks`.
+    let remote = repo.data.remotes.iter().filter(|r| name.strip_prefix(r.as_str()).is_some_and(|rest| rest.starts_with('/'))).max_by_key(|r| r.len())?;
+    Some((remote.clone(), name[remote.len() + 1..].to_owned()))
 }
 
 /// Whether `ancestor` is reachable from `tip` through loaded parents.
@@ -169,13 +166,8 @@ impl App {
         }
         if let Some(head) = head.clone().filter(|_| !is_head) {
             items.push(item(format!("Merge {name} into {head}"), act(tab, Action::Merge { branch: name.clone() })));
-            let (n2, h2) = (name.clone(), head.clone());
-            items.push(item(format!("Squash merge {name} into {head}"), move |app| {
-                if let Some(path) = app.repo(tab).map(|r| r.path.clone()) {
-                    app.pending_drafts.push((path, super::repo::Draft { summary: format!("Squash merge {n2} into {h2}"), description: String::new(), amend: false }));
-                }
-                app.act(tab, Action::MergeSquash { branch: n2 });
-            }));
+            let n2 = name.clone();
+            items.push(item(format!("Squash merge {name} into {head}"), move |app| app.act(tab, Action::MergeSquash { branch: n2 })));
             items.push(item(format!("Rebase {head} onto {name}"), act(tab, Action::Rebase { onto: name.clone() })));
             let n3 = name.clone();
             items.push(item(format!("Interactive Rebase {head} onto {name}"), move |app| app.open_rebase(tab, &n3, &n3, false)));

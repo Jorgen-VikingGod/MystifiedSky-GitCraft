@@ -55,7 +55,8 @@ pub struct PrefsData {
     pub account: Option<Loaded<gitcraft_core::accounts::AccountInfo>>,
     pub statuses: Option<Loaded<Vec<gitcraft_core::hosting::ServiceStatus>>>,
     /// The preferences task running, which turns its buttons off.
-    pub busy: Option<String>,
+    /// The tasks running, by name: Find Automatically and Test Connection (and the rest) never share one flag.
+    pub busy: Vec<String>,
 }
 
 /// How a field's edit is saved.
@@ -182,6 +183,10 @@ impl App {
         if section == Some("integrations") || section.is_none() {
             ui.service = "github".into();
         }
+        // Fields edited on the screen being replaced are saved first, as when leaving it by the sidebar or Exit.
+        if let Some(mut outgoing) = self.prefs.take() {
+            self.save_pending(&mut outgoing);
+        }
         self.prefs = Some(ui);
         self.prefs_data = PrefsData::default();
     }
@@ -240,6 +245,21 @@ impl App {
     }
 
     /// Change a preference.
+    /// Make a newly created GPG key the signing key, and say so only when Git's configuration took it.
+    fn set_signing_key(&mut self, fingerprint: String) {
+        self.spawn(move || {
+            let r = gitcraft_core::accounts::set(Path::new("."), "global", "user.signingkey", &fingerprint);
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                app.prefs_data.config.clear();
+                app.prefs_data.account = None;
+                match r {
+                    Ok(()) => app.toast(true, "GPG Key Created Successfully"),
+                    Err(e) => app.toast(false, format!("The GPG key was created but is not active: {e}")),
+                }
+            }))
+        });
+    }
+
     pub(crate) fn set_pref(&mut self, t: &Target, value: Value) {
         match t {
             Target::Setting(k) if k.contains('.') => {
@@ -365,11 +385,14 @@ impl App {
 
     /// Run a preferences task away from the window; `done` gets its answer.
     fn prefs_task<T: Send + 'static>(&mut self, busy: &str, job: impl FnOnce() -> Result<T, String> + Send + 'static, done: impl FnOnce(&mut App, T) + Send + 'static) {
-        self.prefs_data.busy = Some(busy.to_owned());
+        let name = busy.to_owned();
+        if !self.prefs_data.busy.contains(&name) {
+            self.prefs_data.busy.push(name.clone());
+        }
         self.spawn(move || {
             let r = job();
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                app.prefs_data.busy = None;
+                app.prefs_data.busy.retain(|b| *b != name);
                 match r {
                     Ok(v) => done(app, v),
                     Err(e) => app.toast(false, e),
@@ -782,7 +805,7 @@ impl App {
                 row(ui, "Forget all Usernames and Passwords", "Asks Git Credential Manager to forget what it saved for the connected services.", None, None, false, |ui| {
                     if pbutton(ui, "Forget All", Kind::Default, true) {
                         let i: Value = self.settings.get("integrations").unwrap_or_default();
-                        let hosts: Vec<String> = ["github.com", "gitlab.com", "bitbucket.org", "dev.azure.com"].iter().map(|s| s.to_string()).chain(["githubEnterpriseHost", "gitlabHost", "bitbucketServerHost"].iter().filter_map(|k| i.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))).collect();
+                        let hosts: Vec<String> = ["github.com", "gitlab.com", "bitbucket.org", "dev.azure.com"].iter().map(|s| s.to_string()).chain(["githubEnterpriseHost", "gitlabHost", "bitbucketServerHost", "forgejoHost", "giteaHost"].iter().filter_map(|k| i.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))).collect();
                         self.prefs_task("forget", move || Ok(gitcraft_core::prefs::forget_credentials(&hosts)), |app, n| {
                             app.toast(true, if n > 0 { format!("Forgot saved credentials for {n} host{}", if n == 1 { "" } else { "s" }) } else { "GitCraft has no stored user/pass credentials to remove".into() })
                         });
@@ -1105,7 +1128,7 @@ impl App {
             let nw = ng.size().x;
             ui.painter().galley(pos2(x + 24.0, r.center().y - ng.size().y / 2.0), ng, c.fg);
             if is_active {
-                ui.painter().text(pos2(x + 30.0 + nw, r.center().y), Align2::LEFT_CENTER, "current", FontId::proportional(11.0), GOOD);
+                ui.painter().text(pos2(x + 30.0 + nw, r.center().y), Align2::LEFT_CENTER, "current", FontId::proportional(11.0), p().good_text());
             }
             x += cols[0];
             let (gn, ge) = if is_active && account.is_some() { account.clone().unwrap_or_default() } else { (prof["gitName"].as_str().unwrap_or("").to_owned(), prof["gitEmail"].as_str().unwrap_or("").to_owned()) };
@@ -1200,12 +1223,12 @@ impl App {
                     row(ui, label, help, None, None, false, |ui| self.text(ui, pui, Target::Integration(k.to_string()), placeholder, false, false));
                 }
                 let connected = st.as_ref().is_some_and(|x| x.connected);
-                let busy = self.prefs_data.busy.is_some();
+                let busy = !self.prefs_data.busy.is_empty();
                 if !connected && (svc.browser || svc.gh) {
                     row(ui, "Connect", if svc.browser { "Opens your browser to sign in (through Git Credential Manager, which Git uses too)." } else { "" }, None, None, false, |ui| {
                         let id = svc.id;
                         let label = svc.label;
-                        if svc.browser && pbutton(ui, &if self.prefs_data.busy.as_deref() == Some("browser") { "Waiting for the browser…".to_owned() } else { format!("Connect {label}") }, Kind::Primary, !busy && ready) {
+                        if svc.browser && pbutton(ui, &if self.prefs_data.busy.iter().any(|b| b == "browser") { "Waiting for the browser…".to_owned() } else { format!("Connect {label}") }, Kind::Primary, !busy && ready) {
                             self.sign_in(id, "browser", label);
                         }
                         if svc.gh && pbutton(ui, "Use GitHub CLI sign-in", Kind::Default, !busy) {
@@ -1383,13 +1406,13 @@ impl App {
             row(ui, "Generate new GPG Key", "This will create a 4096 bit key with the name and email in your current profile that expires in 2 years.\nThis will also be set as your active signing key.", None, None, false, |ui| {
                 let buf = pui.buffers.entry("gpg_pass".into()).or_default();
                 field(ui, buf, "Passphrase (optional)", 200.0, true, FontId::proportional(13.0), "gpg_pass");
-                let busy = self.prefs_data.busy.as_deref() == Some("gpg");
+                let busy = self.prefs_data.busy.iter().any(|b| b == "gpg");
                 if pbutton(ui, if busy { "Generating…" } else { "Generate" }, Kind::Default, !busy && acc.as_ref().is_some_and(|a| a.0)) {
                     let pass = pui.buffers.remove("gpg_pass").unwrap_or_default();
                     let (prog, name, email) = (program.clone(), acc.as_ref().map(|a| a.1.clone()).unwrap_or_default(), acc.as_ref().map(|a| a.2.clone()).unwrap_or_default());
                     self.prefs_task("gpg", move || gitcraft_core::prefs::gpg_generate(&prog, &name, &email, &pass), |app, fpr| {
-                        app.set_pref(&Target::Config("global".into(), None, "user.signingkey".into()), json!(fpr));
-                        app.toast(true, "GPG Key Created Successfully");
+                        // Reported once Git has really stored the signing key (see `set_signing_key`).
+                        app.set_signing_key(fpr);
                     });
                 }
             });
@@ -1464,14 +1487,17 @@ impl App {
             row(ui, "Program", &help, None, err.as_deref(), true, |ui| {
                 let w = ui.available_width() - 150.0;
                 ui.allocate_ui(vec2(w, 28.0), |ui| self.path(ui, pui, a("cliPath"), "Program path", false, &format!("Choose the {cli_name} executable")));
-                let finding = self.prefs_data.busy.as_deref() == Some("find");
+                let finding = self.prefs_data.busy.iter().any(|b| b == "find");
                 if pbutton(ui, if finding { "Finding…" } else { "Find Automatically" }, Kind::Default, !finding) {
                     let prov = provider.clone();
                     self.prefs_task("find", move || {
                         let agent = gitcraft_core::ai_cli::Agent::from_provider(&prov).ok_or("This provider does not use a local program.")?;
                         gitcraft_core::ai_cli::detect_program(agent).map(|d| (prov, d.path, d.version))
                     }, |app, (prov, path, version)| {
-                        app.set_pref(&Target::Ai("cliPath".into()), json!(path.clone()));
+                        // Saved only for the provider that was asked about: another one may be selected by now.
+                        if app.ai_config().provider == prov {
+                            app.set_pref(&Target::Ai("cliPath".into()), json!(path.clone()));
+                        }
                         if let Some(p) = app.prefs.as_mut() {
                             p.program = Some((prov, path, Ok(version)));
                         }
@@ -1493,7 +1519,7 @@ impl App {
                 let w = ui.available_width() - 190.0;
                 field(ui, buf, if optional { "optional key" } else { "paste key" }, w, true, FontId::proportional(13.0), "ai_key");
                 let key = buf.trim().to_owned();
-                let saving = self.prefs_data.busy.as_deref() == Some("key");
+                let saving = self.prefs_data.busy.iter().any(|b| b == "key");
                 if pbutton(ui, "Save", Kind::Default, !key.is_empty() && !saving) {
                     pui.buffers.remove("ai_key");
                     self.save_ai_key(&provider, key);
@@ -1555,13 +1581,14 @@ impl App {
         if provider != "anthropic" && !cli {
             row(ui, "Response Mode", "Automatic tries structured output, then JSON mode, then a JSON prompt only if the server rejects the format. Every mode supports every feature; answers are validated before use.", None, None, false, |ui| self.select(ui, a("responseFormat"), &[("auto", "Automatic (recommended)"), ("json_schema", "Structured output"), ("json_object", "JSON mode"), ("text", "JSON prompt only (maximum compatibility)")]));
         }
-        let signature = serde_json::to_string(&ai).unwrap_or_default();
+        // Settings as a value first, so equal settings always give the same text whatever order a map held its keys in.
+        let signature = serde_json::to_value(&ai).and_then(|v| serde_json::to_string(&v)).unwrap_or_default();
         let (help, err) = match &pui.test {
             Some((sig, ok, text)) if *sig == signature => (text.clone(), (!ok).then_some("Connection test failed. Check the settings above and try again.")),
             _ => (if cli { "Checks your subscription sign-in and makes a short test request without repository data.".into() } else { "Tests the default model with the same connection and response mode used by AI features.".into() }, None),
         };
         row(ui, "Test Connection", &help, None, err, false, |ui| {
-            let testing = self.prefs_data.busy.as_deref() == Some("test");
+            let testing = self.prefs_data.busy.iter().any(|b| b == "test");
             if pbutton(ui, if testing { "Testing…" } else { "Test Connection" }, Kind::Default, !testing && ai.enabled) {
                 let config = self.ai_config();
                 let sig = signature.clone();
@@ -1813,7 +1840,8 @@ impl App {
                         _ => ("Project key", "ABC", "Empty shows the issues assigned to you."),
                     };
                     row(ui, label, help, None, None, false, |ui| {
-                        let id = "tracker_project".to_owned();
+                        // One draft per repository, so one repository's text is never shown or committed in another's.
+                        let id = format!("tracker_project:{dir}");
                         let buf = pui.buffers.entry(id.clone()).or_insert_with(|| project.clone());
                         let w = ui.available_width();
                         let r = field(ui, buf, placeholder, w, false, FontId::proportional(13.0), &id);
@@ -1870,11 +1898,9 @@ impl App {
                         ui.label(egui::RichText::new(state).size(12.5).color(c.fg2));
                         if pbutton(ui, "Update", Kind::Default, true) {
                             self.act(tab, Action::SubmoduleUpdate { paths: vec![m.path.clone()] });
-                            pui.submodules = None;
                         }
                         if pbutton(ui, "Remove", Kind::Danger, true) {
                             self.act(tab, Action::SubmoduleRemove { path: m.path.clone() });
-                            pui.submodules = None;
                         }
                     });
                 }
@@ -1884,7 +1910,6 @@ impl App {
                     }
                     if !list.is_empty() && pbutton(ui, "Update all", Kind::Default, true) {
                         self.act(tab, Action::SubmoduleUpdate { paths: Vec::new() });
-                        pui.submodules = None;
                     }
                 });
             }

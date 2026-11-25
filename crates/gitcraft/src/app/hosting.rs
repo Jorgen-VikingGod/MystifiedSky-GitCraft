@@ -39,6 +39,8 @@ pub struct Hosted {
     pub comments: HashMap<String, List>,
     pub checks: HashMap<String, Loaded<Vec<Value>>>,
     pub review: HashMap<u64, Loaded<Value>>,
+    /// The source commit each review's patch was read for: a pull request that moved on needs a new read.
+    pub review_sha: HashMap<u64, String>,
 }
 
 /// The pull request view's own state.
@@ -147,7 +149,7 @@ impl App {
     /// A service was connected or disconnected: read the hosted lists again.
     pub(crate) fn hosting_changed(&mut self) {
         self.hosted.clear();
-        self.launchpad = Launchpad::default();
+        self.reset_launchpad();
     }
 
     fn want_remote(&mut self, tab: u64) {
@@ -807,6 +809,12 @@ impl App {
         }
         if list.cursor.is_some() && widgets::link(ui, "Load more comments", 12.5).clicked() {
             later.push(Box::new(move |app| app.want_comments(tab, key, true, issue, number)));
+        } else if list.cursor.is_none() && list.started && !list.loading && list.error.is_some() && widgets::link(ui, "Retry", 12.5).clicked() {
+            // The first page failed: start the list over (a later page's failure keeps its cursor instead).
+            later.push(Box::new(move |app| {
+                app.hosted_mut(tab).comments.remove(&key);
+                app.want_comments(tab, key, false, issue, number);
+            }));
         }
     }
 
@@ -822,7 +830,8 @@ impl App {
         if !pu.review_open {
             return;
         }
-        let data = self.hosted.get(&tab).and_then(|h| h.review.get(&number));
+        let current = self.hosted.get(&tab).and_then(|h| h.review_sha.get(&number)).is_some_and(|read| *read == s(pr, "source_sha"));
+        let data = self.hosted.get(&tab).and_then(|h| h.review.get(&number)).filter(|_| current);
         let sha = s(pr, "source_sha");
         let Some(data) = data else {
             let sha2 = sha.clone();
@@ -966,14 +975,25 @@ impl App {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         let gitlab = self.gitlab();
         let h = self.hosted_mut(tab);
-        if h.review.contains_key(&number) {
+        if h.review.contains_key(&number) && h.review_sha.get(&number) == Some(&sha) {
             return;
         }
-        h.review.insert(number, Loaded::Loading);
+        let replaced = h.review.insert(number, Loaded::Loading).is_some();
+        h.review_sha.insert(number, sha.clone());
+        if replaced && let Some(r) = self.repo_mut(tab).filter(|r| r.pr_ui.number == number) {
+            // A line picked in the old patch means nothing in the new one.
+            r.pr_ui.review_line = None;
+            r.pr_ui.inline_text.clear();
+        }
+        let read_for = sha.clone();
         self.spawn(move || {
             let r = gitcraft_core::session::remote_of(&path, &gitlab).and_then(|remote| gitcraft_core::hosting::review_data(&remote, number, &sha)).map(|d| serde_json::to_value(d).unwrap_or_default());
             super::Msg::Apply(Box::new(move |app: &mut App| {
-                app.hosted_mut(tab).review.insert(number, match r {
+                let h = app.hosted_mut(tab);
+                if h.review_sha.get(&number) != Some(&read_for) {
+                    return;
+                }
+                h.review.insert(number, match r {
                     Ok(v) => Loaded::Ready(v),
                     Err(e) => Loaded::Failed(e),
                 });
@@ -1013,6 +1033,7 @@ impl App {
                 }
                 let h = app.hosted_mut(tab);
                 h.review.remove(&number);
+                h.review_sha.remove(&number);
                 h.pr.remove(&number);
                 h.prs = List::default();
             }))
@@ -1056,7 +1077,7 @@ impl App {
                         let h = app.hosted_mut(tab);
                         h.prs = List::default();
                         h.pr.remove(&number);
-                        app.launchpad = Launchpad::default();
+                        app.reset_launchpad();
                         app.act_quiet(tab, Action::Fetch, true);
                     }
                     Err(e) => app.toast(false, e),
@@ -1272,8 +1293,9 @@ impl App {
             .flag_value("draft", draft)
             .choice("Write with AI", Kind::Ai, move |app, v| {
                 let target = v.text("target").trim().to_owned();
-                app.pr_waiting = Some((tab, b2.clone(), target.clone(), v.flag("draft")));
-                app.ai_pull_request(tab, b2, target);
+                let request = super::unique_id();
+                app.pr_waiting = Some((tab, b2.clone(), target.clone(), v.flag("draft"), request));
+                app.ai_pull_request(tab, request, b2, target);
             })
             .choice("Create Pull Request", Kind::Primary, move |app, v| {
                 let (target, title, body, draft) = (v.text("target").trim().to_owned(), v.text("title").trim().to_owned(), v.text("body"), v.flag("draft"));
@@ -1285,10 +1307,17 @@ impl App {
     }
 
     /// "Write with AI" filled the title and description.
-    pub(crate) fn pr_text_ready(&mut self, tab: u64, title: String, body: String) {
+    pub(crate) fn pr_text_ready(&mut self, tab: u64, request: u64, title: String, body: String) {
+        // Only the request the form is waiting for fills it; an older one's text is dropped without touching the wait.
+        if self.pr_waiting.as_ref().is_none_or(|w| w.0 != tab || w.4 != request) {
+            return;
+        }
         match self.pr_waiting.take() {
-            Some((t, branch, target, draft)) if t == tab && self.dialog.is_none() => self.pull_request_dialog(tab, branch, Some(target), None, Some((title, body, draft))),
-            other => self.pr_waiting = other.filter(|(t, ..)| *t != tab),
+            Some((t, branch, target, draft, _)) if self.dialog.is_none() => {
+                debug_assert_eq!(t, tab);
+                self.pull_request_dialog(tab, branch, Some(target), None, Some((title, body, draft)));
+            }
+            other => self.pr_waiting = other,
         }
     }
 
@@ -1495,7 +1524,7 @@ impl App {
             None => {}
         }
         if refresh {
-            self.launchpad = Launchpad::default();
+            self.reset_launchpad();
         }
         if more {
             for svc in LAUNCHPAD_SERVICES {
@@ -1506,7 +1535,15 @@ impl App {
         }
     }
 
+    /// Start the Launchpad over. The generation counts these resets (it is not part of the state replaced), so a page
+    /// still on its way from before a reset never lands in the new lists.
+    fn reset_launchpad(&mut self) {
+        self.launchpad = Launchpad::default();
+        self.launchpad_generation += 1;
+    }
+
     fn want_launchpad(&mut self, service: &'static str, more: bool) {
+        let generation = self.launchpad_generation;
         let list = self.launchpad.pages.entry(service.to_owned()).or_default();
         if list.loading || (list.started && !more) {
             return;
@@ -1517,6 +1554,9 @@ impl App {
         self.spawn(move || {
             let r = gitcraft_core::hosting::launchpad_page(service, cursor.as_deref());
             super::Msg::Apply(Box::new(move |app: &mut App| {
+                if app.launchpad_generation != generation {
+                    return;
+                }
                 let list = app.launchpad.pages.entry(service.to_owned()).or_default();
                 list.loading = false;
                 match r {

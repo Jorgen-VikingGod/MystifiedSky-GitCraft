@@ -451,12 +451,17 @@ fn line_edit(
     let mut output = String::with_capacity(text.len());
     let mut new_starts = Vec::with_capacity(lines.len());
     let mut position = 0;
+    // The line that was last has no line break of its own. Moved up, it takes the one of the line now at the end,
+    // so a document's own separator is kept and its final-newline state does not change.
+    let tail_ending = lines.last().map(|(_, ending)| *ending).filter(|ending| !ending.is_empty());
     for (i, (body, source_ending)) in lines.iter().enumerate() {
         new_starts.push(position);
         let eol = if i + 1 == lines.len() {
             ""
         } else if !source_ending.is_empty() {
             source_ending
+        } else if let Some(ending) = tail_ending {
+            ending
         } else if crlf {
             "\r\n"
         } else {
@@ -911,7 +916,17 @@ pub fn input(
             return;
         }
         let mut multiple = !cursors.others.is_empty();
+        // Typed text before a key this code handles (Enter, Tab) is handled here too, so the two apply in the order
+        // they arrived instead of the key running ahead of the widget's text.
+        let last_edit_key = input.events.iter().rposition(|event| {
+            matches!(event, Event::Key { key, modifiers, pressed: true, .. }
+                if editable && (modifiers.is_none() && matches!(key, Key::Enter | Key::Tab)
+                    || modifiers.matches_exact(Modifiers::SHIFT) && *key == Key::Tab))
+        });
+        let mut position = 0;
         input.events.retain(|event| {
+            let before_edit_key = last_edit_key.is_some_and(|last| position < last);
+            position += 1;
             let handle = match event {
                 Event::Key {
                     key,
@@ -926,7 +941,7 @@ pub fn input(
                     true
                 }
                 Event::Copy => true,
-                Event::Cut | Event::Paste(_) | Event::Text(_) => multiple && editable,
+                Event::Cut | Event::Paste(_) | Event::Text(_) => editable && (multiple || before_edit_key),
                 Event::Key {
                     key,
                     modifiers,

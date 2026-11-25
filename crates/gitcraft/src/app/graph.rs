@@ -377,14 +377,9 @@ impl App {
         let hidden = self.hidden_refs(&path);
         let solo = self.solo_refs(&path);
         let by_sha = refs_by_commit(&v.data.refs, v.data.head_branch.as_deref(), &hidden);
-        let wip_files: Vec<char> = {
-            let mut seen: HashMap<&str, char> = HashMap::new();
-            for f in v.data.status.staged.iter().chain(v.data.status.unstaged.iter()) {
-                seen.entry(f.path.as_str()).or_insert(f.status);
-            }
-            seen.into_values().collect()
-        };
-        let wip = !wip_files.is_empty();
+        // The same counts the Agents view shows for the working changes.
+        let (wip_total, wip_added, wip_deleted, wip_modified) = super::right::working_changes(&v.data.status);
+        let wip = wip_total > 0;
         let off = usize::from(wip);
         let commits = &v.data.commits;
         let total = commits.len() + off + usize::from(v.data.has_more);
@@ -468,7 +463,8 @@ impl App {
         }
         x += lay.msg;
         // Column settings, description toggle and hidden refs at the message column's right end.
-        let tools_right = (x - 8.0).min(head_rect.right() - 8.0);
+        // Kept inside the header however far the columns are scrolled, even in a narrow pane.
+        let tools_right = (x - 8.0).max(head_rect.left() + 70.0).min(head_rect.right() - 8.0);
         let mut tx = tools_right;
         let gear = Rect::from_min_size(pos2(tx - 22.0, head_rect.top()), vec2(22.0, HEADER));
         tx -= 22.0;
@@ -771,9 +767,7 @@ impl App {
                             wip_commit = Some(shift);
                         }
                     }
-                    let count = |set: &[char]| wip_files.iter().filter(|s| set.contains(s)).count();
-                    let (md, ad, dl) = (count(&['M', 'R', 'U']), count(&['A', '?']), count(&['D']));
-                    widgets::counts(ui, &painter, box_rect.right() + 10.0, rect.center().y, [md, ad, dl], 13.0);
+                    widgets::counts(ui, &painter, box_rect.right() + 10.0, rect.center().y, [wip_modified, wip_added, wip_deleted], 13.0);
                     continue;
                 }
                 let i = d - off;

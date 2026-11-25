@@ -64,7 +64,6 @@ fn theme(dark: bool) -> Theme {
 
 /// The language of a file, by extension or name; None for plain text.
 pub fn syntax_for(path: &str) -> Option<&'static SyntaxReference> {
-    let path = path.split('#').next().unwrap_or(path);
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map_or(name, |(_, e)| e);
     let s = SYNTAXES.find_syntax_by_extension(ext).or_else(|| SYNTAXES.find_syntax_by_extension(name)).or_else(|| SYNTAXES.find_syntax_by_extension(&ext.to_lowercase()))?;
@@ -211,14 +210,25 @@ fn headless_bracket_matching_skips_comments_and_strings() {
 
 /// A layout job for one line: its colours, or `base` where it has none; `marks` gets a background.
 pub fn job(text: &str, runs: Option<&Runs>, base: Color32, font: egui::FontId, marks: &[(std::ops::Range<usize>, Color32)]) -> egui::text::LayoutJob {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut job = egui::text::LayoutJob::default();
+    // Sections end only between grapheme clusters, so an emoji sequence is never split between two sections (a mark
+    // that starts or ends inside one covers all of it).
+    let clusters: Option<Vec<usize>> = (!text.is_ascii()).then(|| text.grapheme_indices(true).map(|(at, _)| at).chain([text.len()]).collect());
+    let floor = |at: usize| clusters.as_ref().map_or(at, |c| c[c.partition_point(|x| *x <= at).saturating_sub(1)]);
+    let ceil = |at: usize| clusters.as_ref().map_or(at, |c| c.get(c.partition_point(|x| *x < at)).copied().unwrap_or(text.len()));
+    let marks: Vec<(std::ops::Range<usize>, Color32)> = marks
+        .iter()
+        .filter(|(r, _)| r.start <= text.len() && text.is_char_boundary(r.start))
+        .map(|(r, color)| (floor(r.start)..ceil(r.end.min(text.len())), *color))
+        .collect();
     let mut cuts: Vec<usize> = vec![0, text.len()];
     if let Some(runs) = runs {
         for (_, r) in runs {
-            cuts.extend([r.start, r.end]);
+            cuts.extend([floor(r.start.min(text.len())), floor(r.end.min(text.len()))]);
         }
     }
-    for (r, _) in marks {
+    for (r, _) in &marks {
         cuts.extend([r.start, r.end]);
     }
     cuts.retain(|c| *c <= text.len() && text.is_char_boundary(*c));

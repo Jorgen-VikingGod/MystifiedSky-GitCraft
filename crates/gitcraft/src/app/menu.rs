@@ -38,7 +38,7 @@ impl App {
             i("nav:openRepo", "Open Repo..."),
             i("app.window", "Open Repo in New Window…"),
             i("nav:repoManagement", "Open Repo Management"),
-            on("repo:openInEditor", &format!("Open Repo in {editor}"), repo),
+            on("repo:openInEditor", &locale.open_in_editor(&editor), repo),
             Node::Separator,
             on("repo:terminal", "Open External Terminal", repo),
             on("repo:fileManager", "Open in File Manager", repo),

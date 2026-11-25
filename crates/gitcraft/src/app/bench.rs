@@ -27,6 +27,11 @@ pub struct Bench {
     intervals: Vec<f64>,
     /// Scrolling down until the end, then back up.
     down: bool,
+    /// Wheel events sent so far.
+    injected: usize,
+    /// Set once the last wheel event is sent: the next frame only reports its CPU time.
+    tail: bool,
+    tail_seen: bool,
     done: bool,
 }
 
@@ -34,21 +39,36 @@ pub struct Bench {
 pub fn mark(step: &str) {
     let Some(file) = std::env::var_os("GITCRAFT_BENCH") else { return };
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    // The process's own CPU time (with the children it has waited for) at this moment, so a runner needn't
+    // catch the mark in time to measure the phase between two marks.
+    let cpu = cpu_ticks().map_or_else(String::new, |t| format!(" cpu={t}"));
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
-        let _ = writeln!(f, "mark {step} {ms}");
+        let _ = writeln!(f, "mark {step} {ms}{cpu}");
     }
+}
+
+/// User and system CPU time of this process and the children it waited for, in clock ticks (Linux).
+fn cpu_ticks() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    (11..=14).map(|i| fields.get(i)?.parse::<u64>().ok()).sum()
+}
+
+/// The frame count in `GITCRAFT_BENCH_SCROLL`, when it is a positive number.
+fn scroll_frames() -> Option<usize> {
+    std::env::var("GITCRAFT_BENCH_SCROLL").ok()?.trim().parse().ok().filter(|n| *n > 0)
 }
 
 /// The vsync-free mode the scroll benchmark draws in.
 pub fn scrolling() -> bool {
-    std::env::var_os("GITCRAFT_BENCH").is_some() && std::env::var_os("GITCRAFT_BENCH_SCROLL").is_some()
+    std::env::var_os("GITCRAFT_BENCH").is_some() && scroll_frames().is_some()
 }
 
 impl Bench {
     pub fn from_env() -> Option<Bench> {
         let file = std::env::var_os("GITCRAFT_BENCH")?.into();
-        let scroll = std::env::var("GITCRAFT_BENCH_SCROLL").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
-        Some(Bench { file, ready: false, scroll, settled: 0, last: None, frames: Vec::new(), ui: Vec::new(), intervals: Vec::new(), down: true, done: false })
+        let scroll = scroll_frames().unwrap_or(0);
+        Some(Bench { file, ready: false, scroll, settled: 0, last: None, frames: Vec::new(), ui: Vec::new(), intervals: Vec::new(), down: true, injected: 0, tail: false, tail_seen: false, done: false })
     }
 
     fn write(&self, line: &str) {
@@ -61,10 +81,23 @@ impl Bench {
         self.ready && self.scroll > 0 && self.settled >= SETTLE && !self.done
     }
 
+    fn injecting(&self) -> bool {
+        self.scrolling_now() && self.injected < self.scroll
+    }
+
     /// Wheel events over the graph while the scroll test runs.
     pub fn input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if !self.scrolling_now() {
+        if !self.injecting() {
             return;
+        }
+        // The baseline comes before the first wheel event, so the first interval is a wheel-driven frame's.
+        if self.last.is_none() {
+            mark("scroll-start");
+            self.last = Some(Instant::now());
+        }
+        self.injected += 1;
+        if self.injected >= self.scroll {
+            self.tail = true;
         }
         let rect = ctx.content_rect();
         // The graph is in the middle, between the side panels.
@@ -103,24 +136,29 @@ impl Bench {
             return;
         }
         let now = Instant::now();
-        if self.last.is_none() {
-            mark("scroll-start");
-        }
-        if let Some(last) = self.last {
+        let Some(last) = self.last else { return };
+        // The frame after the last wheel event only reports its predecessor's CPU time.
+        if self.intervals.len() < self.scroll {
             self.intervals.push((now - last).as_secs_f64() * 1000.0);
             self.ui.push((now - built).as_secs_f64() * 1000.0);
-            if let Some(cpu) = cpu {
-                self.frames.push(f64::from(cpu) * 1000.0);
-            }
+        }
+        // `cpu` is the previous frame's, so the first one (a frame before any wheel event) isn't counted.
+        if let Some(cpu) = cpu.filter(|_| self.intervals.len() > 1 || self.tail_seen) {
+            self.frames.push(f64::from(cpu) * 1000.0);
         }
         self.last = Some(now);
-        if self.intervals.len() >= self.scroll {
-            self.done = true;
-            mark("scroll-end");
-            let (f, u, i) = (stats(&mut self.frames), stats(&mut self.ui), stats(&mut self.intervals));
-            self.write(&format!("scroll frames={} mean={:.3} p50={:.3} p95={:.3} max={:.3}", self.frames.len(), f.0, f.1, f.2, f.3));
-            self.write(&format!("ui mean={:.3} p95={:.3}", u.0, u.2));
-            self.write(&format!("interval mean={:.3}", i.0));
+        if self.tail && self.intervals.len() >= self.scroll && self.injected >= self.scroll {
+            // The tail frame is the one after the last wheel event, so the last wheel frame's CPU time is in.
+            if self.tail_seen {
+                self.done = true;
+                let (f, u, i) = (stats(&mut self.frames), stats(&mut self.ui), stats(&mut self.intervals));
+                self.write(&format!("scroll frames={} mean={:.3} p50={:.3} p95={:.3} max={:.3}", self.frames.len(), f.0, f.1, f.2, f.3));
+                self.write(&format!("ui mean={:.3} p95={:.3}", u.0, u.2));
+                self.write(&format!("interval mean={:.3}", i.0));
+                // The marker is the last signal, after the whole report.
+                mark("scroll-end");
+            }
+            self.tail_seen = true;
         }
     }
 }

@@ -17,7 +17,7 @@ pub enum AiOutput {
     Explain { title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
     Merge { tab: u64, file: String, editor: u64, revision: u64, text: String },
-    PullText { tab: u64, title: String, body: String },
+    PullText { tab: u64, request: u64, title: String, body: String },
 }
 
 /// A request that may need the untracked files reviewed first.
@@ -128,7 +128,7 @@ impl App {
                 self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits })));
             }
             AiOutput::Merge { tab, file, editor, revision, text } => self.ai_merged(tab, &file, editor, revision, Ok(text)),
-            AiOutput::PullText { tab, title, body } => self.pr_text_ready(tab, title, body),
+            AiOutput::PullText { tab, request, title, body } => self.pr_text_ready(tab, request, title, body),
         }
     }
 
@@ -231,11 +231,11 @@ impl App {
         }
     }
 
-    pub(crate) fn ai_pull_request(&mut self, tab: u64, source: String, target: String) {
+    pub(crate) fn ai_pull_request(&mut self, tab: u64, request: u64, source: String, target: String) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
         self.ai_run("Writing the pull request…", move || {
             let (title, body) = ai::pull_request_text(Path::new(&path), &source, &target)?;
-            Ok(AiOutput::PullText { tab, title, body })
+            Ok(AiOutput::PullText { tab, request, title, body })
         });
     }
 }

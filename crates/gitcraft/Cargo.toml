@@ -40,6 +40,9 @@ assets = [
   { source = "../../icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/gitcraft.png", mode = "644" },
   { source = "../../icons/icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/gitcraft.png", mode = "644" },
   { source = "../../LICENSE", dest = "/usr/share/licenses/git-craft/LICENSE", mode = "644", doc = true },
+  { source = "assets/fonts/LICENSE-DejaVu", dest = "/usr/share/licenses/git-craft/LICENSE-DejaVu", mode = "644", doc = true },
+  { source = "assets/fonts/LICENSE-OpenSans", dest = "/usr/share/licenses/git-craft/LICENSE-OpenSans", mode = "644", doc = true },
+  { source = "assets/dictionaries/LICENSE-en_US.txt", dest = "/usr/share/licenses/git-craft/LICENSE-en_US.txt", mode = "644", doc = true },
 ]
 
 # Any git: Fedora and RHEL can't resolve a versioned git requirement, and GitCraft checks for
@@ -122,7 +125,7 @@ craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "08da5e1486
 
 [target.'cfg(windows)'.dependencies]
 epaint = { version = "0.37", features = ["color_fonts"] }
-windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
 
 # gitcraft:// links and the Finder's "Open in GitCraft" service.
 [target.'cfg(target_os = "macos")'.dependencies]

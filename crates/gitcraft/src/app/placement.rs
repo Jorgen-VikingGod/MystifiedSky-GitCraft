@@ -96,12 +96,42 @@ pub fn apply(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
     let r = lock();
     let Some(saved) = r.store.get(MAIN) else { return viewport };
     let d = Defaults::new(SIZE, MIN).with_no_position(r.no_position);
-    let p = place(Some(&saved), &[], None, &d);
+    // Where the platform can list its monitors before the window exists, a saved place off every one of them
+    // moves onto the primary monitor (at least the top 64 points must be on one); elsewhere the system keeps it.
+    let p = place(Some(&saved), &monitors(), None, &d);
     let mut viewport = viewport.with_inner_size(p.normal.size).with_maximized(p.maximized);
     if let Some([x, y]) = p.position_px {
         viewport = viewport.with_position([x as f32 / p.scale, y as f32 / p.scale]);
     }
     viewport
+}
+
+#[cfg(windows)]
+fn monitors() -> Vec<craft_window::restore::Monitor> {
+    use craft_window::restore::Monitor;
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, rect: *mut RECT, out: LPARAM) -> i32 {
+        // SAFETY: `out` is the vector `monitors` passed below, alive for the whole enumeration; `rect` is valid.
+        let (list, r) = unsafe { (&mut *(out as *mut Vec<Monitor>), &*rect) };
+        let (mut x, mut y) = (96_u32, 96_u32);
+        // SAFETY: a valid monitor handle and two valid out pointers.
+        unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) };
+        let size = [(r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32];
+        let key = MonitorKey::new("", size);
+        list.push(Monitor::new(key, [r.left, r.top], size, x.max(1) as f32 / 96.0));
+        1
+    }
+    let mut list: Vec<Monitor> = Vec::new();
+    // SAFETY: the callback only uses the pointer given here, during this call.
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut list as *mut _ as LPARAM) };
+    list
+}
+
+#[cfg(not(windows))]
+fn monitors() -> Vec<craft_window::restore::Monitor> {
+    Vec::new()
 }
 
 /// Once per frame: note the window's size and place, and write them a moment after they stop
@@ -111,13 +141,29 @@ pub fn track(ctx: &egui::Context) {
     let zoom = ctx.zoom_factor();
     let mut r = lock();
     if info.minimized == Some(true) {
-        return save_when_due(&mut r);
+        // A minimized window's geometry isn't sampled, but a save still waiting (or to be retried) must happen.
+        save_when_due(&mut r);
+        if r.changed.is_some() {
+            ctx.request_repaint_after(SAVE_AFTER);
+        }
+        return;
     }
     let scale = info.native_pixels_per_point.unwrap_or(1.0);
     // First run after the web-view release: its window size, place and maximized state, now
     // that the monitor's scale is known. They are noted from the next frames on.
     if let Some(w) = r.adopt.take() {
         let px = scale * zoom;
+        // Keep the legacy normal size and place in the store before maximizing, so that un-maximizing later
+        // returns to them instead of to the default.
+        let mut seeded = Placement::new(SIZE, scale);
+        seeded.normal.size = [(w.width as f32 / scale).max(MIN[0]), (w.height as f32 / scale).max(MIN[1])];
+        seeded.position_px = if r.no_position { None } else { Some([w.x, w.y]) };
+        seeded.normal.pos = seeded.position_px.map_or([0.0, 0.0], |[x, y]| [x as f32 / scale, y as f32 / scale]);
+        seeded.scale = scale;
+        seeded.zoom = zoom;
+        seeded.maximized = w.maximized;
+        r.store.set(MAIN, &seeded);
+        r.changed = Some(Instant::now());
         let size = egui::vec2((w.width as f32 / px).max(MIN[0]), (w.height as f32 / px).max(MIN[1]));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         if !r.no_position {

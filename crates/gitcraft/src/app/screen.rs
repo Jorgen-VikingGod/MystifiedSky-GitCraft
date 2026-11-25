@@ -160,9 +160,11 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
     const CENTRE_MIN: f32 = 160.0;
     let min_l = if show_left { 200.0_f32.min(left_w) } else { left_w };
     let min_r = if show_right { 300.0_f32.min(right_w) } else { 0.0 };
+    // A splitter is drawn beside each panel that is shown (a hidden left panel is only a strip, with none).
+    let splitters = |left: bool, right: bool| 4.0 * f32::from(u8::from(left) + u8::from(right));
     let preferred_centre = 440.0_f32.min(body - 504.0).max(CENTRE_MIN);
-    let most = body - CENTRE_MIN - 4.0;
-    let room = (body - preferred_centre - 4.0).max(most.min(min_l + min_r));
+    let most = body - CENTRE_MIN - splitters(show_left, show_right);
+    let room = (body - preferred_centre - splitters(show_left, show_right)).max(most.min(min_l + min_r));
     if left_w + right_w > room {
         let (spare_l, spare_r) = ((left_w - min_l).max(0.0), (right_w - min_r).max(0.0));
         let spare = spare_l + spare_r;
@@ -176,6 +178,8 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
         show_left = false;
         left_w = COLLAPSED;
     }
+    // The left panel is gone, and with it its splitter: the room for the rest is judged on what is drawn now.
+    let most = body - CENTRE_MIN - splitters(show_left, show_right);
     if left_w + right_w > most && show_right {
         show_right = false;
         right_w = 0.0;

@@ -73,15 +73,15 @@ PFX l 0 inter .
 PFX m Y 2
 PFX m 0 micro [^r]
 PFX m 0 micror r
-PFX 🔭 Y 2
-PFX 🔭 0 macro [^r]
-PFX 🔭 0 macror r
-PFX 🔍 Y 2
-PFX 🔍 0 mini [^r]
-PFX 🔍 0 minir r
-PFX 💯 Y 2
-PFX 💯 0 maxi [^r]
-PFX 💯 0 maxir r
+PFX  Y 2
+PFX  0 macro [^r]
+PFX  0 macror r
+PFX  Y 2
+PFX  0 mini [^r]
+PFX  0 minir r
+PFX  Y 2
+PFX  0 maxi [^r]
+PFX  0 maxir r
 PFX n Y 3
 PFX n 0 pr e
 PFX n 0 pre [^er]
@@ -125,19 +125,19 @@ PFX v 0 contra [^r]
 PFX v 0 contrar r
 PFX w Y 1
 PFX w 0 ex	 .
-PFX 📏 Y 12
-PFX 📏 0 tera .
-PFX 📏 0 giga .
-PFX 📏 0 mega .
-PFX 📏 0 kilo .
-PFX 📏 0 hecto .
-PFX 📏 0 deca .
-PFX 📏 0 deci .
-PFX 📏 0 centi .
-PFX 📏 0 mili .
-PFX 📏 0 micro .
-PFX 📏 0 nano .
-PFX 📏 0 pico .
+PFX  Y 12
+PFX  0 tera .
+PFX  0 giga .
+PFX  0 mega .
+PFX  0 kilo .
+PFX  0 hecto .
+PFX  0 deca .
+PFX  0 deci .
+PFX  0 centi .
+PFX  0 mili .
+PFX  0 micro .
+PFX  0 nano .
+PFX  0 pico .
 SFX A Y 14
 SFX A r ción/S ar
 SFX A er ición/S [^cn]er
@@ -319,31 +319,31 @@ SFX U co quito/S co
 SFX U go guito/S go
 SFX U ca quita/S ca
 SFX U ga guita/S ga
-SFX 🧠 Y 2
-SFX 🧠 0 mente [^o]
-SFX 🧠 o amente o
-SFX 🥇 Y 16
-SFX 🥇 0 ísimo/GS l
-SFX 🥇 0 ísimo/GS [^o]r
-SFX 🥇 0 císimo/GS or
-SFX 🥇 z císimo/GS z
-SFX 🥇 a ísimo/GS [^í]a
-SFX 🥇 e ísimo/GS e
-SFX 🥇 i ísimo/GS i
-SFX 🥇 o ísimo/GS [^ií]o
-SFX 🥇 io ísimo/GS io
-SFX 🥇 ío iísimo/GS ío
-SFX 🥇 u ísimo/GS u
-SFX 🥇 án ancísimo/GS án
-SFX 🥇 én encísimo/GS én
-SFX 🥇 ín incísimo/GS ín
-SFX 🥇 ón oncísimo/GS ón
-SFX 🥇 0 císimo/GS [^áéíóú]n
-SFX 🏅 Y 4
-SFX 🏅 le ilísimo/GS ble
-SFX 🏅 ua üísimo/GS gua
-SFX 🏅 ue üísimo/GS gue
-SFX 🏅 uo üísimo/GS guo
+SFX  Y 2
+SFX  0 mente [^o]
+SFX  o amente o
+SFX  Y 16
+SFX  0 ísimo/GS l
+SFX  0 ísimo/GS [^o]r
+SFX  0 císimo/GS or
+SFX  z císimo/GS z
+SFX  a ísimo/GS [^í]a
+SFX  e ísimo/GS e
+SFX  i ísimo/GS i
+SFX  o ísimo/GS [^ií]o
+SFX  io ísimo/GS io
+SFX  ío iísimo/GS ío
+SFX  u ísimo/GS u
+SFX  án ancísimo/GS án
+SFX  én encísimo/GS én
+SFX  ín incísimo/GS ín
+SFX  ón oncísimo/GS ón
+SFX  0 císimo/GS [^áéíóú]n
+SFX  Y 4
+SFX  le ilísimo/GS ble
+SFX  ua üísimo/GS gua
+SFX  ue üísimo/GS gue
+SFX  uo üísimo/GS guo
 SFX R Y 235
 SFX R r mos [aei]r
 SFX R ar áis ar

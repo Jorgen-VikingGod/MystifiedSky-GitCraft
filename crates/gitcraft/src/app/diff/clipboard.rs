@@ -10,11 +10,14 @@ thread_local! {
 }
 
 pub(super) fn copy(ui: &Ui, text: &str, ranges: &[Range<usize>], runs: &[Runs], ink: Color32) {
-    let plain = ranges
-        .iter()
-        .filter_map(|r| text.get(r.clone()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut plain = String::new();
+    for piece in ranges.iter().filter_map(|r| text.get(r.clone())) {
+        // Selections are separated by a line break, unless the one before already ends in one.
+        if !plain.is_empty() && !plain.ends_with('\n') {
+            plain.push('\n');
+        }
+        plain.push_str(piece);
+    }
     if plain.is_empty() {
         return;
     }
@@ -42,13 +45,14 @@ fn highlighted_html(text: &str, ranges: &[Range<usize>], runs: &[Runs], ink: Col
     let mut html = String::from("<pre style=\"white-space:pre;font-family:monospace\"><code>");
     let mut row = 0;
     let mut start = 0;
-    for (i, range) in ranges.iter().enumerate() {
-        if text.get(range.clone()).is_none() {
-            continue;
-        }
-        if i > 0 {
+    // Whether the selection before this one ended in a line break; `None` before the first.
+    let mut ended_in_break: Option<bool> = None;
+    for range in ranges {
+        let Some(piece) = text.get(range.clone()) else { continue };
+        if ended_in_break == Some(false) {
             html.push('\n');
         }
+        ended_in_break = Some(piece.ends_with('\n'));
         if range.start < start {
             start = 0;
             row = 0;

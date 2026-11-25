@@ -144,9 +144,11 @@ pub(super) fn emoji_cluster(cluster: &str) -> bool {
         let Some(base) = chars.next().filter(|c| !c.is_ascii() && c.is_emoji_char()) else {
             return false;
         };
-        let presentation = chars
-            .next_if(|c| matches!(c, '\u{fe0e}' | '\u{fe0f}'))
-            .is_some();
+        // U+FE0E asks for the text style, so such a sequence doesn't belong to the emoji font.
+        if chars.next_if_eq(&'\u{fe0e}').is_some() {
+            return false;
+        }
+        let presentation = chars.next_if_eq(&'\u{fe0f}').is_some();
         let modifier = chars
             .next_if(|c| matches!(c, '\u{1f3fb}'..='\u{1f3ff}'))
             .is_some();

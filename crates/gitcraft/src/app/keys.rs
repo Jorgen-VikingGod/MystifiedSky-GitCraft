@@ -476,7 +476,7 @@ impl App {
                         Some(p) => PaletteAction::Picker(p),
                         None => PaletteAction::Command(cmd.id),
                     };
-                    let label = if cmd.id == "repo:openInEditor" { format!("Open Repo in {}", super::external_tools::editor_name(&self.settings.string("externalEditor", "vscode"))) } else { cmd.label.to_owned() };
+                    let label = self.command_label(cmd);
                     items.push((cmd.id.to_owned(), label, hint, self.keys_of(cmd.id).map(|k| label_of(&k)).unwrap_or_default(), action));
                 }
             }
@@ -641,14 +641,20 @@ impl App {
             pal.mode = Picker::Root;
             pal.selected = 0;
         }
-        if let Some(i) = run {
+        // Dismissing wins over a selection made in the same frame.
+        if let Some(i) = run.filter(|_| !close) {
             let action = items.swap_remove(i).4;
             match action {
                 PaletteAction::Picker(p) => {
                     self.open_palette(p);
                     return;
                 }
-                PaletteAction::Command(id) => self.run_command(id),
+                // A dialog opened meanwhile owns the keyboard: the chosen command is dropped, not run behind it.
+                PaletteAction::Command(id) => {
+                    if self.dialog.is_none() {
+                        self.run_command(id);
+                    }
+                }
                 PaletteAction::Open(path) => self.open_repo(&path),
                 PaletteAction::Checkout(name, remote) => self.act(tab, if remote { Action::CheckoutRemote { remote_branch: name, stash_if_needed: false, changes: gitcraft_core::actions::CheckoutChanges::Ask } } else { Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask } }),
                 PaletteAction::History(file, blame) => self.open_history(tab, &file, if blame { super::repo::HistoryMode::Blame } else { super::repo::HistoryMode::History }),
@@ -660,6 +666,15 @@ impl App {
         }
         if !close {
             self.palette = Some(pal);
+        }
+    }
+
+    /// A command's name as the menu shows it: the editor command names the editor chosen in Preferences.
+    fn command_label(&self, cmd: &Command) -> String {
+        if cmd.id == "repo:openInEditor" {
+            format!("Open Repo in {}", super::external_tools::editor_name(&self.settings.string("externalEditor", "vscode")))
+        } else {
+            cmd.label.to_owned()
         }
     }
 
@@ -736,7 +751,7 @@ impl App {
                     }
                     egui::ScrollArea::vertical().max_height(screen.height() * 0.75 - 140.0).show(ui, |ui| {
                         for g in [Group::Repo, Group::Navigation, Group::Palette, Group::Ui] {
-                            let list: Vec<&Command> = COMMANDS.iter().filter(|cmd| cmd.group == g && (f.is_empty() || cmd.label.to_lowercase().contains(&f) || self.keys_of(cmd.id).unwrap_or_default().to_lowercase().contains(&f))).collect();
+                            let list: Vec<&Command> = COMMANDS.iter().filter(|cmd| cmd.group == g && (f.is_empty() || self.command_label(cmd).to_lowercase().contains(&f) || self.keys_of(cmd.id).unwrap_or_default().to_lowercase().contains(&f))).collect();
                             if list.is_empty() {
                                 continue;
                             }
@@ -748,7 +763,7 @@ impl App {
                                 let clash = bound[cmd.id].iter().filter_map(|b| on_keys.get(b.as_str())).flatten().copied().find(|o| o.id != cmd.id);
                                 let (row, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
                                 ui.painter().line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, c.white(0.05)));
-                                ui.painter().text(pos2(row.left(), row.center().y), Align2::LEFT_CENTER, cmd.label, FontId::proportional(13.0), c.fg);
+                                ui.painter().text(pos2(row.left(), row.center().y), Align2::LEFT_CENTER, self.command_label(cmd), FontId::proportional(13.0), c.fg);
                                 let reset_r = Rect::from_min_size(pos2(row.right() - 40.0, row.top()), vec2(40.0, 30.0));
                                 if is_custom {
                                     let rr = ui.interact(reset_r, ui.scope_id().with(("reset", cmd.id)), Sense::click());

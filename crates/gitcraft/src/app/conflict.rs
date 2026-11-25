@@ -145,8 +145,9 @@ pub fn has_conflict_markers(text: &str, marker: usize) -> bool {
                 return true;
             }
         }
-        let n = l.chars().take_while(|c| *c == '=').count();
-        n >= marker && l.len() == n
+        // A lone `=======` is also how Markdown underlines a heading, so it only counts together with an
+        // opening, base or closing marker line, which the checks above already report.
+        false
     })
 }
 
@@ -190,12 +191,14 @@ impl App {
             return false;
         }
         if info.decoding_loss && !utf8 {
+            let held = self.hold_for_conversion(tab, super::guard::Editor::Conflict);
             self.dialog = Some(super::dialogs::Dialog::confirm_with(
                 "Review this encoding before saving",
                 "Some original bytes could not be decoded. Choose the correct repository encoding to preserve them. Converting this output to UTF-8 saves the text shown and can replace undecodable bytes.",
                 "Convert output to UTF-8",
                 false,
                 move |app, _| {
+                    app.resume_after_conversion(&held);
                     app.save_conflict(tab, true);
                 },
             ));
@@ -210,7 +213,9 @@ impl App {
         let file = cu.file.clone();
         if !has_conflict_markers(&output, info.marker_size) {
             // The picks and the editor stay until the file is saved and marked resolved
-            // (`conflict_resolved`), so a failed save can be tried again.
+            // (`conflict_resolved`), so a failed save can be tried again. The editor is locked until then, so no
+            // edit made after this snapshot can be lost when the editor closes.
+            cu.saving = true;
             self.act(tab, Action::SaveResolved { file, content: text, expected: Some(info.working_token.clone()), utf8: Some(utf8) });
         } else {
             cu.saving = true;
@@ -229,6 +234,7 @@ impl App {
         if let Some(r) = self.repo_mut(tab)
             && r.conflict_ui.file == file
         {
+            r.conflict_ui.saving = false;
             r.conflict_ui.base = None;
             r.conflict_ui.picks.clear();
             r.conflict_ui.manual = None;
@@ -256,13 +262,14 @@ impl App {
                 self.left_saved(tab, super::guard::Editor::Conflict, true);
             }
             Err(e) if e.contains("ENCODING_UNREPRESENTABLE") || e.contains("ENCODING_DECODE_LOSS") => {
-                self.left_saved(tab, super::guard::Editor::Conflict, false);
+                let held = self.hold_for_conversion(tab, super::guard::Editor::Conflict);
                 self.dialog = Some(super::dialogs::Dialog::confirm_with(
                     "Save this file as UTF-8?",
                     "The current encoding cannot preserve all characters. The original file is unchanged. Convert it to UTF-8 with a byte-order mark?",
                     "Save as UTF-8",
                     false,
                     move |app, _| {
+                        app.resume_after_conversion(&held);
                         app.save_conflict(tab, true);
                     },
                 ));
@@ -322,23 +329,14 @@ impl App {
         if widgets::button(&mut hr, Kind::Default, None, &format!("Take incoming ({theirs_label})"), 22.0, true).clicked() {
             let f = file.to_owned();
             later.push(Box::new(move |app| {
+                // The picks are dropped and the editor closes once Git confirms (see `take_side_done`).
                 app.act(tab, Action::TakeSide { paths: vec![f], side: "theirs".into() });
-                // Taking a side replaces the picks, so closing asks nothing.
-                if let Some(r) = app.repo_mut(tab) {
-                    super::guard::discard_conflict(&mut r.conflict_ui);
-                    r.ui.conflict = None;
-                }
             }));
         }
         if widgets::button(&mut hr, Kind::Default, None, &format!("Take current ({ours_label})"), 22.0, true).clicked() {
             let f = file.to_owned();
             later.push(Box::new(move |app| {
                 app.act(tab, Action::TakeSide { paths: vec![f], side: "ours".into() });
-                // Taking a side replaces the picks, so closing asks nothing.
-                if let Some(r) = app.repo_mut(tab) {
-                    super::guard::discard_conflict(&mut r.conflict_ui);
-                    r.ui.conflict = None;
-                }
             }));
         }
         if !chunks.is_empty() {
@@ -568,6 +566,16 @@ impl App {
         }
     }
 
+    /// Git took a side for these files: taking a side replaces the picks, so the matching editor closes and asks
+    /// nothing. A refused take keeps the picks and the manual output.
+    pub(crate) fn take_side_done(&mut self, tab: u64, paths: &[String]) {
+        let Some(r) = self.repo_mut(tab) else { return };
+        if r.ui.conflict.as_ref().is_some_and(|f| paths.contains(f)) {
+            super::guard::discard_conflict(&mut r.conflict_ui);
+            r.ui.conflict = None;
+        }
+    }
+
     /// The AI's merge of both sides, put in the Output for review.
     pub(crate) fn ai_merged(&mut self, tab: u64, file: &str, editor: u64, revision: u64, result: Result<String, String>) {
         let Some(r) = self.repo_mut(tab) else { return };
@@ -579,6 +587,8 @@ impl App {
         r.conflict_ui.ai_busy = false;
         match result {
             Ok(_) if r.conflict_ui.revision != revision => self.toast(false, "The conflict or your output changed. The outdated AI suggestion was not applied."),
+            // A save in progress clears the output when it finishes, which would erase the suggestion unseen.
+            Ok(_) if r.conflict_ui.saving => self.toast(false, "The output was being saved, so the AI suggestion was not applied. Ask again once the save finishes."),
             Ok(text) => {
                 let cu = &mut r.conflict_ui;
                 if cu.base.is_none()

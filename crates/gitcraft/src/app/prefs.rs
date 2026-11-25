@@ -114,7 +114,8 @@ impl App {
         let target = profiles[index].clone();
         let mut next = target.get("settings").cloned().filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
         next["recents"] = current.get("recents").cloned().unwrap_or_else(|| serde_json::json!([]));
-        let keep = next.get("keepGitconfigUpdated").and_then(|v| v.as_bool()).unwrap_or(true);
+        // A profile that never saved the choice goes by the one on screen now, not by a default of "on".
+        let keep = next.get("keepGitconfigUpdated").and_then(|v| v.as_bool()).or_else(|| current.get("keepGitconfigUpdated").and_then(|v| v.as_bool())).unwrap_or(true);
         if keep {
             let (name, email) = (target["gitName"].as_str().unwrap_or("").to_owned(), target["gitEmail"].as_str().unwrap_or("").to_owned());
             let dir = std::path::Path::new(".");

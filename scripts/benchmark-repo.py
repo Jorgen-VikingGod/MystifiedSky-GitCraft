@@ -42,7 +42,7 @@ def history(n):
     mark = 0
     heads = {"main": None}
     for i in range(n):
-        branch = "main" if i % 7 else f"feature/{i % 40}"
+        branch = "main" if i == 0 or i % 7 else f"feature/{i % 40}"
         mark += 1
         parent = heads.get(branch) or heads["main"]
         lines.append(f"commit refs/heads/{branch}")

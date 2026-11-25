@@ -164,6 +164,9 @@ impl Frames for Nothing {
 pub struct Primary {
     _lock: File,
     server: Option<Server>,
+    /// What starting the server again needs, if quitting does not go through.
+    runtime: RuntimeDir,
+    version: String,
 }
 
 impl Primary {
@@ -172,6 +175,14 @@ impl Primary {
         close();
         if let Some(server) = self.server.take() {
             let _ = server.shutdown();
+        }
+    }
+
+    /// Quitting did not happen (the install or the relaunch failed): take launches again.
+    pub fn resume(&mut self) {
+        lock_queue().closing = false;
+        if self.server.is_none() {
+            self.server = start_server(&self.runtime, &self.version);
         }
     }
 }
@@ -223,6 +234,10 @@ pub fn claim_in(runtime: &RuntimeDir, intents: &[LaunchIntent], budget: Duration
 }
 
 fn start(lock: File, runtime: &RuntimeDir, version: &str) -> Primary {
+    Primary { _lock: lock, server: start_server(runtime, version), runtime: runtime.clone(), version: version.to_owned() }
+}
+
+fn start_server(runtime: &RuntimeDir, version: &str) -> Option<Server> {
     let config = ServerConfig {
         app: APP.into(),
         app_version: version.into(),
@@ -233,14 +248,13 @@ fn start(lock: File, runtime: &RuntimeDir, version: &str) -> Primary {
         activate: Arc::new(Window),
         frames: Arc::new(Nothing),
     };
-    let server = match Server::start(config) {
+    match Server::start(config) {
         Ok(s) => Some(s),
         Err(e) => {
             eprintln!("GitCraft could not take launches from other windows: {e}");
             None
         }
-    };
-    Primary { _lock: lock, server }
+    }
 }
 
 fn forward(runtime: &RuntimeDir, intents: &[LaunchIntent], version: &str) -> Result<(), String> {

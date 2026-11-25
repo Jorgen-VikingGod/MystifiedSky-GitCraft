@@ -112,6 +112,8 @@ pub struct RepoTab {
     again: bool,
     status_loading: bool,
     status_again: bool,
+    /// A status read finished while a full read of the repository was running: that read's own status is older.
+    status_during_read: bool,
     pub page_loading: bool,
     pub page_error: Option<String>,
     /// The tab is in the background; refresh when it comes to the front (true: a full read).
@@ -125,6 +127,8 @@ pub struct RepoTab {
     pub stats: HashMap<String, gitcraft_core::files::Stats>,
     stats_asked: std::collections::HashSet<String>,
     pub range_files: HashMap<(String, String), Loaded<Vec<FileChange>>>,
+    /// The read each `Loading` entry of `range_files` waits for; only that read's answer is installed.
+    pub range_requests: HashMap<(String, String), u64>,
     /// Actions waiting to run, oldest first; one runs at a time.
     queue: VecDeque<(Action, bool)>,
     pub running: Option<String>,
@@ -164,6 +168,7 @@ impl RepoTab {
             again: false,
             status_loading: false,
             status_again: false,
+            status_during_read: false,
             page_loading: false,
             page_error: None,
             deferred: None,
@@ -176,6 +181,7 @@ impl RepoTab {
             stats: HashMap::new(),
             stats_asked: Default::default(),
             range_files: HashMap::new(),
+            range_requests: HashMap::new(),
             queue: VecDeque::new(),
             running: None,
             action_change: None,
@@ -385,22 +391,26 @@ impl App {
         let max = self.initial_commits();
         let engine = self.engine.clone();
         let Some(r) = self.repo_mut(tab) else { return };
-        r.generation += 1;
         if !active {
+            r.generation += 1;
             r.deferred = Some(true);
             return;
         }
         if r.loading {
             // Another filter or set of branches: the running read is of no use any more. A
-            // refresh of the same view lets it finish, so steady file changes can't starve it.
-            if r.requested.as_ref() != Some(&view)
-                && let Some(id) = &r.reading
-            {
-                gitcraft_core::read_jobs::cancel(id);
+            // refresh of the same view lets it finish (its result stays valid, so steady file changes
+            // can't starve it) and is run once it has published.
+            if r.requested.as_ref() != Some(&view) {
+                r.generation += 1;
+                if let Some(id) = &r.reading {
+                    gitcraft_core::read_jobs::cancel(id);
+                }
             }
             r.again = true;
             return;
         }
+        r.generation += 1;
+        r.status_during_read = false;
         r.loading = true;
         r.again = false;
         r.deferred = None;
@@ -424,6 +434,7 @@ impl App {
         super::bench::mark("repo-loaded");
         let show_all = self.settings.flag("showAllCommits", false);
         let initial = self.initial_commits();
+        let mut stale_status = false;
         let start_watch = {
             let Some(r) = self.repo_mut(tab) else { return };
             r.loading = false;
@@ -448,6 +459,11 @@ impl App {
                             }
                         }
                         r.view = Some(next);
+                        // A newer working-tree status arrived while this read ran: its own is older, so read again.
+                        if std::mem::take(&mut r.status_during_read) {
+                            r.status_again = true;
+                            stale_status = true;
+                        }
                         r.shown_query = query;
                         r.error = None;
                         r.page_error = None;
@@ -476,6 +492,8 @@ impl App {
         };
         if start_watch.0 {
             self.load_repo(tab);
+        } else if stale_status {
+            self.refresh_status(tab);
         }
         if start_watch.1 {
             self.watch(tab);
@@ -571,6 +589,7 @@ impl App {
         let again = std::mem::take(&mut r.status_again);
         match result {
             Ok(status) if r.generation == generation => {
+                r.status_during_read |= r.loading;
                 if let Some(v) = r.view.as_mut() {
                     v.data.status = status;
                 }
@@ -674,8 +693,7 @@ impl App {
         if let Action::Merge { branch } = &action
             && self.settings.flag("squashMerge", false)
         {
-            let head = self.repo(tab).and_then(|r| r.view.as_ref()).and_then(|v| v.data.head_branch.clone()).unwrap_or_else(|| "HEAD".into());
-            self.pending_drafts.push((path.clone(), Draft { summary: format!("Squash merge {branch} into {head}"), description: String::new(), amend: false }));
+            // Its commit message draft is filled in once the squash succeeds (see `squash_done`).
             action = Action::MergeSquash { branch: branch.clone() };
         }
         if let Action::Commit { strip_comments, .. } = &mut action {
@@ -792,6 +810,9 @@ impl App {
         // What the commit was made from: only that is cleared, so edits made while it ran stay.
         let submitted = if let Action::Commit { .. } = action { self.repo_mut(tab).and_then(|r| r.work.submitted.take()) } else { None };
         if !result.ok && matches!(action, Action::SaveResolved { .. }) {
+            if let Some(r) = self.repo_mut(tab) {
+                r.conflict_ui.saving = false;
+            }
             self.left_saved(tab, super::guard::Editor::Conflict, false);
         }
         if result.ok {
@@ -872,10 +893,15 @@ impl App {
 
     pub(crate) fn update_busy(&mut self) {
         let running: Vec<&String> = self.repos.values().filter_map(|r| r.running.as_ref()).collect();
-        self.busy = match running.len() {
+        let tabs = match running.len() {
             0 => None,
             1 => Some(running[0].clone()),
             n => Some(format!("Working in {n} repositories…")),
+        };
+        // A bulk fetch or pull reports beside whatever the tabs are doing.
+        self.busy = match (tabs, self.bulk_message.clone()) {
+            (Some(tabs), Some(bulk)) => Some(format!("{tabs} · {bulk}")),
+            (tabs, bulk) => tabs.or(bulk),
         };
         if self.busy.is_none() {
             self.job = None;
@@ -893,6 +919,17 @@ impl App {
 
     pub(crate) fn draft(&self, path: &str) -> Draft {
         self.drafts.get(path).cloned().unwrap_or_default()
+    }
+
+    /// A squash merge succeeded: offer its message as the commit draft, unless the user already has a draft.
+    pub(crate) fn squash_done(&mut self, tab: u64, branch: &str) {
+        let Some(r) = self.repo(tab) else { return };
+        let path = r.path.clone();
+        if self.draft(&path) != Draft::default() {
+            return;
+        }
+        let head = r.view.as_ref().and_then(|v| v.data.head_branch.clone()).unwrap_or_else(|| "HEAD".into());
+        self.pending_drafts.push((path, Draft { summary: format!("Squash merge {branch} into {head}"), description: String::new(), amend: false }));
     }
 
     pub(crate) fn set_draft(&mut self, path: &str, draft: Draft) {
@@ -937,8 +974,10 @@ impl App {
             return;
         }
         r.range_files.insert(key.clone(), Loaded::Loading);
+        let request = super::unique_id();
+        r.range_requests.insert(key.clone(), request);
         let path = r.path.clone();
-        self.spawn(move || Msg::RangeFiles { tab, result: gitcraft_core::files::range_files(std::path::Path::new(&path), &key.0, &key.1), key });
+        self.spawn(move || Msg::RangeFiles { tab, request, result: gitcraft_core::files::range_files(std::path::Path::new(&path), &key.0, &key.1), key });
     }
 
     /// Line counts for the CHANGES column, for commits on screen.

@@ -167,12 +167,31 @@ impl<'a> PreviewSelection<'a> {
                 ui.ctx().request_repaint();
             }
         }
+        let mut copied = None;
         if self.response.has_focus() {
+            // Select All and Copy are applied in the order they arrived: Copy then Select All copies the earlier
+            // selection, Select All then Copy copies the whole file.
             let escape = ui.input_mut(|input| {
-                if input.consume_key(Modifiers::COMMAND, Key::A) {
-                    self.state.start = 0;
-                    self.state.end = source.len();
+                let mut kept = Vec::with_capacity(input.events.len());
+                for event in std::mem::take(&mut input.events) {
+                    match &event {
+                        egui::Event::Key { key: Key::A, modifiers, pressed: true, .. } if modifiers.matches_logically(Modifiers::COMMAND) => {
+                            self.state.start = 0;
+                            self.state.end = source.len();
+                            continue;
+                        }
+                        egui::Event::Copy => {
+                            let range = self.state.range();
+                            if !range.is_empty() {
+                                copied = Some(range);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    kept.push(event);
                 }
+                input.events = kept;
                 input.consume_key(Modifiers::NONE, Key::Escape)
             });
             if escape {
@@ -181,17 +200,8 @@ impl<'a> PreviewSelection<'a> {
             }
         }
         let range = self.state.range();
-        if self.response.has_focus()
-            && !range.is_empty()
-            && ui.input_mut(|input| {
-                let count = input.events.len();
-                input
-                    .events
-                    .retain(|event| !matches!(event, egui::Event::Copy));
-                count != input.events.len()
-            })
-        {
-            clipboard::copy(ui, source, std::slice::from_ref(&range), &[], ink);
+        if let Some(copied) = copied {
+            clipboard::copy(ui, source, std::slice::from_ref(&copied), &[], ink);
         }
         self.response.context_menu(|ui| {
             if ui

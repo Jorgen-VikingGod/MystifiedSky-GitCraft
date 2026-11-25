@@ -255,14 +255,27 @@ impl App {
         let n = shas.len();
         let title = if n == 1 { "Drop commit".to_owned() } else { format!("Drop {n} commits") };
         let text = if n == 1 { "Are you sure you want to drop 1 commit?".to_owned() } else { format!("Are you sure you want to drop {n} commits?") };
-        self.dialog = Some(Dialog::confirm_with(&title, &text, &title, true, move |app, _| {
-            app.quick(tab, base, Box::new(move |items| Some(items.into_iter().map(|mut i| {
-                if shas.contains(&i.sha) {
-                    i.action = Step::Drop;
+        let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };
+        // The plan is read before asking, and what is confirmed is that plan: if the branch or HEAD moved after
+        // the question, the rebase refuses (its expected state no longer matches) instead of dropping other commits.
+        self.spawn(move || {
+            let plan = gitcraft_core::session::rebase_plan(&path, &base);
+            super::Msg::Apply(Box::new(move |app: &mut App| match plan {
+                Ok((expected, commits)) => {
+                    let items: Vec<RebaseItem> = commits.iter().map(to_item).rev().collect();
+                    app.dialog = Some(Dialog::confirm_with(&title, &text, &title, true, move |app, _| {
+                        let items: Vec<RebaseItem> = items.into_iter().map(|mut i| {
+                            if shas.contains(&i.sha) {
+                                i.action = Step::Drop;
+                            }
+                            i
+                        }).collect();
+                        app.act(tab, Action::InteractiveRebase { base, items: todo(&items), expected, skip_hooks: false });
+                    }));
                 }
-                i
-            }).collect())));
-        }));
+                Err(e) => app.toast(false, e),
+            }))
+        });
     }
 
     /// Squash the picked commits into the commit just below the oldest of them.
@@ -509,22 +522,33 @@ impl App {
                 if editing {
                     let er = Rect::from_min_size(pos2(row.left() + 38.0, y), vec2(w - 50.0, 124.0));
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(er).layout(egui::Layout::top_down(egui::Align::Min)));
-                    let draft_id = child.scope_id().with(("reword_draft", i));
+                    // The draft belongs to the commit being edited, not to its row, so reordering or reopening can't
+                    // carry its text to another commit.
+                    let draft_id = child.scope_id().with(("reword_draft", it.sha.clone()));
                     let mut draft: String = child.data(|d| d.get_temp(draft_id)).unwrap_or_else(|| it.message.clone());
                     egui::Frame::new().fill(c.field).stroke(Stroke::new(1.0, c.white(0.1))).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::symmetric(8, 6)).show(&mut child, |ui| {
                         ui.add(egui::TextEdit::multiline(&mut draft).frame(egui::Frame::NONE).font(FontId::proportional(13.0)).desired_rows(4).desired_width(f32::INFINITY));
                     });
                     child.add_space(6.0);
+                    let mut done_editing = false;
                     child.horizontal(|ui| {
                         if widgets::button(ui, super::widgets::Kind::Primary, None, "Update Message", 24.0, !draft.trim().is_empty()).clicked() {
                             plan.items[i].message = draft.trim().to_owned();
                             plan.editing = None;
+                            done_editing = true;
                         }
                         if widgets::small(ui, super::widgets::Kind::Default, "Cancel").clicked() {
                             plan.editing = None;
+                            done_editing = true;
                         }
                     });
-                    child.data_mut(|d| d.insert_temp(draft_id, draft));
+                    child.data_mut(|d| {
+                        if done_editing {
+                            d.remove_temp::<String>(draft_id);
+                        } else {
+                            d.insert_temp(draft_id, draft);
+                        }
+                    });
                 }
             }
         });

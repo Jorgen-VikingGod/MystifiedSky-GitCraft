@@ -110,6 +110,8 @@ pub struct AgentsUi {
     pub read_at: Option<Instant>,
     pub key: String,
     pub statuses: HashMap<String, (Loaded<WorkStatus>, Instant)>,
+    /// The status read in flight for each folder; only that read's result is kept.
+    pub status_requests: HashMap<String, u64>,
     pub filter: String,
     pub search: bool,
     pub expanded: HashMap<String, bool>,
@@ -143,10 +145,11 @@ impl App {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
         let d = Dialog::prompt("Start an agent session in a new worktree", "New branch name", &format!("agent/{stamp}"), "Start", move |app, v| {
             let branch = v.text("value").trim().to_owned();
-            let sep = if path.contains('\\') { "\\" } else { "/" };
-            let parent = path.rsplit_once(['/', '\\']).map_or(path.as_str(), |(p, _)| p);
+            let repo = std::path::Path::new(&path);
+            let repo_name = repo.file_name().map_or_else(|| name.clone(), |n| n.to_string_lossy().into_owned());
             let safe: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' { c } else { '-' }).collect();
-            let folder = format!("{parent}{sep}{name}-{safe}");
+            let sibling = format!("{repo_name}-{safe}");
+            let folder = repo.parent().map_or_else(|| std::path::PathBuf::from(&sibling), |p| p.join(&sibling)).to_string_lossy().into_owned();
             let setup: Vec<String> = app.settings.string("agentSetup", "").lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect();
             let engine = app.engine.clone();
             let (p2, f2) = (path.clone(), folder.clone());
@@ -201,11 +204,16 @@ impl App {
     }
 
     fn want_worktree_status(&mut self, tab: u64, path: String) {
+        let request = super::unique_id();
         if let Some(r) = self.repo_mut(tab) {
+            if r.agents.status_requests.contains_key(&path) {
+                return;
+            }
             let fresh = r.agents.statuses.get(&path).map(|(l, at)| !matches!(l, Loaded::Loading) && at.elapsed().as_secs() < 10);
             if fresh == Some(true) || matches!(r.agents.statuses.get(&path), Some((Loaded::Loading, _))) {
                 return;
             }
+            r.agents.status_requests.insert(path.clone(), request);
             let keep = r.agents.statuses.remove(&path).map(|(l, _)| l);
             r.agents.statuses.insert(path.clone(), (keep.filter(|l| matches!(l, Loaded::Ready(_))).unwrap_or(Loaded::Loading), Instant::now()));
             if let Some((l, _)) = r.agents.statuses.get_mut(&path)
@@ -218,6 +226,10 @@ impl App {
             let r = gitcraft_core::git::try_status(std::path::Path::new(&path));
             super::Msg::Apply(Box::new(move |app: &mut App| {
                 if let Some(t) = app.repo_mut(tab) {
+                    if t.agents.status_requests.get(&path) != Some(&request) {
+                        return;
+                    }
+                    t.agents.status_requests.remove(&path);
                     t.agents.statuses.insert(path, (match r {
                         Ok(s) => Loaded::Ready(s),
                         Err(e) => Loaded::Failed(e),

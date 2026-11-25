@@ -18,18 +18,33 @@ pub struct FileFind {
     resume: Option<usize>,
     revision: Option<(u64, Option<u64>)>,
     hit: Option<Match>,
+    /// The last replacement was refused for being too large; shown beside the replacement controls.
+    too_large: bool,
+}
+
+/// The largest document a replacement may produce.
+const MAX_REPLACED: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, PartialEq)]
+pub enum ReplaceError {
+    /// There is no match, or replacing changes nothing.
+    Nothing,
+    /// The result would exceed [`MAX_REPLACED`].
+    TooLarge,
 }
 
 pub struct Match {
     bytes: Range<usize>,
     pub line: usize,
-    in_line: Range<usize>,
+    /// The part of each line the match covers: a match across line breaks marks every line it touches.
+    spans: Vec<(usize, Range<usize>)>,
 }
 
 impl Match {
     pub fn mark(&self, line: usize, text: &str) -> Option<(Range<usize>, Color32)> {
-        (line == self.line && text.get(self.in_line.clone()).is_some())
-            .then(|| (self.in_line.clone(), ACCENT.gamma_multiply(0.45)))
+        let (_, span) = self.spans.iter().find(|(row, _)| *row == line)?;
+        let span = span.start..span.end.min(text.trim_end_matches(['\r', '\n']).len());
+        (span.start < span.end && text.get(span.clone()).is_some()).then(|| (span, ACCENT.gamma_multiply(0.45)))
     }
 
     pub fn start(&self) -> usize {
@@ -123,11 +138,15 @@ impl FileFind {
         self.hit = found.map(|found| {
             let before = &text[..found.start()];
             let column = before.rsplit('\n').next().map_or(0, str::len);
-            Match {
-                bytes: found.range(),
-                line: before.bytes().filter(|b| *b == b'\n').count(),
-                in_line: column..column + found.len(),
+            let line = before.bytes().filter(|b| *b == b'\n').count();
+            // One span per line the match touches.
+            let mut spans = Vec::new();
+            let mut offset = column;
+            for (row, piece) in found.as_str().split('\n').enumerate() {
+                spans.push((line + row, offset..offset + piece.len()));
+                offset = 0;
             }
+            Match { bytes: found.range(), line, spans }
         });
     }
 
@@ -200,9 +219,9 @@ impl FileFind {
         reveal && self.open
     }
 
-    fn replace_text(&self, content: &str, all: bool) -> Option<(String, usize)> {
-        let pattern = self.pattern.as_ref()?;
-        let first = self.hit.as_ref()?;
+    fn replace_text(&self, content: &str, all: bool) -> Result<(String, usize), ReplaceError> {
+        let pattern = self.pattern.as_ref().ok_or(ReplaceError::Nothing)?;
+        let first = self.hit.as_ref().ok_or(ReplaceError::Nothing)?;
         let matches: Box<dyn Iterator<Item = regex::Captures<'_>> + '_> = if all {
             Box::new(pattern.captures_iter(content))
         } else {
@@ -217,7 +236,7 @@ impl FileFind {
         let mut wrote = 0;
         let mut caret = first.bytes.start;
         for caps in matches {
-            let hit = caps.get(0)?;
+            let hit = caps.get(0).ok_or(ReplaceError::Nothing)?;
             result.push_str(&content[wrote..hit.start()]);
             if self.regex {
                 caps.expand(&self.replacement, &mut result);
@@ -228,14 +247,18 @@ impl FileFind {
                 caret = result.len();
             }
             wrote = hit.end();
-            if result.len() > 8 * 1024 * 1024 {
-                return None;
+            if result.len() > MAX_REPLACED {
+                return Err(ReplaceError::TooLarge);
             }
         }
         result.push_str(&content[wrote..]);
+        // The unmatched rest counts too.
+        if result.len() > MAX_REPLACED {
+            return Err(ReplaceError::TooLarge);
+        }
         let changed = result != content;
         let caret = result[..caret.min(result.len())].chars().count();
-        changed.then_some((result, caret))
+        if changed { Ok((result, caret)) } else { Err(ReplaceError::Nothing) }
     }
 
     pub fn replace_bar(&mut self, ui: &mut Ui, content: &str) -> Option<(String, usize)> {
@@ -262,7 +285,16 @@ impl FileFind {
                     .add_enabled(enabled, egui::Button::new("Replace All"))
                     .clicked();
                 if one || all {
-                    result = self.replace_text(content, all);
+                    match self.replace_text(content, all) {
+                        Ok(replaced) => {
+                            self.too_large = false;
+                            result = Some(replaced);
+                        }
+                        Err(error) => self.too_large = error == ReplaceError::TooLarge,
+                    }
+                }
+                if self.too_large {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "The result would be larger than 8 MiB, so nothing was replaced.");
                 }
             }
         });

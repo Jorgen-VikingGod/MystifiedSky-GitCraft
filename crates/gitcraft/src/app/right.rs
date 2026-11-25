@@ -739,7 +739,8 @@ impl App {
                         later.push(Box::new(move |app| app.save_patch(tab, Vec::new(), &name)));
                     }
                     WorkTab::Stash => {
-                        let message = std::mem::take(&mut wu.stash_message);
+                        // The title stays while Git runs and if it fails; it is cleared once the stash is made.
+                        let message = wu.stash_message.clone();
                         later.push(Box::new(move |app| app.act(tab, Action::Stash { message })));
                     }
                     WorkTab::Commit => commit_now = Some(false),
@@ -749,7 +750,15 @@ impl App {
                 && wu.tab == WorkTab::Commit
                 && (all || enabled)
             {
-                later.push(Box::new(move |app| app.commit_from_wip(tab, all)));
+                // The summary typed this frame is stored first, so the commit uses what was submitted rather than the
+                // draft as it was before the last key press.
+                let (stored_path, typed) = (path.clone(), draft_changed.then(|| draft.clone()));
+                later.push(Box::new(move |app| {
+                    if let Some(typed) = typed {
+                        app.set_draft(&stored_path, typed);
+                    }
+                    app.commit_from_wip(tab, all);
+                }));
             }
         });
         if draft_changed {
