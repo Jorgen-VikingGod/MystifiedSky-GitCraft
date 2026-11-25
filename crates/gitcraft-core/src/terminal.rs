@@ -348,18 +348,47 @@ mod tests {
     #[test]
     fn closing_one_window_preserves_other_terminal_sessions() {
         use std::sync::mpsc::{channel, RecvTimeoutError};
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let timeout = Duration::from_secs(15);
         let (finished, done) = channel();
         let worker = std::thread::spawn(move || {
-            let terminals = Terminals::default();
+            let terminals = Arc::new(Terminals::default());
             let directory = std::env::temp_dir();
             let (exited, exits) = channel();
-            let open = |owner| {
+            let open = |owner: &'static str| {
+                let (output, chunks) = channel();
+                let acknowledge = terminals.clone();
                 let exited = exited.clone();
-                terminals.open(owner, || true, "", &directory.to_string_lossy(), 80, 24, None,
-                    Arc::new(|_, _| {}), Arc::new(move |id| { let _ = exited.send(id); })).unwrap()
+                let shell = if cfg!(windows) { "cmd" } else { "" };
+                let id = terminals.open(owner, || true, shell, &directory.to_string_lossy(), 80, 24, None,
+                    Arc::new(move |id, text| {
+                        acknowledge.acknowledge(owner, id, text.len());
+                        let _ = output.send(text);
+                    }), Arc::new(move |id| { let _ = exited.send(id); })).unwrap();
+                if cfg!(windows) {
+                    // Complete ConPTY's cursor handshake and exercise a live shell before
+                    // testing ownership. The desktop renderer normally supplies these replies.
+                    let deadline = Instant::now() + timeout;
+                    let mut seen = String::new();
+                    let mut answered = false;
+                    let mut sent = false;
+                    while !seen.contains("gitcraft-terminal-ready") {
+                        let chunk = chunks.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                            .expect("terminal did not become ready");
+                        seen.push_str(&chunk);
+                        if !answered && seen.contains("\x1b[6n") {
+                            terminals.write(owner, id, "\x1b[1;1R").unwrap();
+                            answered = true;
+                        }
+                        if !sent && (answered || seen.contains('>')) {
+                            // The caret keeps the echoed input distinct from the command output.
+                            terminals.write(owner, id, "echo gitcraft-terminal-rea^dy\r").unwrap();
+                            sent = true;
+                        }
+                    }
+                }
+                id
             };
             let first = open("first");
             let second = open("second");
@@ -374,7 +403,7 @@ mod tests {
             assert_eq!(exits.recv_timeout(timeout).expect("second terminal did not stop"), second);
             let _ = finished.send(());
         });
-        assert_ne!(done.recv_timeout(timeout * 3), Err(RecvTimeoutError::Timeout), "terminal shutdown blocked");
+        assert_ne!(done.recv_timeout(timeout * 5), Err(RecvTimeoutError::Timeout), "terminal shutdown blocked");
         worker.join().unwrap();
     }
 

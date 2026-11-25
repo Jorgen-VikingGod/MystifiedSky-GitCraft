@@ -650,7 +650,7 @@ impl App {
     }
 
     /// A text box that saves when it loses focus or on Enter.
-    fn text(&mut self, ui: &mut Ui, pui: &mut PrefsUi, t: Target, placeholder: &str, password: bool, mono: bool) {
+    fn text(&mut self, ui: &mut Ui, pui: &mut PrefsUi, t: Target, placeholder: &str, mono: bool) {
         let id = format!("{t:?}");
         let current = match self.pref(&t) {
             Value::String(s) => s,
@@ -660,7 +660,7 @@ impl App {
         let buf = pui.buffers.entry(id.clone()).or_insert_with(|| current.clone());
         let w = ui.available_width();
         let font = if mono { FontId::monospace(12.5) } else { FontId::proportional(13.0) };
-        let resp = field(ui, buf, placeholder, w, password, font, &id);
+        let resp = field(ui, buf, placeholder, w, TextVisibility::Visible, font, &id);
         let commit = resp.lost_focus() || (resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if !resp.has_focus() && !commit && *buf != current {
             *buf = current.clone();
@@ -712,7 +712,7 @@ impl App {
         let current = self.pref(&t).as_f64().unwrap_or(0.0);
         let shown = if current.fract() == 0.0 { format!("{}", current as i64) } else { format!("{current}") };
         let buf = pui.buffers.entry(id.clone()).or_insert_with(|| shown.clone());
-        let resp = field(ui, buf, "", width, false, FontId::proportional(13.0), &id);
+        let resp = field(ui, buf, "", width, TextVisibility::Visible, FontId::proportional(13.0), &id);
         let commit = resp.lost_focus() || (resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if !resp.has_focus() && !commit && *buf != shown {
             *buf = shown.clone();
@@ -763,7 +763,7 @@ impl App {
     fn path(&mut self, ui: &mut Ui, pui: &mut PrefsUi, t: Target, placeholder: &str, folder: bool, title: &str) {
         let browse_w = 84.0;
         let w = ui.available_width() - browse_w - 8.0;
-        ui.allocate_ui(vec2(w, 28.0), |ui| self.text(ui, pui, t.clone(), placeholder, false, true));
+        ui.allocate_ui(vec2(w, 28.0), |ui| self.text(ui, pui, t.clone(), placeholder, true));
         if widgets::button(ui, Kind::Default, Some(Icon::FolderOpen), "Browse", 28.0, true).clicked() {
             let dialog = if folder { craft_dialogs::FileDialog::folder() } else { craft_dialogs::FileDialog::open() }.title(title);
             self.pickers.ask(dialog, super::dialogs::Pick::Pref(t));
@@ -784,7 +784,7 @@ impl App {
                 row(ui, "Keep submodules up to date", "Automatically update all submodules after performing a Git action", None, None, false, |ui| self.toggle(ui, s("autoUpdateSubmodules"), true));
                 let b = self.settings.string("defaultBranch", "main");
                 let bad = b.chars().any(|ch| ch.is_whitespace() || "~^:?*[\\".contains(ch)).then_some("That isn't a valid branch name.");
-                row(ui, "Default Branch Name", "Sets the default branch name when initializing new repositories.", None, bad, false, |ui| self.text(ui, pui, s("defaultBranch"), "main", false, false));
+                row(ui, "Default Branch Name", "Sets the default branch name when initializing new repositories.", None, bad, false, |ui| self.text(ui, pui, s("defaultBranch"), "main", false));
                 row(ui, "Delete \".orig\" files after merging", "", None, None, false, |ui| self.toggle(ui, s("deleteOrigAfterMerge"), true));
                 row(ui, "Git Config Default: core.autocrlf", "Sets core.autocrlf in your global Git Config.", None, None, false, |ui| self.select(ui, Target::Config("global".into(), None, "core.autocrlf".into()), &[("", "(not set)"), ("true", "true"), ("input", "input"), ("false", "false")]));
                 if cfg!(windows) {
@@ -878,7 +878,7 @@ impl App {
                 for (k, label) in [("dateFormat", "Date Format"), ("dateTimeFormat", "Date/Time Format"), ("dateVerboseFormat", "Date verbose Format")] {
                     let fmt = self.pref(&s(k)).as_str().unwrap_or("").to_owned();
                     let help = format!("Example: {}. Tokens: YYYY MM M DD D MMMM MMM dddd HH H hh h mm ss A; [text] is kept as written.", widgets::format_date(example, &fmt));
-                    row(ui, label, &help, None, None, false, |ui| self.text(ui, pui, s(k), "", false, true));
+                    row(ui, label, &help, None, None, false, |ui| self.text(ui, pui, s(k), "", true));
                 }
                 sub(ui, "Graph");
                 row(ui, "Branch visibility in commit graph", "Smart Branch Visibility shows the checked-out branch, its upstream and the branch it will merge into.", None, None, false, |ui| {
@@ -995,8 +995,8 @@ impl App {
                 row(ui, "External Editor", "File > Open Repo in … and Open file in external editor.", None, None, false, |ui| self.select(ui, s("externalEditor"), &EDITORS));
                 if self.settings.string("externalEditor", "vscode") == "custom" {
                     row(ui, "Editor Executable", "", None, None, false, |ui| self.path(ui, pui, s("editorPath"), "", false, "Select an editor executable to use"));
-                    row(ui, "Open File Command", "Arguments; $FILE is the file, $REPO_PATH the repository folder.", None, None, false, |ui| self.text(ui, pui, s("editorFileArgs"), "\"$FILE\"", false, true));
-                    row(ui, "Open Repo Command", "Arguments; $REPO_PATH is the repository folder.", None, None, false, |ui| self.text(ui, pui, s("editorRepoArgs"), "\"$REPO_PATH\"", false, true));
+                    row(ui, "Open File Command", "Arguments; $FILE is the file, $REPO_PATH the repository folder.", None, None, false, |ui| self.text(ui, pui, s("editorFileArgs"), "\"$FILE\"", true));
+                    row(ui, "Open Repo Command", "Arguments; $REPO_PATH is the repository folder.", None, None, false, |ui| self.text(ui, pui, s("editorRepoArgs"), "\"$REPO_PATH\"", true));
                 }
                 sub(ui, "Terminal");
                 let terms: Vec<(&str, &str)> = if cfg!(windows) {
@@ -1009,7 +1009,7 @@ impl App {
                 row(ui, "External Terminal", "", None, None, false, |ui| self.select(ui, s("externalTerminal"), &terms));
                 if self.settings.string("externalTerminal", "default") == "custom" {
                     row(ui, "Terminal Executable", "", None, None, false, |ui| self.path(ui, pui, s("terminalPath"), "", false, "Terminal executable"));
-                    row(ui, "Terminal Arguments", "$REPO_PATH is the repository folder.", None, None, false, |ui| self.text(ui, pui, s("terminalArgs"), "", false, true));
+                    row(ui, "Terminal Arguments", "$REPO_PATH is the repository folder.", None, None, false, |ui| self.text(ui, pui, s("terminalArgs"), "", true));
                 }
                 sub(ui, "Coding Agent");
                 row(ui, "Coding Agent", "Started from the Agents view in the in-app terminal.", None, None, false, |ui| self.select(ui, s("codingAgent"), &AGENTS));
@@ -1018,13 +1018,13 @@ impl App {
             "agents" => {
                 h(ui, "Agents");
                 row(ui, "Setup commands (1 per line)", "Commands run in sequence when a new agent session starts in a worktree. Use this to install dependencies and prepare your environment. Put each command on a new line.", None, None, true, |ui| self.area(ui, pui, s("agentSetup"), "npm install\npnpm build", 4, true));
-                row(ui, "CLI arguments", "Arguments appended to the agent command when starting a session.", None, None, false, |ui| self.text(ui, pui, s("agentArgs"), "", false, true));
+                row(ui, "CLI arguments", "Arguments appended to the agent command when starting a session.", None, None, false, |ui| self.text(ui, pui, s("agentArgs"), "", true));
             }
             "commit" => {
                 h(ui, "Commit");
                 note(ui, "Create and apply a default initial message for commits to maintain consistency in commit summaries and descriptions.");
                 row(ui, "Apply this template to commit messages", "", None, None, false, |ui| self.toggle(ui, s("useCommitTemplate"), true));
-                row(ui, "Summary", "", None, None, false, |ui| self.text(ui, pui, s("templateSummary"), "e.g. feat: ", false, false));
+                row(ui, "Summary", "", None, None, false, |ui| self.text(ui, pui, s("templateSummary"), "e.g. feat: ", false));
                 row(ui, "Description", "", None, None, true, |ui| self.area(ui, pui, s("templateDescription"), "", 4, false));
                 row(ui, "Remove comments from commit messages", "Lines starting with # are left out of the commit message.", None, None, false, |ui| self.toggle(ui, s("stripComments"), true));
                 row(ui, "Push after each commit", "", None, None, false, |ui| self.toggle(ui, s("pushAfterCommit"), true));
@@ -1151,8 +1151,8 @@ impl App {
         ui.label(egui::RichText::new("Current profile identity (global Git config)").size(12.0).color(c.fg2));
         ui.add_space(8.0);
         self.want_config("global", None, &["user.name", "user.email"]);
-        row(ui, "Author Name", "", None, None, false, |ui| self.text(ui, pui, Target::Config("global".into(), None, "user.name".into()), "", false, false));
-        row(ui, "Author Email", "", None, None, false, |ui| self.text(ui, pui, Target::Config("global".into(), None, "user.email".into()), "", false, false));
+        row(ui, "Author Name", "", None, None, false, |ui| self.text(ui, pui, Target::Config("global".into(), None, "user.name".into()), "", false));
+        row(ui, "Author Email", "", None, None, false, |ui| self.text(ui, pui, Target::Config("global".into(), None, "user.email".into()), "", false));
     }
 
     fn integrations_section(&mut self, ui: &mut Ui, pui: &mut PrefsUi) {
@@ -1220,7 +1220,7 @@ impl App {
                 });
                 ui.add_space(12.0);
                 for (k, label, placeholder, help) in svc.fields {
-                    row(ui, label, help, None, None, false, |ui| self.text(ui, pui, Target::Integration(k.to_string()), placeholder, false, false));
+                    row(ui, label, help, None, None, false, |ui| self.text(ui, pui, Target::Integration(k.to_string()), placeholder, false));
                 }
                 let connected = st.as_ref().is_some_and(|x| x.connected);
                 let busy = !self.prefs_data.busy.is_empty();
@@ -1241,7 +1241,7 @@ impl App {
                 row(ui, if connected { "Replace token" } else { "Personal Access Token" }, svc.token_help, None, None, false, |ui| {
                     let buf = pui.buffers.entry(token_id.clone()).or_default();
                     let w = ui.available_width() - 110.0;
-                    field(ui, buf, "paste token", w, true, FontId::proportional(13.0), &token_id);
+                    field(ui, buf, "paste token", w, TextVisibility::Masked, FontId::proportional(13.0), &token_id);
                     let token = buf.trim().to_owned();
                     if pbutton(ui, "Save Token", Kind::Default, !token.is_empty() && ready && !busy) {
                         pui.buffers.remove(&token_id);
@@ -1405,7 +1405,7 @@ impl App {
             });
             row(ui, "Generate new GPG Key", "This will create a 4096 bit key with the name and email in your current profile that expires in 2 years.\nThis will also be set as your active signing key.", None, None, false, |ui| {
                 let buf = pui.buffers.entry("gpg_pass".into()).or_default();
-                field(ui, buf, "Passphrase (optional)", 200.0, true, FontId::proportional(13.0), "gpg_pass");
+                field(ui, buf, "Passphrase (optional)", 200.0, TextVisibility::Masked, FontId::proportional(13.0), "gpg_pass");
                 let busy = self.prefs_data.busy.iter().any(|b| b == "gpg");
                 if pbutton(ui, if busy { "Generating…" } else { "Generate" }, Kind::Default, !busy && acc.as_ref().is_some_and(|a| a.0)) {
                     let pass = pui.buffers.remove("gpg_pass").unwrap_or_default();
@@ -1517,7 +1517,7 @@ impl App {
             row(ui, if optional { "API Key (optional)" } else { "Provider API Key" }, help, None, None, false, |ui| {
                 let buf = pui.buffers.entry("ai_key".into()).or_default();
                 let w = ui.available_width() - 190.0;
-                field(ui, buf, if optional { "optional key" } else { "paste key" }, w, true, FontId::proportional(13.0), "ai_key");
+                field(ui, buf, if optional { "optional key" } else { "paste key" }, w, TextVisibility::Masked, FontId::proportional(13.0), "ai_key");
                 let key = buf.trim().to_owned();
                 let saving = self.prefs_data.busy.iter().any(|b| b == "key");
                 if pbutton(ui, "Save", Kind::Default, !key.is_empty() && !saving) {
@@ -1543,7 +1543,7 @@ impl App {
                 "custom" => "http://localhost:1234/v1",
                 _ => "provider default",
             };
-            row(ui, "API Endpoint URL", help, None, None, false, |ui| self.text(ui, pui, a("endpoint"), placeholder, false, true));
+            row(ui, "API Endpoint URL", help, None, None, false, |ui| self.text(ui, pui, a("endpoint"), placeholder, true));
         }
         // Models.
         let source = format!("{}|{}|{}|{}", ai.provider, ai.endpoint, ai.cli_path, ai.cli_config_dir);
@@ -1649,7 +1649,7 @@ impl App {
             }
         } else {
             let w = ui.available_width() - if models.is_empty() { 0.0 } else { 90.0 };
-            ui.allocate_ui(vec2(w, 28.0), |ui| self.text(ui, pui, t.clone(), fallback, false, true));
+            ui.allocate_ui(vec2(w, 28.0), |ui| self.text(ui, pui, t.clone(), fallback, true));
         }
         if !models.is_empty() && pbutton(ui, if manual { "Use List" } else { "Enter ID" }, Kind::Default, true) {
             if manual {
@@ -1769,7 +1769,7 @@ impl App {
                 row(ui, "Track a pattern", "", None, None, false, |ui| {
                     let buf = pui.buffers.entry("lfs_track".into()).or_default();
                     let w = ui.available_width();
-                    let r = field(ui, buf, "*.psd", w, false, FontId::monospace(12.5), "lfs_track");
+                    let r = field(ui, buf, "*.psd", w, TextVisibility::Visible, FontId::monospace(12.5), "lfs_track");
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
                         let pattern = buf.trim().to_owned();
                         pui.buffers.remove("lfs_track");
@@ -1844,7 +1844,7 @@ impl App {
                         let id = format!("tracker_project:{dir}");
                         let buf = pui.buffers.entry(id.clone()).or_insert_with(|| project.clone());
                         let w = ui.available_width();
-                        let r = field(ui, buf, placeholder, w, false, FontId::proportional(13.0), &id);
+                        let r = field(ui, buf, placeholder, w, TextVisibility::Visible, FontId::proportional(13.0), &id);
                         if r.lost_focus() {
                             let v = buf.trim().to_owned();
                             pui.buffers.remove(&id);
@@ -1925,15 +1925,48 @@ impl App {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextVisibility {
+    Visible,
+    Masked,
+}
+
 /// A one-line field in the preferences' look.
-fn field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, password: bool, font: FontId, id: &str) -> egui::Response {
+fn field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, visibility: TextVisibility, font: FontId, id: &str) -> egui::Response {
     let c = p();
     let (rect, _) = ui.allocate_exact_size(vec2(width.max(40.0), 28.0), Sense::hover());
     let eid = egui::Id::NULL.with(("pref_field", id));
     let focused = ui.memory(|m| m.has_focus(eid));
     ui.painter().rect(rect, CornerRadius::same(3), c.field, Stroke::new(1.0, if focused { ACCENT } else { c.white(0.1) }), StrokeKind::Inside);
-    let edit = egui::TextEdit::singleline(text).id(eid).password(password).frame(egui::Frame::NONE).font(font).hint_text(egui::RichText::new(hint).color(c.fg3)).align(Align2::LEFT_CENTER).desired_width(rect.width() - 16.0);
+    let edit = egui::TextEdit::singleline(text).id(eid).password(visibility == TextVisibility::Masked).frame(egui::Frame::NONE).font(font).hint_text(egui::RichText::new(hint).color(c.fg3)).align(Align2::LEFT_CENTER).desired_width(rect.width() - 16.0);
     ui.put(rect.shrink2(vec2(8.0, 0.0)), edit)
 }
 
 use chrono::TimeZone;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headless_preference_fields_mask_only_credentials() {
+        let ctx = egui::Context::default();
+        let mut ordinary = String::from("ordinary value");
+        let mut credential = String::from("fixture value");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = FontId::proportional(13.0);
+            field(ui, &mut ordinary, "", 220.0, TextVisibility::Visible, font.clone(), "ordinary");
+            field(ui, &mut credential, "", 220.0, TextVisibility::Masked, font, "masked");
+        });
+        output.textures_delta.clear();
+        let painted: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.text()),
+            _ => None,
+        }).collect();
+        assert!(painted.contains(&ordinary.as_str()));
+        assert!(!painted.contains(&credential.as_str()));
+        let mask = "•".repeat(credential.chars().count());
+        assert!(painted.contains(&mask.as_str()));
+        assert_eq!(credential, "fixture value");
+    }
+}
