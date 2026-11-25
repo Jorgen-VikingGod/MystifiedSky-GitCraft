@@ -1112,6 +1112,13 @@ impl App {
                     let m = multi.clone();
                     later.push(Box::new(move |app| app.drop_commits(tab, m)));
                 }
+                // A run that ends at HEAD can be composed again into new commits.
+                if let Some((from, to)) = consecutive_range(r).filter(|(_, to)| *to == v.data.head_sha)
+                    && widgets::small(ui, Kind::Ai, "Recompose with AI").clicked()
+                {
+                    let _ = to;
+                    later.push(Box::new(move |app| app.recompose_commits(tab, from, n)));
+                }
                 if widgets::small(ui, Kind::Default, "Interactive Rebase").clicked() {
                     let base = super::rebase::base_for(v, &oldest_first[0]);
                     let onto = v.data.head_branch.clone().unwrap_or_else(|| "HEAD".into());

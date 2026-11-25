@@ -161,8 +161,8 @@ pub const COMMANDS: &[Command] = &[
     mac(words(inputs(c("ui:terminalPanel", "Toggle Terminal Panel", U, &["Ctrl+`"], false)), "in-app terminal command line console"), &["Ctrl+`"]),
     mac(inputs(c("term:new", "New Terminal Tab", U, &["Ctrl+Shift+N"], false)), &["Meta+Alt+N"]),
     mac(inputs(c("term:close", "Close Terminal Tab", U, &["Ctrl+Shift+W"], false)), &["Meta+Alt+W"]),
-    mac(inputs(c("term:next", "Next Terminal Tab", U, &["Ctrl+PageDown"], false)), &["Meta+Alt+⏵"]),
-    mac(inputs(c("term:prev", "Previous Terminal Tab", U, &["Ctrl+PageUp"], false)), &["Meta+Alt+⏴"]),
+    mac(inputs(c("term:next", "Next Terminal Tab", U, &["Ctrl+PageDown"], false)), &["Meta+Alt+ArrowRight"]),
+    mac(inputs(c("term:prev", "Previous Terminal Tab", U, &["Ctrl+PageUp"], false)), &["Meta+Alt+ArrowLeft"]),
     mac(inputs(c("term:tab1", "Select Terminal Tab 1", U, &["Ctrl+Shift+1"], false)), &["Meta+Alt+1"]),
     mac(inputs(c("term:tab2", "Select Terminal Tab 2", U, &["Ctrl+Shift+2"], false)), &["Meta+Alt+2"]),
     mac(inputs(c("term:tab3", "Select Terminal Tab 3", U, &["Ctrl+Shift+3"], false)), &["Meta+Alt+3"]),
@@ -209,6 +209,8 @@ pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
         egui::Key::Backtick => "`".to_owned(),
         egui::Key::OpenBracket => "[".to_owned(),
         egui::Key::CloseBracket => "]".to_owned(),
+        // Arrows by name ("ArrowRight"), the form shortcut strings are parsed from.
+        egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::ArrowUp | egui::Key::ArrowDown => key.name().to_owned(),
         egui::Key::Num0 | egui::Key::Num1 | egui::Key::Num2 | egui::Key::Num3 | egui::Key::Num4 | egui::Key::Num5 | egui::Key::Num6 | egui::Key::Num7 | egui::Key::Num8 | egui::Key::Num9 => key.name().trim_start_matches("Num").to_owned(),
         other => {
             let n = other.symbol_or_name().to_owned();

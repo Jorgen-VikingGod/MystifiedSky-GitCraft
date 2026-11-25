@@ -261,6 +261,33 @@ impl App {
         }
     }
 
+    /// Recompose with AI: the commits after `base` on the checked-out branch are undone (a soft reset, which Undo
+    /// reverses) and their changes are composed into new commits with AI. The working folder
+    /// must be clean so nothing else is folded in.
+    pub(crate) fn recompose_commits(&mut self, tab: u64, base: String, count: usize) {
+        let Some(v) = self.repo(tab).and_then(|r| r.view.as_ref()) else { return };
+        if !v.data.status.staged.is_empty() || !v.data.status.unstaged.is_empty() {
+            return self.toast(false, "Commit or stash your working changes first, so only these commits are recomposed.");
+        }
+        let plural = if count == 1 { "" } else { "s" };
+        let text = format!("The {count} newest commit{plural} on this branch are undone (their changes stay in the working folder) and composed again into new commits with AI. You can review the result before it is committed, and Undo brings the original commits back.");
+        self.dialog = Some(Dialog::confirm_with(&format!("Recompose {count} commit{plural} with AI?"), &text, "Recompose", false, move |app, _| {
+            app.recompose_pending = Some(tab);
+            app.act(tab, Action::Reset { sha: base, mode: "soft".into() });
+        }));
+    }
+
+    /// The soft reset of Recompose with AI finished: compose its changes, or stop if it failed.
+    pub(crate) fn recompose_reset_done(&mut self, tab: u64, ok: bool) {
+        if self.recompose_pending != Some(tab) {
+            return;
+        }
+        self.recompose_pending = None;
+        if ok {
+            self.compose_commits(tab);
+        }
+    }
+
     /// Explain the uncommitted changes. Not kept: they change as you work.
     pub(crate) fn explain_working(&mut self, tab: u64) {
         let Some(path) = self.repo(tab).map(|r| r.path.clone()) else { return };

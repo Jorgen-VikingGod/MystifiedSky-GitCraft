@@ -246,6 +246,8 @@ pub struct App {
     pub(crate) ai_label: Option<String>,
     /// The last few AI explanations (what was explained, title, text), newest first.
     pub(crate) explanations: std::collections::VecDeque<(String, String, String)>,
+    /// Recompose with AI is waiting for its soft reset in this tab, to compose the changes after it.
+    pub(crate) recompose_pending: Option<u64>,
     /// The preferences revision the backend last heard about.
     pub(crate) synced: u64,
     pub(crate) prefs: Option<prefs_ui::PrefsUi>,
@@ -334,6 +336,7 @@ impl App {
             ai_reads: Vec::new(),
             ai_label: None,
             explanations: Default::default(),
+            recompose_pending: None,
             synced: 0,
             prefs: None,
             prefs_data: Default::default(),
@@ -947,6 +950,9 @@ impl App {
                     && self.settings.flag("deleteOrigAfterMerge", true)
                 {
                     self.clean_orig_files(tab);
+                }
+                if matches!(*action, Action::Reset { .. }) {
+                    self.recompose_reset_done(tab, result.ok);
                 }
                 // A checkout shows the working changes of the branch (or commit) now checked out.
                 if result.ok

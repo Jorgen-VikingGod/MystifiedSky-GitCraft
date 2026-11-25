@@ -446,6 +446,11 @@ impl App {
         let base = base_for(repo, &c.sha);
         let h = head.clone();
         items.push(item(format!("Interactive Rebase {head} from here"), move |app| app.open_rebase(tab, &base, &h, false)));
+        // This commit and every newer one on the branch, composed again into new commits with AI.
+        if let Some(parent) = c.parents.first().cloned() {
+            let count = pos + 1;
+            items.push(item(format!("Recompose {count} commit{} from here with AI", if count == 1 { "" } else { "s" }), move |app| app.recompose_commits(tab, parent.clone(), count)));
+        }
         if pos + 1 < line.len() {
             let s = c.sha.clone();
             items.push(item("Squash into the commit below", move |app| app.squash_commits(tab, vec![s])));
