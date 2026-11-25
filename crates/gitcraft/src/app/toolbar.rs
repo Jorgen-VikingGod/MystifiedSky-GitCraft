@@ -173,24 +173,34 @@ impl App {
         }
         icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if pulling { 0.35 } else { 1.0 }));
         let cresp = cresp.tip("Pull options");
-        egui::Popup::menu(&cresp).show(|ui| {
-            let entries = PULL_LABELS
-                .iter()
-                .map(|(m, l)| {
-                    let (m, path) = (m.to_string(), path.clone());
-                    item(format!("{} {l}", if pull_mode == m { "●" } else { "○" }), move |app| {
-                        match path.filter(|_| has_repo_mode) {
-                            Some(p) => {
-                                let mut prefs: serde_json::Value = app.settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
-                                prefs[&p]["pullMode"] = serde_json::Value::String(m);
-                                app.settings.set("repoPrefs", prefs);
-                            }
-                            None => app.settings.set("pullMode", m),
+        egui::Popup::menu(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(220.0);
+            for &(m, label) in &PULL_LABELS {
+                let selected = pull_mode == m;
+                egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip("Set as default");
+                        if radio.clicked() {
+                            let (m, path) = (m.to_owned(), path.clone());
+                            later.push(Box::new(move |app| {
+                                match path.filter(|_| has_repo_mode) {
+                                    Some(p) => {
+                                        let mut prefs: serde_json::Value = app.settings.get("repoPrefs").unwrap_or_else(|| serde_json::json!({}));
+                                        prefs[&p]["pullMode"] = serde_json::Value::String(m);
+                                        app.settings.set("repoPrefs", prefs);
+                                    }
+                                    None => app.settings.set("pullMode", m),
+                                }
+                            }));
                         }
-                    })
-                })
-                .collect();
-            ctxmenu::show(ui, entries, later);
+                        if ui.add_enabled(v.is_some() && (!detached || m == "fetch"), egui::Button::new(egui::RichText::new(label).size(13.0)).frame_when_inactive(false)).clicked() {
+                            let mode = m.to_owned();
+                            later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
+                            ui.close();
+                        }
+                    });
+                });
+            }
         });
         x += 16.0;
         let pushing = spin == Some("push");
