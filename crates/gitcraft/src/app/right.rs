@@ -296,7 +296,17 @@ impl App {
             return self.compare_panel(ui, tab, r, &pair[0], &pair[1], later);
         }
         if r.ui.multi.len() > 2 {
-            return self.multi_panel(ui, tab, r, later);
+            // A run of consecutive commits: their combined changes below the actions for the selection.
+            if let Some((from, to)) = consecutive_range(r) {
+                let full = ui.available_rect_before_wrap();
+                let top_h = (full.height() * 0.4).clamp(150.0, 320.0).min(full.height());
+                let mut top = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(full.min, vec2(full.width(), top_h))).layout(egui::Layout::top_down(egui::Align::Min)));
+                top.set_clip_rect(Rect::from_min_size(full.min, vec2(full.width(), top_h)));
+                self.multi_panel(&mut top, tab, r, true, later);
+                let mut bottom = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(full.left(), full.top() + top_h), full.max)).layout(egui::Layout::top_down(egui::Align::Min)));
+                return self.compare_panel(&mut bottom, tab, r, &from, &to, later);
+            }
+            return self.multi_panel(ui, tab, r, false, later);
         }
         match r.ui.selection() {
             Selection::Commit(sha) => self.commit_details(ui, tab, r, &sha, later),
@@ -1058,7 +1068,7 @@ impl App {
         }
     }
 
-    fn multi_panel(&self, ui: &mut Ui, tab: u64, r: &mut RepoTab, later: &mut Vec<Later>) {
+    fn multi_panel(&self, ui: &mut Ui, tab: u64, r: &mut RepoTab, combined: bool, later: &mut Vec<Later>) {
         let c = p();
         let v = r.view.as_ref().expect("view");
         let picked: Vec<&gitcraft_core::git::Commit> = v.data.commits.iter().filter(|cm| r.ui.multi.contains(&cm.sha)).collect();
@@ -1075,7 +1085,8 @@ impl App {
             });
         });
         egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new("A combined diff is not shown for this selection. Select exactly 2 commits to compare them.").size(12.0).color(c.fg3)).wrap());
+            let note = if combined { "Their combined changes are shown below." } else { "A combined diff is shown for consecutive commits, or for exactly 2 commits to compare them." };
+            ui.add(egui::Label::new(egui::RichText::new(note).size(12.0).color(c.fg3)).wrap());
         });
         let multi = r.ui.multi.clone();
         ui.horizontal_wrapped(|ui| {
@@ -1154,4 +1165,22 @@ mod tests {
         let s = WorkStatus { staged: vec![f("a", 'A')], unstaged: vec![f("a", 'M'), f("b", 'D')], conflicted: false };
         assert_eq!(working_changes(&s), (2, 1, 1, 0));
     }
+}
+
+/// The selected commits as one range, when they follow each other (each is the first parent of the next): the parent
+/// of the oldest and the newest. `None` for scattered commits or a run that starts at the root commit.
+fn consecutive_range(r: &RepoTab) -> Option<(String, String)> {
+    let v = r.view.as_ref()?;
+    let mut picked: Vec<usize> = r.ui.multi.iter().map(|sha| r.index.get(sha).copied()).collect::<Option<Vec<_>>>()?;
+    picked.sort_unstable();
+    let commits = &v.data.commits;
+    for pair in picked.windows(2) {
+        let (newer, older) = (commits.get(pair[0])?, commits.get(pair[1])?);
+        if newer.parents.first() != Some(&older.sha) {
+            return None;
+        }
+    }
+    let newest = commits.get(*picked.first()?)?;
+    let oldest = commits.get(*picked.last()?)?;
+    Some((oldest.parents.first()?.clone(), newest.sha.clone()))
 }
