@@ -200,6 +200,14 @@ impl RepoTab {
         }
     }
 
+    fn queue_action(&mut self, action: Action, quiet: bool, busy: bool) -> bool {
+        if busy && matches!(&action, Action::Fetch | Action::Pull { .. }) {
+            return false;
+        }
+        self.queue.push_back((action, quiet));
+        true
+    }
+
     /// Whether more history is to be paged in: the initial amount (or all), and back to the depth
     /// a commit selected before a full read was found at.
     fn wants_more(&self, show_all: bool, initial: usize) -> bool {
@@ -250,6 +258,10 @@ impl RepoTab {
     fn reindex(&mut self) {
         self.index = self.view.as_ref().map(|v| v.data.commits.iter().enumerate().map(|(i, c)| (c.sha.clone(), i)).collect()).unwrap_or_default();
     }
+}
+
+pub(super) fn pull_busy(running: bool, background: &[String], path: &str) -> bool {
+    running || background.iter().any(|p| super::same_folder(p, path))
 }
 
 /// History equal when HEAD and every ref are where they were.
@@ -710,8 +722,11 @@ impl App {
         if let Action::Commit { strip_comments, .. } = &mut action {
             *strip_comments = self.settings.flag("stripComments", false);
         }
+        let busy = self.repo(tab).is_some_and(|r| pull_busy(r.running.is_some(), &self.background_repos, &r.path));
         let Some(r) = self.repo_mut(tab) else { return };
-        r.queue.push_back((action, quiet));
+        if !r.queue_action(action, quiet, busy) {
+            return;
+        }
         if r.running.is_none() {
             self.next_action(tab);
         }
@@ -1076,4 +1091,41 @@ fn headless_superseded_page_cannot_clear_the_active_request() {
     assert_eq!(tab.paging.as_deref(), Some("new request"));
     assert!(tab.finish_page("new request"));
     assert!(!tab.page_loading);
+}
+
+#[cfg(test)]
+#[test]
+fn headless_busy_pull_fetch_dispatch_is_rejected() {
+    for running in ["pull", "fetch"] {
+        for quiet in [false, true] {
+            for action in [Action::Fetch, Action::Pull { mode: "ff".into(), autostash: None }] {
+                let mut repo = RepoTab::new("/repo");
+                repo.running = Some(running.into());
+                let busy = pull_busy(repo.running.is_some(), &[], &repo.path);
+                assert!(!repo.queue_action(action, quiet, busy));
+                assert!(repo.queue.is_empty());
+            }
+        }
+    }
+
+    for quiet in [false, true] {
+        for action in [Action::Fetch, Action::Pull { mode: "ff".into(), autostash: None }] {
+            let mut repo = RepoTab::new("/repo");
+            let background = vec!["/repo/".into()];
+            let busy = pull_busy(repo.running.is_some(), &background, &repo.path);
+            assert!(!repo.queue_action(action, quiet, busy));
+            assert!(repo.queue.is_empty());
+        }
+    }
+
+    let mut repo = RepoTab::new("/repo");
+    let unrelated = vec!["/other".into()];
+    let busy = pull_busy(repo.running.is_some(), &unrelated, &repo.path);
+    assert!(repo.queue_action(Action::Pull { mode: "ff".into(), autostash: None }, false, busy));
+    assert_eq!(repo.queue.len(), 1);
+
+    let mut repo = RepoTab::new("/repo");
+    repo.running = Some("pull".into());
+    assert!(repo.queue_action(Action::StageAll, false, true));
+    assert_eq!(repo.queue.len(), 1);
 }

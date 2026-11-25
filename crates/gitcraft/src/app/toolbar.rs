@@ -5,7 +5,7 @@ use super::widgets::Tip;
 use super::App;
 use super::ctxmenu::{self, Entry, Later, item};
 use super::icons::{self, Icon};
-use super::repo::RepoTab;
+use super::repo::{self, RepoTab};
 use super::theme::{ACCENT, p};
 use egui::{Align2, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use gitcraft_core::actions::Action;
@@ -13,18 +13,14 @@ use gitcraft_core::git::RefKind;
 
 const PULL_LABELS: [(&str, &str); 4] = [("fetch", "Fetch All"), ("ff", "Pull (fast-forward if possible)"), ("ffonly", "Pull (fast-forward only)"), ("rebase", "Pull (rebase)")];
 
-fn pull_busy(running: bool, background: &[String], path: &str) -> bool {
-    running || background.iter().any(|p| super::same_folder(p, path))
-}
-
 #[cfg(test)]
 #[test]
 fn headless_pull_busy_tracks_background_repositories() {
     let paths = vec!["/repo/".to_owned(), "/other".to_owned()];
-    assert!(pull_busy(false, &paths, "/repo"));
-    assert!(!pull_busy(false, &paths, "/unrelated"));
-    assert!(pull_busy(true, &[], "/repo"));
-    assert!(!pull_busy(false, &[], "/repo"));
+    assert!(repo::pull_busy(false, &paths, "/repo"));
+    assert!(!repo::pull_busy(false, &paths, "/unrelated"));
+    assert!(repo::pull_busy(true, &[], "/repo"));
+    assert!(!repo::pull_busy(false, &[], "/repo"));
 }
 
 fn set_repo_pull_mode(prefs: &mut serde_json::Value, path: &str, mode: String) {
@@ -114,7 +110,7 @@ impl App {
         let head = v.and_then(|v| v.data.refs.iter().find(|r| r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref()));
         let has_changes = v.is_some_and(|v| !v.data.status.unstaged.is_empty() || !v.data.status.staged.is_empty());
         let spin = r.and_then(|r| r.spinning);
-        let busy = r.is_some_and(|r| pull_busy(r.running.is_some(), &self.background_repos, &r.path));
+        let busy = r.is_some_and(|r| repo::pull_busy(r.running.is_some(), &self.background_repos, &r.path));
         // The three parts never overlap. When the window is narrow the pickers give up room
         // first, the branch picker before the repository picker; the button group never slides
         // left over them and Actions and Search never slide left over the group.
