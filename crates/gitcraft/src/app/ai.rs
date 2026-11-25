@@ -17,7 +17,7 @@ pub enum AiOutput {
     /// `key` names what was explained (a commit, or a branch at its tip) for the recent explanations kept.
     Explain { key: Option<String>, title: String, text: String },
     Compose { tab: u64, commits: Vec<ComposedCommit> },
-    Merge { tab: u64, file: String, editor: u64, revision: u64, text: String },
+    Merge { tab: u64, file: String, editor: u64, revision: u64, text: String, notes: Vec<ai::ConflictNote> },
     PullText { tab: u64, request: u64, title: String, body: String },
 }
 
@@ -134,7 +134,7 @@ impl App {
                 let plural = if n == 1 { "" } else { "s" };
                 self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits })));
             }
-            AiOutput::Merge { tab, file, editor, revision, text } => self.ai_merged(tab, &file, editor, revision, Ok(text)),
+            AiOutput::Merge { tab, file, editor, revision, text, notes } => self.ai_merged(tab, &file, editor, revision, Ok((text, notes))),
             AiOutput::PullText { tab, request, title, body } => self.pr_text_ready(tab, request, title, body),
         }
     }
@@ -269,7 +269,10 @@ impl App {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ai_resolve_conflict(&mut self, tab: u64, base: String, ours: String, theirs: String, file: String, editor: u64, revision: u64) {
-        self.ai_run("Merging both sides…", move || Ok(AiOutput::Merge { tab, editor, revision, text: ai::resolve_conflict(&base, &ours, &theirs, &file)?, file }));
+        self.ai_run("Merging both sides…", move || {
+            let (text, notes) = ai::resolve_conflict(&base, &ours, &theirs, &file)?;
+            Ok(AiOutput::Merge { tab, editor, revision, text, notes, file })
+        });
         if let Some(r) = self.repo_mut(tab) {
             r.conflict_ui.ai_busy = true;
         }

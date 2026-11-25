@@ -520,18 +520,35 @@ pub fn pull_request_text(dir: &Path, source: &str, target: &str) -> Result<(Stri
 
 /// Conflict Resolution (GKAIPreferences-ConflictResolution): a merged version of a conflicted file, for the
 /// merge tool's Output (the person reviews it before saving).
-pub fn resolve_conflict(base: &str, ours: &str, theirs: &str, file: &str) -> Result<String, String> {
+/// One conflict as the AI resolved it: what it was, how it was resolved, and how sure the AI is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictNote {
+    pub summary: String,
+    pub explanation: String,
+    /// "high", "medium" or "low".
+    pub confidence: String,
+}
+
+pub fn resolve_conflict(base: &str, ours: &str, theirs: &str, file: &str) -> Result<(String, Vec<ConflictNote>), String> {
     let prompt = format!("File: {file}\n\n=== BASE (common ancestor) ===\n{base}\n=== CURRENT (ours) ===\n{ours}\n=== INCOMING (theirs) ===\n{theirs}");
-    let schema = json!({ "type": "object", "properties": { "merged": { "type": "string" }, "notes": { "type": "string" } }, "required": ["merged", "notes"], "additionalProperties": false });
+    let note = json!({ "type": "object", "properties": { "summary": { "type": "string" }, "explanation": { "type": "string" }, "confidence": { "type": "string", "enum": ["high", "medium", "low"] } }, "required": ["summary", "explanation", "confidence"], "additionalProperties": false });
+    let schema = json!({ "type": "object", "properties": { "merged": { "type": "string" }, "conflicts": { "type": "array", "items": note } }, "required": ["merged", "conflicts"], "additionalProperties": false });
     let v = ask(
         "conflict",
         "You resolve git merge conflicts. Combine the current and incoming versions so both sides' intended changes are kept \
-         where possible. Return the complete merged file without conflict markers, preserving formatting and line endings.",
+         where possible. Return the complete merged file without conflict markers, preserving formatting and line endings. \
+         For each conflicting region, add an entry to `conflicts`: a short summary of the region, how you resolved it and why, \
+         and your confidence (high, medium or low) that the resolution keeps both sides' intent.",
         prompt,
         "high",
         schema,
     )?;
-    Ok(v["merged"].as_str().unwrap_or_default().to_string())
+    let notes = v["conflicts"].as_array().map(|list| list.iter().map(|n| ConflictNote {
+        summary: n["summary"].as_str().unwrap_or_default().to_owned(),
+        explanation: n["explanation"].as_str().unwrap_or_default().to_owned(),
+        confidence: match n["confidence"].as_str() { Some(c @ ("high" | "medium" | "low")) => c.to_owned(), _ => "low".to_owned() },
+    }).collect()).unwrap_or_default();
+    Ok((v["merged"].as_str().unwrap_or_default().to_string(), notes))
 }
 
 #[cfg(test)]

@@ -37,6 +37,8 @@ pub struct ConflictUi {
     pub current: usize,
     pub jump: bool,
     pub ai_busy: bool,
+    /// The AI's account of each conflict it resolved (shown with the suggestion it made).
+    pub ai_notes: Vec<gitcraft_core::ai::ConflictNote>,
     /// Bumped by every edit; an AI answer for an older edit is dropped.
     pub revision: u64,
     pub saving: bool,
@@ -525,6 +527,7 @@ impl App {
             cu.base = None;
             cu.current = 0;
             cu.revision += 1;
+            cu.ai_notes.clear();
         }
         if cu.manual.is_none() && widgets::button(&mut orow, Kind::Default, Some(Icon::Pencil), "Edit", 22.0, !saving).tip("Type in the output directly").clicked() {
             if cu.base.is_none() {
@@ -538,6 +541,26 @@ impl App {
             cu.ai_busy = true;
             let (base, ours, theirs, f, editor, revision) = (info.base.clone().unwrap_or_default(), info.ours.clone().unwrap_or_default(), info.theirs.clone().unwrap_or_default(), file.to_owned(), cu.editor, cu.revision);
             later.push(Box::new(move |app| app.ai_resolve_conflict(tab, base, ours, theirs, f, editor, revision)));
+        }
+        // The AI's notes on its suggestion: each conflict, how it was resolved, and how sure it is.
+        if !cu.ai_notes.is_empty() && cu.manual.is_some() {
+            egui::CollapsingHeader::new(egui::RichText::new(format!("AI notes ({})", cu.ai_notes.len())).size(12.0).color(c.fg2)).id_salt(("ai_notes", cu.editor)).default_open(true).show(&mut oui, |ui| {
+                for note in &cu.ai_notes {
+                    let color = match note.confidence.as_str() {
+                        "high" => super::theme::GOOD,
+                        "medium" => super::theme::WARN,
+                        _ => BAD,
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        egui::Frame::new().fill(color.gamma_multiply(0.2)).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::symmetric(5, 1)).show(ui, |ui| {
+                            ui.label(egui::RichText::new(format!("{} confidence", note.confidence)).size(11.0).color(color));
+                        });
+                        ui.label(egui::RichText::new(&note.summary).size(12.0).strong());
+                    });
+                    ui.add(egui::Label::new(egui::RichText::new(&note.explanation).size(12.0).color(c.fg2)).wrap());
+                    ui.add_space(4.0);
+                }
+            });
         }
         // Read-only while its save runs, so nothing typed meanwhile is cleared by that save.
         let saving = cu.saving;
@@ -577,7 +600,7 @@ impl App {
     }
 
     /// The AI's merge of both sides, put in the Output for review.
-    pub(crate) fn ai_merged(&mut self, tab: u64, file: &str, editor: u64, revision: u64, result: Result<String, String>) {
+    pub(crate) fn ai_merged(&mut self, tab: u64, file: &str, editor: u64, revision: u64, result: Result<(String, Vec<gitcraft_core::ai::ConflictNote>), String>) {
         let Some(r) = self.repo_mut(tab) else { return };
         // A suggestion for another file, or for an editor of this file closed since, changes
         // nothing here.
@@ -589,8 +612,9 @@ impl App {
             Ok(_) if r.conflict_ui.revision != revision => self.toast(false, "The conflict or your output changed. The outdated AI suggestion was not applied."),
             // A save in progress clears the output when it finishes, which would erase the suggestion unseen.
             Ok(_) if r.conflict_ui.saving => self.toast(false, "The output was being saved, so the AI suggestion was not applied. Ask again once the save finishes."),
-            Ok(text) => {
+            Ok((text, notes)) => {
                 let cu = &mut r.conflict_ui;
+                cu.ai_notes = notes;
                 if cu.base.is_none()
                     && let Some(Loaded::Ready(i)) = &cu.info
                 {
