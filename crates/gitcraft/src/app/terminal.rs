@@ -319,6 +319,49 @@ impl App {
         panel.active = panel.sessions.len() - 1;
     }
 
+    /// The terminal tab shortcuts (New, Close, Next, Previous, Select 1â€“9), for the shown repository's terminal.
+    pub(crate) fn terminal_command(&mut self, id: &str) {
+        let tab = self.active;
+        if !self.settings.flag("showTerminal", false) {
+            if id == "term:new" {
+                self.settings.set("showTerminal", true);
+            }
+            return;
+        }
+        let cwd = self.repo(tab).map(|r| r.path.clone()).unwrap_or_default();
+        let panel = self.term_panels.entry(tab).or_default();
+        let n = panel.sessions.len();
+        match id {
+            "term:new" => {
+                panel.next += 1;
+                panel.sessions.push(Session::new(format!("Terminal {}", panel.next), cwd, None, None));
+                panel.active = panel.sessions.len() - 1;
+            }
+            "term:close" if n > 0 => {
+                let i = panel.active.min(n - 1);
+                let s = panel.sessions.remove(i);
+                if let Some(id) = s.id {
+                    self.terminals.close("main", id);
+                }
+                let panel = self.term_panels.get_mut(&tab).expect("panel");
+                if panel.sessions.is_empty() {
+                    self.settings.set("showTerminal", false);
+                } else {
+                    panel.active = panel.active.min(panel.sessions.len() - 1);
+                }
+            }
+            "term:next" if n > 0 => panel.active = (panel.active + 1) % n,
+            "term:prev" if n > 0 => panel.active = (panel.active + n - 1) % n,
+            other => {
+                if let Some(k) = other.strip_prefix("term:tab").and_then(|k| k.parse::<usize>().ok())
+                    && (1..=n).contains(&k)
+                {
+                    panel.active = k - 1;
+                }
+            }
+        }
+    }
+
     /// Feed what the shells wrote into their screens.
     pub(super) fn pump_terminals(&mut self) {
         let mut pending = std::mem::take(&mut *self.term_pending.lock().unwrap_or_else(|e| e.into_inner()));
@@ -391,6 +434,20 @@ impl App {
         if presp.clicked() {
             add = true;
         }
+        // Kill the shown session, and minimize the panel to this bar (its sessions keep running).
+        let kill = Rect::from_min_size(pos2(bar.right() - 98.0, bar.top() + 2.0), Vec2::splat(22.0));
+        let kresp = ui.interact(kill, ui.scope_id().with("term_kill"), Sense::click()).tip("Kill this terminal session");
+        icons::paint(ui, kill, Icon::Trash2, 13.0, if kresp.hovered() { c.white(1.0) } else { c.fg2 });
+        if kresp.clicked() {
+            close = Some(panel.active.min(panel.sessions.len() - 1));
+        }
+        let minimized = self.settings.flag("terminalMinimized", false);
+        let min = Rect::from_min_size(pos2(bar.right() - 74.0, bar.top() + 2.0), Vec2::splat(22.0));
+        let mresp = ui.interact(min, ui.scope_id().with("term_min"), Sense::click()).tip(if minimized { "Restore the terminal" } else { "Minimize the terminal" });
+        icons::paint(ui, min, if minimized { Icon::ChevronUp } else { Icon::Minus }, 13.0, if mresp.hovered() { c.white(1.0) } else { c.fg2 });
+        if mresp.clicked() {
+            later.push(Box::new(move |app| app.settings.set("terminalMinimized", !minimized)));
+        }
         let find = Rect::from_min_size(pos2(bar.right() - 50.0, bar.top() + 2.0), Vec2::splat(22.0));
         let fresp = ui.interact(find, ui.scope_id().with("term_find"), Sense::click()).tip("Find in terminal (Ctrl+Shift+F)");
         icons::paint(ui, find, Icon::Search, 13.0, if fresp.hovered() || panel.find.is_some() { c.white(1.0) } else { c.fg2 });
@@ -424,6 +481,9 @@ impl App {
                 panel.active -= 1;
             }
             panel.active = panel.active.min(panel.sessions.len() - 1);
+        }
+        if minimized {
+            return;
         }
         let panel = self.term_panels.get_mut(&tab).expect("panel");
         let index = panel.active;
@@ -522,6 +582,15 @@ impl App {
                 s.term.scroll_display(Scroll::Bottom);
                 s.input_error = self.terminals.write("main", tid, &out).err();
             }
+        }
+        // Files dropped on the screen are typed in as quoted paths, as a terminal app would.
+        let dropped: Vec<std::path::PathBuf> = ui.input(|i| if i.pointer.hover_pos().is_some_and(|p| screen.contains(p)) { i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect() } else { Vec::new() });
+        if !dropped.is_empty()
+            && let Some(tid) = s.id
+        {
+            let text = dropped.iter().map(|p| shell_quote(&p.to_string_lossy())).collect::<Vec<_>>().join(" ");
+            s.input_error = self.terminals.write("main", tid, &format!("{text} ")).err();
+            resp.request_focus();
         }
         // Scrollback.
         if resp.hovered() {
@@ -859,5 +928,14 @@ mod tests {
         let line = "see https://example.invalid/a, then";
         assert_eq!(super::link_at(line, 6).as_deref(), Some("https://example.invalid/a"));
         assert!(super::link_at(line, 1).is_none());
+    }
+}
+
+/// A path quoted for the shell the terminal runs: double quotes on Windows, single quotes elsewhere.
+fn shell_quote(path: &str) -> String {
+    if cfg!(windows) {
+        format!("\"{}\"", path.replace('"', "\"\""))
+    } else {
+        format!("'{}'", path.replace('\'', "'\''"))
     }
 }

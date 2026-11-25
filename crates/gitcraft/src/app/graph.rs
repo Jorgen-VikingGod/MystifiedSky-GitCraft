@@ -453,6 +453,22 @@ impl App {
         if cols.graph {
             let rect = Rect::from_min_size(pos2(x, head_rect.top()), vec2(lay.graph, HEADER));
             icons::paint(ui, rect, Icon::Network, 13.0, c.white(0.7));
+            // With a pinned branch, a pin at the column's right end jumps to it.
+            if let Some(pinned) = self.pinned_ref(&path)
+                && let Some(sha) = v.data.refs.iter().find(|g| g.full == pinned || g.name == pinned).map(|g| g.sha.clone())
+                && lay.graph >= 48.0
+            {
+                let pin = Rect::from_min_size(pos2(rect.right() - 22.0, rect.top()), vec2(20.0, HEADER));
+                let pr = ui.interact(pin, ui.scope_id().with("pinned_jump"), Sense::click());
+                icons::paint(ui, pin, Icon::Pin, 12.0, if pr.hovered() { c.white(1.0) } else { ACCENT });
+                if pr.tip("Go to the pinned branch").clicked() {
+                    later.push(Box::new(move |app| {
+                        if let Some(r) = app.repo_mut(tab) {
+                            r.ui.select(Selection::Commit(sha));
+                        }
+                    }));
+                }
+            }
             x += lay.graph;
             handle(ui, Col::Graph, x, lay.graph);
         }

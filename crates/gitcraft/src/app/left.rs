@@ -438,6 +438,8 @@ impl App {
                 if is_open("tags", &open) {
                     for t in &tags {
                         let resp = row(ui, 1, Icon::Tag, &t.name, None, false, None);
+                        // An annotated tag shows its message under the pointer.
+                        let resp = if resp.hovered() && let Some(note) = tag_annotation(ui.ctx(), &v.path, &t.full) { resp.on_hover_text(note) } else { resp };
                         if resp.clicked() {
                             select_sha = Some(t.sha.clone());
                         }
@@ -644,6 +646,31 @@ impl App {
             }));
         }
     }
+}
+
+/// The message of an annotated tag (`refs/tags/…`), read once in the background; `None` while it is read and for a
+/// lightweight tag.
+pub(crate) fn tag_annotation(ctx: &egui::Context, repo: &str, full: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    type Notes = Mutex<HashMap<(String, String), Option<Option<String>>>>;
+    static NOTES: LazyLock<Notes> = LazyLock::new(Default::default);
+    let key = (repo.to_owned(), full.to_owned());
+    let mut notes = NOTES.lock().unwrap_or_else(|e| e.into_inner());
+    match notes.get(&key) {
+        Some(Some(note)) => return note.clone(),
+        Some(None) => return None,
+        None => {}
+    }
+    notes.insert(key.clone(), None);
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let out = gitcraft_core::git::run(std::path::Path::new(&key.0), &["for-each-ref", "--format=%(objecttype)%00%(contents)", &key.1]);
+        let note = out.stdout.split_once('\0').filter(|(kind, _)| *kind == "tag").map(|(_, text)| text.trim().to_owned()).filter(|t| !t.is_empty());
+        NOTES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, Some(note));
+        ctx.request_repaint();
+    });
+    None
 }
 
 /// A submodule's folder inside the repository, with the system's separator.
