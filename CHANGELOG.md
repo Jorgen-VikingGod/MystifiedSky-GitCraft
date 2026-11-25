@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before.
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents.
 - Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them.
 - Stacked pull requests: starting a pull request from a branch made on another open pull request's branch targets that branch, and the form names the pull request it stacks on.

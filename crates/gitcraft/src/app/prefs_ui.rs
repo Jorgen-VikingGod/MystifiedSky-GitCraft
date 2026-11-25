@@ -1013,6 +1013,30 @@ impl App {
                 }
                 sub(ui, "Coding Agent");
                 row(ui, "Coding Agent", "Started from the Agents view in the in-app terminal.", None, None, false, |ui| self.select(ui, s("codingAgent"), &AGENTS));
+                // Hooks that let the agents report their status (and Claude Code its permission requests) to the Agents view.
+                for (agent, label) in [("claude", "Claude Code"), ("codex", "Codex")] {
+                    let installed = if agent == "claude" { gitcraft_core::agent_status::claude_installed(None) } else { gitcraft_core::agent_status::codex_installed(None) };
+                    let help = if agent == "claude" {
+                        "Adds GitCraft's hooks to Claude Code's settings, so the Agents view shows whether a session is running, waiting for you or done, and lets you allow or deny its permission requests. Your other hooks stay."
+                    } else {
+                        "Makes GitCraft Codex's notify program, so the Agents view shows when a session is waiting for you. Not changed if Codex already runs another notify program."
+                    };
+                    row(ui, &format!("{label} status"), help, None, None, false, |ui| {
+                        ui.label(egui::RichText::new(if installed { "Reporting to GitCraft" } else { "Not set up" }).size(12.5).color(if installed { GOOD } else { c.fg3 }));
+                        if pbutton(ui, if installed { "Remove" } else { "Set Up" }, Kind::Default, true) {
+                            let result = match (agent, installed) {
+                                ("claude", false) => gitcraft_core::agent_status::install_claude(None),
+                                ("claude", true) => gitcraft_core::agent_status::uninstall_claude(None),
+                                (_, false) => gitcraft_core::agent_status::install_codex(None),
+                                (_, true) => gitcraft_core::agent_status::uninstall_codex(None),
+                            };
+                            match result {
+                                Ok(()) => self.toast(true, if installed { format!("{label} no longer reports to GitCraft") } else { format!("{label} now reports its status to GitCraft; restart running sessions to start") }),
+                                Err(e) => self.toast(false, e),
+                            }
+                        }
+                    });
+                }
             }
             "ai" => self.ai_section(ui, pui),
             "agents" => {

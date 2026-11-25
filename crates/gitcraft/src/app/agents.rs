@@ -119,6 +119,11 @@ pub struct AgentsUi {
     pub expanded: HashMap<String, bool>,
     /// How the worktree list is ordered: 0 as Git lists them, 1 by latest agent activity, 2 by branch name.
     pub sort: u8,
+    /// What the agents' status hooks last reported (see `gitcraft_core::agent_status`), and when it was read.
+    pub live: Vec<gitcraft_core::agent_status::AgentState>,
+    pub live_at: Option<Instant>,
+    /// Permission requests whose command is shown in full.
+    pub expanded_requests: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -239,6 +244,18 @@ impl App {
         });
     }
 
+    /// Read what the agents' status hooks reported.
+    pub(crate) fn want_agent_status(&mut self, tab: u64) {
+        self.spawn(move || {
+            let live = gitcraft_core::agent_status::read_all();
+            super::Msg::Apply(Box::new(move |app: &mut App| {
+                if let Some(r) = app.repo_mut(tab) {
+                    r.agents.live = live;
+                }
+            }))
+        });
+    }
+
     pub(crate) fn want_worktree_status(&mut self, tab: u64, path: String) {
         let request = super::unique_id();
         if let Some(r) = self.repo_mut(tab) {
@@ -294,7 +311,12 @@ impl App {
             au.read_at = Some(Instant::now());
             later.push(Box::new(move |app| app.want_agent_sessions(tab, roots, key)));
         }
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(10));
+        // Live status from the agents' hooks, read every two seconds.
+        if au.live_at.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+            au.live_at = Some(Instant::now());
+            later.push(Box::new(move |app| app.want_agent_status(tab)));
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(if au.live.is_empty() { 10 } else { 2 }));
         let sessions: Vec<AgentSession> = match &au.sessions {
             Some(Loaded::Ready(l)) => l.clone(),
             _ => Vec::new(),
@@ -546,6 +568,52 @@ impl App {
                     later.push(Box::new(open.clone()));
                 }
             });
+            // What the agents running here report: their state, and a permission request to answer.
+            let here: Vec<gitcraft_core::agent_status::AgentState> = au.live.iter().filter(|s| same_folder(&s.cwd, &wt.path) || std::path::Path::new(&s.cwd).starts_with(&wt.path)).cloned().collect();
+            for state in &here {
+                let (label, color) = match state.state.as_str() {
+                    "running" => ("Running", ACCENT),
+                    "waiting" => ("Waiting for you", WARN),
+                    "permission" => ("Asking permission", BAD),
+                    _ => ("Done", GOOD),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    egui::Frame::new().fill(color.gamma_multiply(0.2)).stroke(Stroke::new(1.0, color)).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::symmetric(7, 1)).show(ui, |ui| {
+                        ui.label(RichText::new(format!("{} · {label}", agent_label(&state.agent).unwrap_or("Agent"))).size(11.5).color(c.white(0.95)));
+                    });
+                    if !state.message.is_empty() && state.request.is_none() {
+                        ui.add(egui::Label::new(RichText::new(&state.message).size(11.5).color(c.fg2)).truncate());
+                    }
+                });
+                if let Some(req) = &state.request {
+                    let open_cmd = au.expanded_requests.contains(&req.id);
+                    ui.horizontal(|ui| {
+                        let (cr, cresp) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::click());
+                        widgets::chevron(ui, cr, open_cmd, 12.0, c.fg2);
+                        let head = ui.add(egui::Label::new(RichText::new(format!("Wants to use {}", req.tool)).size(12.0).color(c.white(0.9))).sense(Sense::click()));
+                        if cresp.clicked() || head.clicked() {
+                            if open_cmd { au.expanded_requests.remove(&req.id) } else { au.expanded_requests.insert(req.id.clone()) };
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for (allow, text, kind) in [(false, "Deny", widgets::Kind::Danger), (true, "Allow", widgets::Kind::Success)] {
+                                if widgets::small(ui, kind, text).clicked() {
+                                    let (session, id) = (state.session.clone(), req.id.clone());
+                                    later.push(Box::new(move |app| {
+                                        if let Err(e) = gitcraft_core::agent_status::answer(&session, &id, allow) {
+                                            app.toast(false, e);
+                                        }
+                                    }));
+                                }
+                            }
+                        });
+                    });
+                    if open_cmd {
+                        egui::Frame::new().fill(c.field).corner_radius(CornerRadius::same(3)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&req.detail).monospace().size(11.5).color(c.fg)).wrap());
+                        });
+                    }
+                }
+            }
             // The last activity line.
             let (row, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
             ui.painter().line_segment([row.left_top(), row.right_top()], Stroke::new(1.0, c.white(0.05)));

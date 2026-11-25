@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod actions;
+pub mod agent_status;
 pub mod agents;
 pub mod avatars;
 pub mod ai_cli;

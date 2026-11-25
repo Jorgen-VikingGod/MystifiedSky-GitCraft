@@ -96,6 +96,23 @@ fn main() {
     if gitcraft_core::accounts::handle_ssh_askpass() {
         return;
     }
+    // A coding agent's status hook (see gitcraft_core::agent_status): record the event, answer, and quit.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(at) = args.iter().position(|a| a == "--agent-event") {
+        let agent = args.get(at + 1).cloned().unwrap_or_default();
+        let payload = match args.get(at + 2) {
+            Some(arg) => arg.clone(),
+            None => {
+                let mut input = String::new();
+                let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+                input
+            }
+        };
+        if let Some(out) = gitcraft_core::agent_status::handle_event(&agent, &payload) {
+            println!("{out}");
+        }
+        return;
+    }
     #[cfg(target_os = "macos")]
     gitcraft_core::external::add_macos_tool_paths();
     let opts = match parse_args() {

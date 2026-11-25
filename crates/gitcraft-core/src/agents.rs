@@ -21,6 +21,10 @@ pub struct AgentSession {
     pub status: String,
 }
 
+pub(crate) fn home_dir() -> PathBuf {
+    home()
+}
+
 fn home() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from).unwrap_or_default()
