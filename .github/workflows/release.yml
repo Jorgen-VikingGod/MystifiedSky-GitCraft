@@ -102,7 +102,7 @@ jobs:
 
   build:
     needs: [version, release-ready]
-    if: inputs.channel != 'macos-dry-run'
+    if: ${{ !cancelled() && needs.release-ready.result == 'success' && inputs.channel != 'macos-dry-run' }}
     strategy:
       fail-fast: false
       matrix:
@@ -137,6 +137,7 @@ jobs:
   macos-binaries:
     name: Compile macOS (${{ matrix.target }})
     needs: [version, release-ready]
+    if: ${{ !cancelled() && needs.release-ready.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +176,7 @@ jobs:
 
   macos:
     needs: [version, macos-binaries]
+    if: ${{ !cancelled() && needs.macos-binaries.result == 'success' }}
     uses: ./.github/workflows/package-release.yml
     with:
       runner: macos-latest
@@ -189,7 +191,9 @@ jobs:
 
   publish:
     needs: [version, build, macos]
-    if: github.ref == 'refs/heads/main' && (inputs.channel == 'preview' || inputs.channel == 'stable')
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.macos.result == 'success' &&
+          github.ref == 'refs/heads/main' && (inputs.channel == 'preview' || inputs.channel == 'stable') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -22,7 +22,7 @@ function verifySignature(file, signature) {
   const decoded = join(directory, "update.minisig");
   try {
     writeFileSync(decoded, Buffer.from(signature, "base64"));
-    const result = spawnSync("minisign", ["-V", "-q", "-P", publicKey, "-m", file, "-x", decoded], {
+    const result = spawnSync("/usr/bin/minisign", ["-V", "-q", "-P", publicKey, "-m", file, "-x", decoded], {
       encoding: "utf8",
     });
     if (result.error || result.status !== 0) {
