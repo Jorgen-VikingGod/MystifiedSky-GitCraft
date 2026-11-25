@@ -178,14 +178,14 @@ impl App {
         egui::Popup::menu(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             let width = 240.0;
             ui.set_width(width);
-            ui.add(egui::Label::new(egui::RichText::new("Select the default pull/fetch operation to execute when clicking this button").size(13.0).color(c.white(0.6))).wrap());
+            ui.add(egui::Label::new(egui::RichText::new(locale.text("Select the default pull/fetch operation to execute when clicking this button")).size(13.0).color(c.white(0.6))).wrap());
             ui.add_space(4.0);
             for &(m, label) in &PULL_LABELS {
                 let selected = pull_mode == m;
                 egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
                     ui.set_min_width(width);
                     ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
-                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip("Set as default");
+                        let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip(locale.text("Set as default"));
                         if radio.clicked() {
                             let (m, path) = (m.to_owned(), path.clone());
                             later.push(Box::new(move |app| {
@@ -199,7 +199,7 @@ impl App {
                                 }
                             }));
                         }
-                        if ui.add_enabled(v.is_some() && (!detached || m == "fetch"), egui::Button::new(egui::RichText::new(label).size(13.0)).frame_when_inactive(false)).clicked() {
+                        if ui.add_enabled(v.is_some() && (!detached || m == "fetch"), egui::Button::new(egui::RichText::new(label).size(13.0)).right_text("").frame_when_inactive(false).min_size(vec2(ui.available_width(), 0.0))).clicked() {
                             let mode = m.to_owned();
                             later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
                             ui.close();

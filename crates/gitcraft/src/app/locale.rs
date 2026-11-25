@@ -86,6 +86,8 @@ impl Locale {
             "Documentation" => "Documentación",
             "Pull" => "Traer",
             "Fetch" => "Obtener",
+            "Select the default pull/fetch operation to execute when clicking this button" => "Selecciona la operación pull/fetch predeterminada que se ejecutará al pulsar este botón",
+            "Set as default" => "Establecer como predeterminada",
             "Push" => "Enviar",
             "Branch" => "Rama",
             "Stash" => "Guardar",
