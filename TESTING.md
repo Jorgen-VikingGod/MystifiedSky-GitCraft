@@ -52,7 +52,9 @@ cargo run --locked
 ```
 
 The `headless_` filter runs the native UI regressions used by the required GitHub check named
-`Headless browser regressions`.
+`Headless browser regressions`. On Linux that job covers the headless cases and the rest of the
+Linux suite skips them. Windows and macOS CI use `cargo nextest run --locked --workspace --test-threads 4`
+to give each test its own process, then run Rust documentation tests separately.
 
 The app is in [crates/gitcraft](crates/gitcraft) and its back end in [crates/gitcraft-core](crates/gitcraft-core). Take a picture of the window without touching your preferences with `cargo run --locked -- --screenshot shot.png --theme light`; `--shot-view` shows a particular view first (see `--help`).
 
