@@ -134,7 +134,7 @@ pub struct RepoTab {
     pub running: Option<String>,
     /// A change the watcher saw while an action ran (true: a full read).
     action_change: Option<bool>,
-    /// Which toolbar buttons spin: "pull", "push", "stash", "pop".
+    /// Which toolbar buttons spin: "fetch", "pull", "push", "stash", "pop".
     pub spinning: Option<&'static str>,
     pub work: super::right::WorkUi,
     pub side: super::left::SideData,
@@ -321,12 +321,23 @@ fn busy_label(a: &Action) -> &'static str {
 
 fn spin_for(a: &Action) -> Option<&'static str> {
     match a {
+        Action::Fetch | Action::FetchRemote { .. } | Action::FetchHistory { .. } => Some("fetch"),
         Action::Pull { .. } => Some("pull"),
         Action::Push { .. } => Some("push"),
         Action::Stash { .. } | Action::StashKeepIndex { .. } | Action::StashUntracked { .. } => Some("stash"),
         Action::StashPop { .. } => Some("pop"),
         _ => None,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn headless_fetch_and_pull_toolbar_spinners_are_distinct() {
+    assert_eq!(spin_for(&Action::Fetch), Some("fetch"));
+    assert_eq!(spin_for(&Action::FetchRemote { remote: "origin".into() }), Some("fetch"));
+    assert_eq!(spin_for(&Action::FetchHistory { remote: "origin".into(), mode: "deepen".into() }), Some("fetch"));
+    assert_eq!(spin_for(&Action::Pull { mode: "ff".into(), autostash: None }), Some("pull"));
+    assert_eq!(spin_for(&Action::Undo), None);
 }
 
 /// SSH refused the server's key: Some(true) when it changed, Some(false) when it is unknown.

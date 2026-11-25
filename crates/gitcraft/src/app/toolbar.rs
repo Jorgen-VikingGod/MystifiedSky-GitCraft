@@ -70,6 +70,7 @@ impl App {
         let head = v.and_then(|v| v.data.refs.iter().find(|r| r.kind == RefKind::Local && Some(&r.name) == v.data.head_branch.as_ref()));
         let has_changes = v.is_some_and(|v| !v.data.status.unstaged.is_empty() || !v.data.status.staged.is_empty());
         let spin = r.and_then(|r| r.spinning);
+        let busy = r.is_some_and(|r| r.running.is_some());
         // The three parts never overlap. When the window is narrow the pickers give up room
         // first, the branch picker before the repository picker; the button group never slides
         // left over them and Actions and Search never slide left over the group.
@@ -160,25 +161,28 @@ impl App {
         }
         x += 52.0;
         let pull_tip = if detached { "Pull is not available when in a detached HEAD state" } else { PULL_LABELS.iter().find(|(m, _)| *m == pull_mode).map_or("Pull", |(_, l)| l) };
-        let pulling = spin == Some("pull");
-        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, locale.text("Pull"), labels, pull_tip, v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
+        let pulling = matches!(spin, Some("pull" | "fetch"));
+        let pull_label = locale.text(if spin == Some("fetch") { "Fetch" } else { "Pull" });
+        if tb(ui, slot(x, 52.0), Icon::ArrowDownToLine, pull_label, labels, pull_tip, !busy && v.is_some() && (!detached || pull_mode == "fetch"), head.map_or(0, |h| h.behind), pulling).clicked() {
             let mode = pull_mode.clone();
             later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
         }
         x += 52.0;
         let chev = Rect::from_min_size(pos2(x, rect.top()), vec2(14.0, rect.height()));
-        let cresp = ui.interact(chev, ui.scope_id().with("pull_options"), if pulling { Sense::hover() } else { Sense::click() });
-        if cresp.hovered() {
+        let cresp = ui.interact(chev, ui.scope_id().with("pull_options"), if busy { Sense::hover() } else { Sense::click() });
+        if cresp.hovered() && !busy {
             ui.painter().rect_filled(chev, CornerRadius::ZERO, c.white(0.05));
         }
-        icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if pulling { 0.35 } else { 1.0 }));
+        icons::paint(ui, Rect::from_min_size(pos2(chev.left() + 0.5, rect.top() + 13.0), Vec2::splat(13.0)), Icon::ChevronDown, 13.0, c.white(0.9).gamma_multiply(if busy { 0.35 } else { 1.0 }));
         let cresp = cresp.tip("Pull options");
         egui::Popup::menu(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(220.0);
             for &(m, label) in &PULL_LABELS {
                 let selected = pull_mode == m;
+                let width = ui.available_width();
                 egui::Frame::new().fill(if selected { egui::Color32::from_rgb(0x48, 0x69, 0x53) } else { egui::Color32::TRANSPARENT }).show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.set_min_width(width);
+                    ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| {
                         let radio = ui.radio(selected, "").on_hover_cursor(egui::CursorIcon::PointingHand).tip("Set as default");
                         if radio.clicked() {
                             let (m, path) = (m.to_owned(), path.clone());
@@ -198,7 +202,7 @@ impl App {
                             later.push(Box::new(move |app| app.act(tab, if mode == "fetch" { Action::Fetch } else { Action::Pull { mode, autostash: None } })));
                             ui.close();
                         }
-                    });
+                    }));
                 });
             }
         });

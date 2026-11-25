@@ -85,6 +85,7 @@ impl Locale {
             "Release Notes" => "Notas de la versión",
             "Documentation" => "Documentación",
             "Pull" => "Traer",
+            "Fetch" => "Obtener",
             "Push" => "Enviar",
             "Branch" => "Rama",
             "Stash" => "Guardar",
