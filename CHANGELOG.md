@@ -63,6 +63,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 ### Changed
 
 - The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Speed up release builds by reusing passing tests for the release commit and compiling macOS architectures in parallel. Verify update signatures before publishing. ([#55](https://github.com/MystifiedSky/GitCraft/pull/55))
+
 - Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
 - Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
 - In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
@@ -80,6 +82,16 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 - "Automatically group worktree tabs together" now works: tabs of worktrees of the same repository sit side by side and share a colored line. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
+- Reject Fetch and Pull actions while their repository is busy, including from open menus, shortcuts and Repository Management. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Disable Pull and Fetch for repositories involved in automatic or bulk fetch and pull operations. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Avoid a crash when saving a Pull default with malformed repository preferences. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Identify each Pull menu default selector by its operation in its tooltip and accessibility description. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Choose the default Pull action independently from running a command in the Pull menu. The selected row spans the menu, and the toolbar shows Fetch while a fetch runs and prevents duplicate actions while the repository is busy. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Keep the Pull menu compact and explain its default selection; dim the Pull or Fetch button while the repository is busy. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Translate the Pull menu's default-selection guidance into Spanish and give its action buttons consistent widths. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))
+- Restore RPM packages in Linux x64 and ARM64 releases. ([#53](https://github.com/MystifiedSky/GitCraft/pull/53))
+
+- Fix a macOS build error in the native app's startup code. ([#50](https://github.com/MystifiedSky/GitCraft/pull/50))
 - Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep staged and unstaged files in the same scrolling area so an empty staged section leaves more room for changed files. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))

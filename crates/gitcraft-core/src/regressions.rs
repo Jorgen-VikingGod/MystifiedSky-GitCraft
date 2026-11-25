@@ -1652,6 +1652,33 @@ fn blame_can_ignore_a_revision_and_respects_mailmap() {
 }
 
 #[test]
+fn fetching_and_pulling_apply_only_the_requested_changes() {
+    let remote = fixture("gitcraft-pull-actions-remote-");
+    let local = tempfile::tempdir().unwrap();
+    let url = url::Url::from_file_path(remote.path()).unwrap();
+    let clone = git::run(local.path(), &["clone", url.as_str(), "."]);
+    assert!(clone.ok, "{}", clone.message());
+    let unchanged = head(local.path());
+    let engine = Engine::default();
+    let path = local.path().to_string_lossy();
+    for (file, mode) in [("incoming.txt", "ffonly"), ("next.txt", "ff")] {
+        std::fs::write(remote.path().join(file), "from upstream\n").unwrap();
+        assert!(git::run(remote.path(), &["add", file]).ok);
+        assert!(git::run(remote.path(), &["commit", "-qm", file]).ok);
+        if mode == "ffonly" {
+            let result = engine.perform(&path, Action::Fetch);
+            assert!(result.ok, "{}", result.message);
+            assert_eq!(head(local.path()), unchanged);
+            assert!(!local.path().join(file).exists());
+        }
+        let result = engine.perform(&path, Action::Pull { mode: mode.into(), autostash: None });
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(head(local.path()), head(remote.path()));
+        assert!(local.path().join(file).is_file());
+    }
+}
+
+#[test]
 fn pull_rebase_autostash_restores_dirty_tracked_changes() {
     let remote = fixture("gitcraft-pull-autostash-remote-");
     let local = tempfile::tempdir().unwrap();

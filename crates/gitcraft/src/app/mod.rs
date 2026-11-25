@@ -113,7 +113,7 @@ pub enum Msg {
     Status { tab: u64, generation: u64, result: Result<gitcraft_core::git::WorkStatus, String> },
     Changed { path: String, full: bool },
     Watching { tab: u64, result: Result<Arc<gitcraft_core::watch::RepoWatch>, String> },
-    Acted { tab: u64, action: Box<Action>, quiet: bool, result: ActionResult },
+    Acted { tab: u64, path: String, action: Box<Action>, quiet: bool, result: ActionResult },
     CommitFiles { tab: u64, sha: String, files: Vec<gitcraft_core::git::CommitFile>, signature: String },
     CommitDetails { tab: u64, sha: String, result: Result<gitcraft_core::git::Commit, String> },
     RangeFiles { tab: u64, request: u64, key: (String, String), result: Result<Vec<gitcraft_core::git::FileChange>, String> },
@@ -231,6 +231,8 @@ pub struct App {
     pub(crate) bulk_batch: u64,
     /// The bulk run's status-bar text, kept apart from the tabs' own so ending one never clears the other.
     pub(crate) bulk_message: Option<String>,
+    /// Repository paths reserved by background fetch and bulk operations, including queued work.
+    pub(crate) busy_repos: Vec<String>,
     /// Counts diff reads, so a read only fills the cache entry it was started for.
     pub(crate) diff_reads: u64,
     /// Counts file-history reads, so a page is added only by the latest read.
@@ -329,6 +331,7 @@ impl App {
             bulk: None,
             bulk_batch: 0,
             bulk_message: None,
+            busy_repos: Vec::new(),
             diff_reads: 0,
             history_reads: 0,
             shortcuts: None,
@@ -441,7 +444,8 @@ impl App {
         for t in &self.tabs {
             if let (TabKind::Repo(p), Some(r)) = (&t.kind, self.repos.get(&t.id))
                 && r.view.as_ref().is_some_and(|v| !v.data.remotes.is_empty())
-                && !paths.iter().any(|(_, q)| q == p)
+                && !self.repo_pull_busy(p)
+                && !paths.iter().any(|(_, q)| same_folder(q, p))
             {
                 paths.push((t.id, p.clone()));
             }
@@ -450,16 +454,16 @@ impl App {
             return;
         }
         self.fetching = true;
+        self.busy_repos.extend(paths.iter().map(|(_, p)| p.clone()));
         let prune = self.settings.flag("autoPrune", false);
         let engine = self.engine.clone();
+        let inbox = self.inbox.clone();
+        let repaint = ctx.clone();
         self.spawn(move || {
-            let results: Vec<(u64, String, gitcraft_core::actions::ActionResult)> = paths.into_iter().map(|(tab, p)| {
-                let r = engine.perform(&p, Action::AutoFetch { prune });
-                (tab, p, r)
-            }).collect();
-            Msg::Apply(Box::new(move |app: &mut App| {
-                app.fetching = false;
-                for (tab, path, r) in results {
+            for (tab, path) in paths {
+                let r = engine.perform(&path, Action::AutoFetch { prune });
+                inbox.post(Msg::Apply(Box::new(move |app: &mut App| {
+                    app.finish_busy_repo(&path);
                     if r.ok {
                         app.fetch_warned.remove(&path);
                         if !r.message.is_empty() && app.repos.contains_key(&tab) {
@@ -468,9 +472,21 @@ impl App {
                     } else if app.fetch_warned.insert(path) {
                         app.toast(false, r.message);
                     }
-                }
-            }))
+                })));
+                repaint.request_repaint();
+            }
+            Msg::Apply(Box::new(|app: &mut App| app.fetching = false))
         });
+    }
+
+    fn repo_pull_busy(&self, path: &str) -> bool {
+        repo::pull_busy(false, &self.busy_repos, path)
+    }
+
+    fn finish_busy_repo(&mut self, path: &str) {
+        if let Some(i) = self.busy_repos.iter().position(|p| same_folder(p, path)) {
+            self.busy_repos.remove(i);
+        }
     }
 
     fn take_id(&mut self) -> u64 {
@@ -939,7 +955,8 @@ impl App {
             Msg::Status { tab, generation, result } => self.status_loaded(tab, generation, result),
             Msg::Changed { path, full } => self.changed(&path, full),
             Msg::Watching { tab, result } => self.watching(tab, result),
-            Msg::Acted { tab, action, quiet, result } => {
+            Msg::Acted { tab, path, action, quiet, result } => {
+                self.finish_busy_repo(&path);
                 // The submodule list in Preferences is read again only after the change is in place, so a frame drawn
                 // meanwhile can't fill the cache with the old list.
                 if matches!(*action, Action::SubmoduleAdd { .. } | Action::SubmoduleUpdate { .. } | Action::SubmoduleRemove { .. })

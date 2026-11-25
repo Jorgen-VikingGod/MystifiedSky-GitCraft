@@ -59,7 +59,10 @@ pub fn file() -> PathBuf {
 
 impl Store {
     pub fn open() -> Store {
-        let path = file();
+        Self::open_at(file())
+    }
+
+    pub(crate) fn open_at(path: PathBuf) -> Store {
         let (doc, warning) = match gitcraft_core::settings_file::load(&path) {
             Ok(Value::Null) => (Value::Object(Map::new()), None),
             Ok(mut doc) => {

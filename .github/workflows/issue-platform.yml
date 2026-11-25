@@ -2,18 +2,22 @@ name: Label bugs by operating system
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, labeled]
 
 permissions:
   issues: write
 
 concurrency:
-  group: issue-platform-${{ github.event.issue.number }}
+  # An unrelated label event skips the job and must not replace a pending reconciliation.
+  group: >-
+    ${{ github.event.action == 'labeled' && github.event.label.name != 'bug'
+        && format('issue-platform-skip-{0}', github.run_id)
+        || format('issue-platform-{0}', github.event.issue.number) }}
   cancel-in-progress: false
 
 jobs:
   label:
-    if: contains(github.event.issue.labels.*.name, 'bug')
+    if: contains(github.event.issue.labels.*.name, 'bug') && (github.event.action != 'labeled' || github.event.label.name == 'bug')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
