@@ -482,6 +482,17 @@ impl App {
             items.push(item("Apply stashed file", act(tab, Action::StashTakeFile { index: stash.index, expected: Some(stash.sha.clone()), path: f.clone() })));
             items.push(Entry::Separator);
         }
+        // A file of a commit: put the working copy back to that version.
+        if in_commit
+            && let Some(sha) = commit.filter(|sha| !repo.data.stashes.iter().any(|s| s.sha == *sha) && *sha != gitcraft_core::git::WORKDIR)
+        {
+            let (f2, sha) = (f.clone(), sha.to_owned());
+            let short: String = sha.chars().take(7).collect();
+            items.push(item("Restore file from this commit", move |app| {
+                app.confirm_act(tab, "Restore this file?", &format!("Replace {f2} in the working folder with its version from {short}? Its current changes are kept as a backup you can restore from Actions."), "Restore", Action::RestoreFiles { sha: sha.clone(), paths: vec![f2.clone()] })
+            }));
+            items.push(Entry::Separator);
+        }
         if !in_commit {
             if staged {
                 let f2 = f.clone();

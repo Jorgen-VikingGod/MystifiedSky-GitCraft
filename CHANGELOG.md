@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Restore a file from any commit by right-clicking it in the commit. Its current changes are kept as a backup you can restore from Actions. File View shows Markdown files rendered, with a button to switch between the preview and the code.
 - GitCraft tells you when the system stops sending file change events, since changes made outside it may then not show until you refresh. Long choices in dialog lists show their full text on hover.
 - The command palette offers "Open Repo in …" for every editor installed on this computer. Repository Management has resizable Repository, Location and Upstream columns that stay as you leave them. Choose a zoom level from the status bar.
 - Terminal tab shortcuts (Ctrl+Shift+N, Ctrl+Shift+W, Ctrl+PageUp/PageDown and Ctrl+Shift+1–9; Command+Option on macOS), listed in Keyboard Shortcuts. Minimize the terminal to its tab bar, end a session from the trash button, and drop files on the terminal to type their paths.

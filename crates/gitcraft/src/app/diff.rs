@@ -71,6 +71,8 @@ pub struct DiffUi {
     /// The file this view is of, which a save writes to.
     pub target: Option<DiffTarget>,
     pub file_view: bool,
+    /// File View of a Markdown file shows it rendered (Preview) instead of its text (Code).
+    pub md_preview: bool,
     pub editing: bool,
     pub draft: Option<String>,
     pub token: Option<String>,
@@ -554,6 +556,10 @@ impl App {
             later.push(Box::new(move |app| app.settings.set("wordWrap", !wrap)));
         }
         let (next, prev) = if r.diff_ui.file_view {
+            let markdown = is_markdown(&target.file) && v.is_some_and(|v| !v.binary && !v.too_large) && !r.diff_ui.editing;
+            if markdown && toggle(&mut tools_right, Icon::FileText, if r.diff_ui.md_preview { "Show the Markdown code" } else { "Preview the Markdown" }, r.diff_ui.md_preview) {
+                r.diff_ui.md_preview = !r.diff_ui.md_preview;
+            }
             if v.is_some_and(|v| !v.binary && !v.too_large)
                 && toggle(&mut tools_right, Icon::Search, "Find in file", r.diff_ui.find.open)
             {
@@ -642,6 +648,17 @@ impl App {
         let dark = c.dark;
         let editing = r.diff_ui.editing && can_edit_locked;
         let generation = cache.map_or(0, |entry| entry.generation);
+        if r.diff_ui.file_view && r.diff_ui.md_preview && !editing && is_markdown(&target.file) {
+            let text = v.new.as_deref().or(v.old.as_deref()).unwrap_or("");
+            egui::ScrollArea::vertical().id_salt(("md_preview", &key)).auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
+                    if let Some(link) = super::markdown::show(ui, text, "") {
+                        later.push(Box::new(move |app| app.open_url(&link)));
+                    }
+                });
+            });
+            return;
+        }
         if r.diff_ui.file_view {
             let prefs = self.editor_prefs(ui.ctx());
             let file = FileEditor { file: &target.file, base: v.new.as_deref().or(v.old.as_deref()).unwrap_or(""),
@@ -1776,4 +1793,10 @@ fn remap_ignoring_whitespace(range: &std::ops::Range<usize>, from: &str, to: &st
 fn preview_uri(key: &str, side: impl std::fmt::Display, id: u64, bytes: &[u8]) -> String {
     let svg = key.to_ascii_lowercase().ends_with(".svg") || bytes.iter().take(2048).copied().collect::<Vec<u8>>().windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg"));
     format!("bytes://{key}-{side}-{id:016x}{}", if svg { ".svg" } else { "" })
+}
+
+/// Whether File View can show this file rendered as Markdown.
+fn is_markdown(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    [".md", ".markdown", ".mdown", ".mkd"].iter().any(|ext| lower.ends_with(ext))
 }
