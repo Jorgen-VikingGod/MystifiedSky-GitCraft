@@ -938,6 +938,17 @@ impl App {
                 {
                     p.submodules = None;
                 }
+                // General > Delete ".orig" files after merging: the backups a merge tool left during this operation.
+                if result.ok
+                    && matches!(*action, Action::Merge { .. } | Action::MergeSquash { .. } | Action::Rebase { .. } | Action::CherryPick { .. } | Action::CherryPickMany { .. } | Action::InteractiveRebase { .. } | Action::Commit { .. } | Action::ContinueRebase | Action::SkipRebase | Action::SaveResolved { .. })
+                    && self.settings.flag("deleteOrigAfterMerge", true)
+                {
+                    self.clean_orig_files(tab);
+                }
+                // Keep submodules up to date: after a pull or a checkout, by the repository's choice or the global one.
+                if result.ok && matches!(*action, Action::Pull { .. } | Action::Checkout { .. } | Action::CheckoutRemote { .. } | Action::Merge { .. } | Action::Rebase { .. }) {
+                    self.update_submodules_after(tab);
+                }
                 if let Action::Stash { message } = &*action
                     && result.ok
                     && let Some(r) = self.repo_mut(tab)

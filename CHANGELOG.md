@@ -45,6 +45,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- The collapsed left panel lists Patches instead of Cloud Patches, matching the expanded panel.
 - Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
 - Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
 - In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
@@ -60,6 +61,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect.
 - Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Keep staged and unstaged files in the same scrolling area so an empty staged section leaves more room for changed files. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))

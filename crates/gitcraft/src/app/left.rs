@@ -40,6 +40,9 @@ impl App {
         r.side.generation = r.generation;
         let path = r.path.clone();
         let detect = detect && self.repo_pref(&path, "conflictDetection").and_then(|v| v.as_bool()).unwrap_or(true);
+        // Conflict Prevention's base branches and excluded branches for this repository, one pattern per line.
+        let lines = |key: &str| -> Vec<String> { self.repo_pref(&path, key).and_then(|v| v.as_str().map(|s| s.lines().map(str::to_owned).collect())).unwrap_or_default() };
+        let (base, excluded) = (lines("baseBranches"), lines("excludedBranches"));
         let generation = self.repo(tab).map_or(0, |r| r.generation);
         self.spawn(move || {
             let dir = std::path::Path::new(&path);
@@ -50,7 +53,7 @@ impl App {
                 locks: None,
                 locks_loading: false,
                 submodules: Some(gitcraft_core::manage::submodules(dir)),
-                conflicts: detect.then(|| gitcraft_core::extras::conflict_check(dir, None)),
+                conflicts: detect.then(|| gitcraft_core::extras::conflict_check_with(dir, &base, &excluded)),
             };
             super::Msg::Side { tab, side: Box::new(side) }
         });
@@ -603,7 +606,8 @@ impl App {
             (Icon::Laptop, "Local", Some(locals)),
             (Icon::Cloud, "Remote", Some(v.map_or(0, |v| v.data.remotes.len()))),
             (Icon::Network, "Worktrees", Some(v.map_or(0, |v| v.data.worktrees.len()))),
-            (Icon::CloudCog, "Cloud Patches", Some(0)),
+            // Patch files (export and apply), the full panel's PATCHES section; it has no count.
+            (Icon::CloudCog, "Patches", None),
             // The loaded pull requests, as the full panel counts them; none before they load.
             (Icon::GitPullRequest, "Pull Requests", tab.and_then(|t| self.hosted.get(&t)).filter(|h| h.prs.started && !h.prs.loading).map(|h| h.prs.items.len())),
             (Icon::CircleDot, "Issues", None),
