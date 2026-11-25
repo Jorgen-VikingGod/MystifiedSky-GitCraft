@@ -11,6 +11,10 @@ on:
         options:
           - preview
           - stable
+      highlights:
+        description: Optional Markdown overview for the GitHub release
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -41,10 +45,13 @@ jobs:
         run: |
           number=$(node --input-type=module - <<'NODE'
           import { readFileSync } from 'node:fs';
-          const config = JSON.parse(readFileSync('tauri.conf.json', 'utf8'));
-          const base = /^(\d+)\.(\d+)\.(\d+)$/.exec(config.version);
-          if (!base || !config.plugins.updater.pubkey) {
-            throw new Error('Set a stable base version and the updater public key in tauri.conf.json.');
+          const cargo = readFileSync('Cargo.toml', 'utf8');
+          const updates = readFileSync('crates/gitcraft-core/src/updates.rs', 'utf8');
+          const pubkey = /pub const PUBLIC_KEY: &str = "([^"]+)";/.exec(updates)?.[1];
+          const version = /^\[workspace\.package\]\r?\n(?:[^\[\r\n][^\r\n]*\r?\n)*?version = "([^"]+)"/m.exec(cargo)?.[1];
+          const base = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? '');
+          if (!base || !pubkey) {
+            throw new Error('Set a stable base version in Cargo.toml ([workspace.package]) and the update public key in crates/gitcraft-core/src/updates.rs.');
           }
           const patch = Number(base[3]) + Number(process.env.GITHUB_RUN_NUMBER);
           if (!Number.isInteger(patch) || patch > 65535 || Number(base[1]) > 255 || Number(base[2]) > 255) {
@@ -65,27 +72,29 @@ jobs:
             platform: windows
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
-            bundles: nsis,msi
+            formats: nsis,wix
           - runner: windows-11-arm
             platform: windows-arm64
             target: aarch64-pc-windows-msvc
             rust-targets: aarch64-pc-windows-msvc
-            bundles: nsis
+            formats: nsis
           - runner: macos-latest
             platform: macos
             target: universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            bundles: app,dmg
+            formats: app,dmg
           - runner: ubuntu-22.04
             platform: linux
             target: x86_64-unknown-linux-gnu
             rust-targets: x86_64-unknown-linux-gnu
-            bundles: deb,rpm,appimage
+            formats: deb,appimage
+            rpm: true
           - runner: ubuntu-22.04-arm
             platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             rust-targets: aarch64-unknown-linux-gnu
-            bundles: deb,rpm,appimage
+            formats: deb,appimage
+            rpm: true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -97,13 +106,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev patchelf file
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
 
       # Third-party actions are pinned to a full commit hash, so a moved tag or branch can't change what runs in the
       # release build. To update: look up the new commit (for example `gh api repos/dtolnay/rust-toolchain/commits/stable`)
@@ -117,40 +124,53 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Stamp and build the front end
-        env:
-          VERSION: ${{ needs.version.outputs.number }}
-        shell: bash
-        run: |
-          node ui/scripts/set-version.mjs "$VERSION"
-          # --ignore-scripts: dependencies' install scripts don't run in the release build. The build doesn't need
-          # them (esbuild ships its own program; fsevents is only a macOS dev-server extra).
-          npm --prefix ui ci --ignore-scripts
-          npm --prefix ui run build
-
-      - name: Check the GLib security backport on Linux
-        if: runner.os == 'Linux'
-        run: cargo test --locked glib_variant_string_iterator -- --nocapture
-
       - name: Build installers and sign updates
         shell: bash
         env:
+          VERSION: ${{ needs.version.outputs.number }}
           TARGET: ${{ matrix.target }}
-          BUNDLES: ${{ matrix.bundles }}
+          FORMATS: ${{ matrix.formats }}
+          RPM: ${{ matrix.rpm }}
           APPIMAGE_EXTRACT_AND_RUN: '1'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
             echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. See RELEASING.md."
             exit 1
           fi
-          configs=(--config tauri.release.conf.json)
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            configs+=(--config tauri.csp.conf.json)
+          node scripts/set-version.mjs "$VERSION"
+          cargo install cargo-packager --locked --version 0.11.8
+          bin_dir="target/$TARGET/release"
+          if [[ "$TARGET" == universal-apple-darwin ]]; then
+            for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked -p gitcraft --target "$arch"
+            done
+            mkdir -p "$bin_dir"
+            lipo -create -output "$bin_dir/gitcraft" target/aarch64-apple-darwin/release/gitcraft target/x86_64-apple-darwin/release/gitcraft
+          else
+            cargo build --release --locked -p gitcraft --target "$TARGET"
           fi
-          node ui/node_modules/@tauri-apps/cli/tauri.js build --ci \
-            "${configs[@]}" --target "$TARGET" --bundles "$BUNDLES" -- --locked
+          # cargo-packager 0.11.8 parses --binaries-dir without using it: --target is what points it
+          # at target/<triple>/release. It also changes into crates/gitcraft before packaging, so the
+          # output folder is made absolute here.
+          out_dir="$PWD/$bin_dir/bundle/packager"
+          mkdir -p "$out_dir"
+          cargo packager --release -p gitcraft --target "$TARGET" --formats "$FORMATS" --out-dir "$out_dir"
+          if ! compgen -G "$out_dir/*" >/dev/null; then
+            echo "::error::cargo packager left nothing in $out_dir."
+            exit 1
+          fi
+          # The packager makes no RPM packages.
+          if [[ "$RPM" == true ]]; then
+            cargo install cargo-generate-rpm --locked --version 0.21.1
+            cargo generate-rpm -p crates/gitcraft --target "$TARGET" -o "$bin_dir/bundle/rpm/"
+          fi
+
+      - name: Verify the Windows MSI upgrade identity
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/check-msi-upgrade.ps1 -Directory "target/${{ matrix.target }}/release/bundle/packager"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -195,6 +215,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.number }}
           CHANNEL: ${{ inputs.channel }}
+          RELEASE_HIGHLIGHTS: ${{ inputs.highlights }}
         shell: bash
         run: |
           case "$CHANNEL" in
@@ -236,17 +257,23 @@ jobs:
           fi
           previous=$(awk -v target="$tag" '$0 == target { print prev; exit } { prev = $0 }' <<<"$versions")
           baseline="$RUNNER_TEMP/previous-changelog.md"
+          generated="$RUNNER_TEMP/generated-release-notes.md"
+          note_fields=(-f "tag_name=$tag" -f "target_commitish=$GITHUB_SHA")
           : > "$baseline"
           if [[ -n "$previous" ]]; then
+            note_fields+=(-f "previous_tag_name=$previous")
             git rev-parse --verify "refs/tags/$previous^{commit}" >/dev/null
             if git cat-file -e "refs/tags/$previous:CHANGELOG.md"; then
               git show "refs/tags/$previous:CHANGELOG.md" > "$baseline"
             fi
           fi
-          node scripts/changelog-release.mjs notes CHANGELOG.md "$baseline" > release-notes.md
-          if [[ -n "$previous" ]]; then
-            printf '\n**Full changelog**: https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$previous" "$tag" >> release-notes.md
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${note_fields[@]}" \
+            --jq '.body // ""' > "$generated"; then
+            echo "::warning::Could not get GitHub contributor credits. Publishing the changelog and PR links."
+            : > "$generated"
           fi
+          node scripts/changelog-release.mjs publish-notes CHANGELOG.md "$baseline" \
+            "$GITHUB_REPOSITORY" "$tag" "$previous" "$generated" > release-notes.md
           if [[ -n "${release:-}" ]]; then
             gh release edit "$tag" --notes-file release-notes.md
           else

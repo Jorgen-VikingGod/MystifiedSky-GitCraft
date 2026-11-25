@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseEntries, recordRelease, releaseNotes } from './changelog-release.mjs';
+import { formatRelease, parseEntries, recordRelease, releaseNotes } from './changelog-release.mjs';
 
 const shipped = `# Changelog
 
@@ -79,6 +79,70 @@ test('release notes include a new bullet only once even if listed in multiple ca
     '### Added', '', '- First feature.', '', '- Second feature,',
     '  continued on a second line.', '', '### Fixed', '', '- A fix.', '',
   ].join('\n'));
+});
+
+test('PR attribution is preserved for new notes and does not republish shipped notes', () => {
+  const pr = ' ([#42](https://github.com/o/r/pull/42))';
+  const another = ' ([#43](https://github.com/o/r/pull/43))';
+  const linked = current
+    .replace('- First feature.', '- First feature.' + pr + another)
+    .replace('- Third feature, added after the release.', '- Third feature, added after the release.' + another);
+  assert.equal(releaseNotes(linked, shipped), '### Added\n\n- Third feature, added after the release.' + another + '\n');
+  assert.equal(releaseNotes(shipped, linked), '');
+  assert.match(releaseNotes(linked), /First feature\. \(\[#42\]/);
+});
+
+test('the release page uses curated entries and credits only their PRs from the release range', () => {
+  const changelog = current
+    .replace('- First feature.', '- First feature. ([#41](https://github.com/o/r/pull/41))')
+    .replace('added after the release.', 'added after the release. ([#42](https://github.com/o/r/pull/42)) ([#43](https://github.com/o/r/pull/43))');
+  const notes = formatRelease({
+    changelog,
+    previousChangelog: shipped,
+    repo: 'o/r',
+    tag: 'v0.1.7',
+    previousTag: 'v0.1.6',
+    highlights: '  More control over your repository.  ',
+    generated: [
+      "## What's Changed",
+      '* Old PR by @old-author in https://github.com/o/r/pull/41',
+      '* Unused PR title by @new-author in https://github.com/O/R/pull/42',
+      '* Same number in another repo by @wrong-author in https://github.com/o/elsewhere/pull/43',
+      '## New Contributors',
+      '* @new-author made their first contribution in https://github.com/o/r/pull/42',
+      '* @unrelated made their first contribution in https://github.com/o/r/pull/44',
+    ].join('\r\n'),
+  });
+  assert.equal(notes, [
+    '## Highlights', '', 'More control over your repository.', '',
+    "## What's Changed", '', '### Added', '',
+    '- Third feature, added after the release. (by @new-author in [#42](https://github.com/o/r/pull/42)) ([#43](https://github.com/o/r/pull/43))', '',
+    '## New Contributors', '',
+    '- @new-author made their first contribution in [#42](https://github.com/o/r/pull/42).', '',
+    '**Full Changelog**: https://github.com/o/r/compare/v0.1.6...v0.1.7', '',
+  ].join('\n'));
+});
+
+test('the release page works without highlights, generated credits, or new changes', () => {
+  const args = { changelog: shipped, previousChangelog: shipped, repo: 'o/r', tag: 'v0.1.7', previousTag: 'v0.1.6' };
+  assert.equal(formatRelease(args), '**Full Changelog**: https://github.com/o/r/compare/v0.1.6...v0.1.7\n');
+  const changelog = shipped.replace('A fix.', 'A fix. ([#22](https://github.com/o/r/pull/22))');
+  assert.match(formatRelease({ ...args, changelog, previousChangelog: '' }), /A fix\. \(\[#22\]/);
+});
+
+test('archiving keeps references added to a shipped bullet without consuming new entries', () => {
+  const pr = ' ([#42](https://github.com/o/r/pull/42))';
+  const linked = current.replace('- First feature.', '- First feature.' + pr);
+  const archived = recordRelease({ current: linked, shipped, version: '0.1.6', repo: 'o/r', date: '2026-11-12' });
+  const [pending, release] = archived.split('## [0.1.6]');
+  assert.doesNotMatch(pending, /First feature/);
+  assert.match(pending, /Third feature/);
+  assert.ok(release.includes('- First feature.' + pr + '\n'));
+});
+
+test('a substantive link or a changed description still counts as a new note', () => {
+  const changed = shipped.replace('- First feature.', '- First feature. ([guide](https://example.test/guide))');
+  assert.equal(releaseNotes(changed, shipped), '### Added\n\n- First feature. ([guide](https://example.test/guide))\n');
 });
 
 test('category headings and trailing whitespace accept long inputs without backtracking', () => {

@@ -10,21 +10,21 @@ For quick Linux development, use a separate Ubuntu 24.04 WSL 2 distribution with
 wsl --install -d Ubuntu-24.04
 ```
 
-Complete Ubuntu's first-run account setup. Follow Microsoft's [WSL GUI setup](https://learn.microsoft.com/en-us/windows/wsl/tutorials/gui-apps) if Linux windows do not open. Keep the checkout inside the Linux filesystem, such as `~/src/GitCraft`, rather than `/mnt/c`, for Linux filesystem behavior and file-watch performance. Install tools within Ubuntu; Windows installations of Rust and Node do not replace Linux installations.
+Complete Ubuntu's first-run account setup. Follow Microsoft's [WSL GUI setup](https://learn.microsoft.com/en-us/windows/wsl/tutorials/gui-apps) if Linux windows do not open. Keep the checkout inside the Linux filesystem, such as `~/src/GitCraft`, rather than `/mnt/c`, for Linux filesystem behavior and file-watch performance. Install tools within Ubuntu; Windows installations of Rust do not replace Linux installations.
 
 In Ubuntu:
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential pkg-config curl git libssl-dev \
-  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+sudo apt install -y build-essential pkg-config curl git \
+  libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev
 mkdir -p ~/src
 cd ~/src
 git clone https://github.com/MystifiedSky/GitCraft.git
 cd GitCraft
 ```
 
-Use Git 2.38 or later. Install stable Rust using the [official Rust installer](https://www.rust-lang.org/tools/install) and Node.js 22.12 or later using the [Node.js installation instructions](https://nodejs.org/en/download). Reopen the terminal, verify `cargo --version`, `node --version`, and `git --version`, then run the commands below from the cloned repository root.
+Use Git 2.38 or later. Install stable Rust using the [official Rust installer](https://www.rust-lang.org/tools/install), and Node.js 22.12 or later if you work on the release scripts. Reopen the terminal, verify `cargo --version` and `git --version`, then run the commands below from the cloned repository root. GitCraft draws with the GPU through Vulkan, Metal, DirectX 12 or OpenGL; under WSLg it uses OpenGL.
 
 WSLg is useful for everyday development. Also test packaged releases in a full Ubuntu Desktop VM or physical Linux desktop to check menus, file dialogs, notifications, credential storage, terminal behavior, and desktop installation. Use a disposable VM with a snapshot for package and updater testing. CI currently uses Ubuntu 22.04 as the Linux release build baseline; testing 24.04 additionally checks a newer desktop environment.
 
@@ -38,94 +38,81 @@ Install Apple's command-line developer tools:
 xcode-select --install
 ```
 
-Install stable Rust and Node.js 22.12 or later, clone the repository, and use the same build/test commands below. See [Tauri's platform prerequisites](https://v2.tauri.app/start/prerequisites/) for current setup requirements. Verify Apple silicon and Intel separately before declaring both fully validated. The release pipeline compiles a universal app, while the test job runs on the runner's native architecture.
+Install stable Rust, clone the repository, and use the same build/test commands below. Verify Apple silicon and Intel separately before declaring both fully validated. The release pipeline compiles a universal app, while the test job runs on the runner's native architecture.
 
 ## Build and run the checks
 
 From the directory containing `Cargo.toml` on each OS:
 
 ```bash
-npm --prefix ui ci --ignore-scripts
-npm --prefix ui run build
-npm --prefix ui test
+cargo test --locked --workspace -- --test-threads=1
+cargo test --locked -p gitcraft headless_ -- --test-threads=1
 node --test scripts/changelog-release.test.mjs
-cargo test --locked -- --test-threads=1
 cargo run --locked
 ```
 
-The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Linux runs the GLib security regression as part of the full native suite.
+The `headless_` filter runs the native UI regressions used by the required GitHub check named
+`Headless browser regressions`.
 
-To package the app locally, run `npm --prefix ui run installer`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
+The app is in [crates/gitcraft](crates/gitcraft) and its back end in [crates/gitcraft-core](crates/gitcraft-core). Take a picture of the window without touching your preferences with `cargo run --locked -- --screenshot shot.png --theme light`; `--shot-view` shows a particular view first (see `--help`).
+
+The Rust suite uses disposable repositories. Run it serially because some tests change process-wide runtime preferences. Live AI tests are ignored by default and require explicit local setup. Fixtures must not depend on your Git configuration: to check, run the suite with `GIT_CONFIG_GLOBAL` pointing at a file that sets `core.autocrlf = true`, as many Windows machines do.
+
+Only one GitCraft window runs per user: a second launch hands its folder or `gitcraft://clone?url=` link to the running one and exits. To try that without touching your own preferences, build first (`cargo build --locked`), then start both launches of the built program with `HOME` (on Windows, `LOCALAPPDATA`) pointing at an empty folder, for example `HOME=/tmp/gc target/debug/gitcraft repo-a`, then `HOME=/tmp/gc target/debug/gitcraft repo-b`. Don't use `cargo run` for them: with `HOME` changed, rustup can't find the installed toolchain (or keep `RUSTUP_HOME` and `CARGO_HOME` at their original values for both launches). The second launch exits at once and `repo-b` opens as a tab in the first window. `--new-window` opens a separate window instead.
+
+To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
+
+On Windows, run `./scripts/check-msi-upgrade.ps1 -Directory <msi-output-directory>` to verify
+that a newly packaged MSI recognizes the existing GitCraft MSI. In a disposable Windows VM,
+install the previous public MSI, then run the new MSI with a higher version and verify that
+GitCraft launches and Windows lists one installation.
+
+### Benchmarks
+
+`GITCRAFT_BENCH=<file>` turns on a probe that writes when the first populated graph is drawn, and `GITCRAFT_BENCH_SCROLL=<frames>` then scrolls the graph and writes frame times ([bench.rs](crates/gitcraft/src/app/bench.rs)). [scripts/benchmark.py](scripts/benchmark.py) runs a build against a repository made with [scripts/benchmark-repo.py](scripts/benchmark-repo.py), each launch with an empty `HOME`:
+
+```sh
+python3 scripts/benchmark-repo.py /tmp/gc-large 50000
+cargo build --release --locked -p gitcraft
+python3 scripts/benchmark.py native 7 /tmp/gc-large -- target/release/gitcraft
+python3 scripts/benchmark.py scroll native 1500 /tmp/gc-large -- target/release/gitcraft
+```
+
+To compare with another build, give the runner that build's command; it needs the same probe lines. Compare builds on the same machine, with the same repository, after a warm-up launch.
 
 ## Choose the right checks
 
 | Change | Start with | Evidence to include in the PR |
 | --- | --- | --- |
-| Git reads or writes | An existing Rust fixture near the operation or in [src/regressions.rs](src/regressions.rs) | The starting repo state, the action, and the resulting refs, staged changes, or working files that matter to the fix |
-| Renderer logic or interactions | The nearest frontend test and, for browser interactions, the [browser checks](#headless-component-regression-checks) | The test and outcome, with before and after screenshots for visible changes |
+| Git reads or writes | An existing Rust fixture near the operation or in [crates/gitcraft-core/src/regressions.rs](crates/gitcraft-core/src/regressions.rs) | The starting repo state, the action, and the resulting refs, staged changes, or working files that matter to the fix |
+| Interface logic or layout | The nearest test in [crates/gitcraft](crates/gitcraft), and a `--screenshot` picture in the dark and light themes | The test and outcome, with before and after screenshots for visible changes |
 | Native windows, file dialogs, launchers, credential storage, or updater behavior | A [desktop smoke test](#desktop-smoke-test) on the affected platform | The OS, architecture, package or build tested, and repeatable steps |
 | Documentation or translations | Follow the steps or open the changed screen in the affected language | The command, screen, or links you checked |
 
-For a bug fix, reproduce the original failure when practical and keep the fixture as small as possible. Prefer a disposable repository with synthetic files and a local remote. For example, the [stash regression](src/regressions.rs) checks the live index and unselected work after a stash. If you cannot reproduce a platform-specific report, state the gap in the PR so a reviewer can verify it.
+For a bug fix, reproduce the original failure when practical and keep the fixture as small as possible. Prefer a disposable repository with synthetic files and a local remote. For example, the [stash regression](crates/gitcraft-core/src/regressions.rs) checks the live index and unselected work after a stash. If you cannot reproduce a platform-specific report, state the gap in the PR so a reviewer can verify it.
 
 ## Desktop smoke test
 
 Use a disposable repository with a local bare remote. Record the app version, OS version, architecture, package format, and results.
 
-- Install, launch, close, and reopen the packaged app.
+- Edit a tracked file with CRLF line endings and repeated identifiers. Fold a function, find text inside it, edit repeated selections, and undo once. Switch among File, Inline, and Split views, then save and check that the file contains only the intended edits.
+- In a split diff with insertions and deletions, scroll from each pane and drag or keyboard-navigate the overview ruler. Repeat with a file over 512 KiB, Word Wrap enabled, and the divider off center. In edit mode, use Ctrl+U (Command+U on macOS) after a selection change, then verify regular text undo still works.
+- Turn on Word Wrap in Hunk View for a long changed line. Verify its continuation is visible and clicking it selects the same logical line for staging. For a patch beyond the hunk limit, confirm that the full comparison opens and file-level actions are available.
+- In a read-only split diff, drag across several original lines and copy them. Use Ctrl+A and Ctrl+C in the modified pane and verify that each copy preserves its side's line endings and Unicode characters.
+- Open a UTF-8 file in File, Inline, and Split views with a Cyrillic lookalike (U+0430 in a Latin identifier), a zero-width space (U+200B), and a bidirectional control (U+202E). Check the markers and hover labels. Verify that café, decomposed accents, and emoji such as 👩🏽‍💻 and 1️⃣ have no markers. Repeat with syntax colors off and a file over 512 KiB.
+- Type a misspelling in the commit summary and description. Check the underlines, apply a suggestion, and undo it. Toggle spellcheck off in Preferences and verify that the fields continue to accept edits.
+
+- Install, launch, close, and reopen the packaged app. Launch it again with a folder while it runs: the folder opens as a tab.
+- Open a `gitcraft://clone?url=` link and "Open in GitCraft" from Explorer or the Finder.
 - Open, clone, and initialize repositories, including paths with spaces and Unicode.
 - Stage a file, hunk, and line; commit; amend; verify the index and working tree.
 - Create and switch branches; merge, resolve a conflict, rebase, and exercise guarded undo/redo.
 - Stash and restore work; fetch, pull, and push against the local remote.
 - Verify graph scrolling, author images, diffs, file watching, and multiple repository tabs.
 - Open the terminal, external editor, and native file dialogs. Verify preferences persist.
+- Edit a file without saving, then open another file, close the tab, close the window, and restart for an update: each asks to Save, Discard, or Cancel, and Cancel keeps the text. Do the same with conflict picks.
+- In the terminal, drag, double-click, and triple-click to select, copy with Ctrl+Shift+C (Cmd+C on macOS), and check that wide characters such as `漢字` and combined accents keep the caret and selection on their columns.
 - Check credential storage, notifications, and optional AI integrations in a real signed-in desktop session.
-- Install a previous published version, check for updates, restart into the new version, and verify the displayed version. Test Linux package upgrades separately from AppImage updates.
+- Install a previous published version, check for updates, restart into the new version, and verify the displayed version. On Windows x64 do this with the NSIS installer and with the MSI: each must update in place (one entry in Installed apps) and reopen with the earlier window size and position. Test Linux package upgrades separately from AppImage updates.
 
 Report failures with reproduction steps and sanitized logs. Keep platform validation marked as in progress until the packaged desktop flows have been exercised.
-
-## Headless component regression checks
-
-After installing frontend dependencies, run `node scripts/verify-browser.mjs` from the repository root. It uses a locally installed Chrome or Chromium in a temporary profile. Set `CHROME_PATH` if the executable is not in a standard location. No desktop windows or user browser profiles are controlled.
-
-The checks exercise actual React components and Monaco with synthetic backend responses: editor switches, virtual-list scrolling and keyboard focus, delayed commits, upstream submission, graph statistics, remote detection, SSH/signing selection, merge-backup review, LFS failures, bounded repository operations, ranking and session grouping. Reports are written under `target/verification/`. Backend IPC and clipboard writes are intercepted, so real OS/service interactions still require the separate desktop smoke test.
-
-## Windows release-webview regression checks
-
-Build the production renderer, then a release executable with the optional policy:
-
-```powershell
-npm --prefix ui run build
-./ui/node_modules/.bin/tauri.cmd build --no-bundle --config tauri.csp.conf.json --features verification
-node scripts/verify-desktop.mjs release csp
-```
-
-The first argument selects `release` (default) or `debug` in this checkout's
-`target` directory; the former `target/release/gitcraft.exe` and
-`target/debug/gitcraft.exe` spellings are also accepted. Arbitrary executable
-paths are rejected. The optional report tag is limited to 1–48 ASCII letters,
-digits, underscores and hyphens, starting with a letter or digit. Artifact
-junctions pointing outside the checkout are refused. Install Git for Windows
-under Program Files; the harness uses explicit Git, PowerShell and system tool
-paths and gives the app a restricted process search path.
-
-Run `node --test scripts/desktop-harness-paths.test.mjs` to check the executable
-allowlist, traversal rejection, junction boundaries and Windows PATH isolation.
-This suite also runs in the Windows, macOS and Linux CI matrix.
-
-The Windows harness uses WebView2's loopback debugging endpoint and an explicit
-`--screenshot ... --shot-view validation` startup mode. It creates disposable
-repositories and separate app/WebView profiles under `target/verification/`,
-without loading or saving the regular user session. Close other verification
-runs before starting it. It opens Explorer for selection checks and closes only
-new fixture windows; it also checks localhost administrative-share UNC selection
-when that share is accessible. Reports retain resource samples, timings, policy
-violations and renderer exceptions. Fixtures and profiles remain for inspection.
-
-Checks include a 50,000-commit repository, restoration after an actual local
-commit, language/editor startup, JSON workers, preferences, image policy, native
-updater configuration, concurrent watchers, five terminals and twelve cancelled
-Git reads. No live account mutation, update installation or release publishing
-occurs. The validation-only inspection commands reject ordinary app sessions.
-This verifies a release executable, not installer behavior or signed upgrades;
-use the platform smoke-test procedure above for those checks.

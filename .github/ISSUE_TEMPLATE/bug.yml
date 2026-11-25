@@ -2,11 +2,23 @@ name: Bug report
 description: Report a reproducible problem in GitCraft.
 labels: [bug]
 body:
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Multiple platforms
+        - Other or unsure
+    validations:
+      required: true
   - type: input
     id: environment
     attributes:
-      label: GitCraft version, operating system, and Git version
-      placeholder: Include the package format or source build when relevant.
+      label: GitCraft version, OS details, and Git version
+      placeholder: Include the OS version, CPU architecture, and package format when relevant.
     validations:
       required: true
   - type: textarea

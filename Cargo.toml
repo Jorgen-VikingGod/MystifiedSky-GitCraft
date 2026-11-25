@@ -1,75 +1,37 @@
-[package]
-name = "gitcraft"
+[workspace]
+members = ["crates/gitcraft", "crates/gitcraft-core"]
+default-members = ["crates/gitcraft", "crates/gitcraft-core"]
+resolver = "2"
+
+# The base version of every GitCraft build. The Release workflow adds its run number to the patch
+# component (see RELEASING.md).
+[workspace.package]
 version = "0.1.0"
-edition = "2021"
-description = "GitCraft - a graphical Git client"
-license = "GPL-3.0-only"
-
-[[bin]]
-name = "gitcraft"
-path = "src/main.rs"
-
-[features]
-verification = []
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
-[dependencies]
-tauri = { version = "2", features = [] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
-rfd = "0.18"
-notify-debouncer-mini = "0.7"
-image = { version = "0.25", default-features = false, features = ["png"] }
-base64 = "0.23"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-portable-pty = "0.9"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
-keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
-encoding_rs = "0.8"
-regex = "1"
-tempfile = "3"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_Graphics_Gdi",
-  "Win32_Storage_Xps",
-  "Win32_Storage_FileSystem",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_UI_Shell",
-  "Win32_UI_Shell_Common",
-  "Win32_System_Com",
-  "Win32_System_JobObjects", "Win32_System_Threading",
-  "Win32_Security",
-  "Win32_System_Registry",
-] }
 
 [profile.dev]
 opt-level = 1
 
+# Release builds: one optimisation unit across all crates makes a smaller, faster program. Debug
+# information is left out, but the symbol names stay so crash reports still name functions.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+
 [profile.dev.package."*"]
 opt-level = 2
 
-# Stable Tauri's GTK3 bindings still require glib 0.18. Keep the released API and
-# backport the upstream VariantStrIter soundness fix until that constraint changes.
+# GitCraft uses the craft-libs crates, which are built against this egui and winit. Cargo does not
+# pass a dependency's patches on, so they are repeated here with the same commits.
 [patch.crates-io]
-glib = { path = "vendor/glib" }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-glib = "0.18.5"
-
-[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
-tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = "2.5.5"
-tauri-plugin-window-state = "2.5.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSPasteboard"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSObject", "NSString", "NSURL", "NSEnumerator"] }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }

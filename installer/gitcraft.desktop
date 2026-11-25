@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=Development;
+Comment=A graphical Git client
+Exec=gitcraft %U
+Icon=gitcraft
+Name=GitCraft
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/gitcraft

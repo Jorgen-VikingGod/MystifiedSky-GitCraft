@@ -6,8 +6,18 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Rename repository tabs, reopen individual recently closed repositories from the tabs list, and delete saved workspaces without touching their repositories. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Find and navigate matches in File View, including while editing a file. Show syntax errors when editing JSON.
+- Fold code, edit multiple selections, match brackets, and copy code with syntax colors. Find and Replace supports case, whole-word, and regular-expression matching. Folding and multiple selections also work in large files.
+- Select and copy text from a large read-only file preview or either side of a full diff.
+- Highlight invisible Unicode characters and lookalike letters in the file editor and full-file diffs. Accented text and regular emoji sequences keep their normal appearance.
+- Undo cursor and selection moves with Ctrl+U or Command+U. The editor menu also lets you redo those moves.
+- See additions and deletions in the split diff overview ruler. Click or drag it to navigate the file.
+- Edit the same draft from File, Split, and Inline views. Use the split divider to resize the original and modified panes while editing.
+- Check the English or Spanish spelling of commit summaries and descriptions, with corrections available from the right-click menu.
 - Publish preview installers for volunteer testing and promote tested changes through a separate stable release run.
 
+- Show stashes in the commit graph, each as a dashed box just above the commit it was made on and joined to it by a dashed line. Select one to see its changes, or right-click it for the stash actions.
 - Double-clicking a remote branch whose local branch is behind it now fast-forwards that local branch after switching to it. Diverged branches are switched to but never merged, and local edits are never overwritten.
 - When switching branches with uncommitted changes, choose to bring them along, stash them, commit first, or discard them after confirmation.
 - Join the GitCraft community from the Help menu.
@@ -35,15 +45,36 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Changed
 
+- Open repositories faster: the first one is read while the window opens, and the first page of a long history no longer waits for Git to sort the whole history. On a Linux test machine a 50,000-commit repository showed its graph in about 110 ms instead of 340 ms. GitCraft also uses less memory, draws on the power-saving graphics card of a laptop with two, and falls back to OpenGL when Vulkan, Metal or DirectX 12 can't be used.
+- Release builds are optimized across all crates, so the program is about a quarter smaller and the release build takes longer.
+- In the commit graph, a branch's line runs straight down its own lane to the commit it grew from and joins that commit from the side, instead of bending into the other line just below the branch.
+- GitCraft is now a native app drawn with egui instead of a web view, so it no longer needs WebView2 on Windows or WebKitGTK on Linux. It keeps your preferences, open tabs, commit drafts, profiles and window size and position, and installed copies update to it as usual, a copy installed from the MSI with the MSI. Installers are now built with cargo-packager; the base version moved to `Cargo.toml`. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- GitHub release notes group new changes, link to their pull requests, and credit contributors when GitHub identifies them. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- The GitHub bug form asks which operating system is affected and labels reports by platform. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
 - Document source setup with dependency installation scripts disabled.
 - Build the desktop interface with a faster bundler.
 - Update the diff and file editor while preserving offline language highlighting and JSON diagnostics.
 - Update the libraries for native file dialogs, file watching, and terminal links.
 - Pin the actions used to build, test, and publish release artifacts.
+- Move the Rust backend into its own crate, `crates/gitcraft-core`, which no longer depends on Tauri. `cargo build` and `cargo test` cover the whole workspace.
 
 ### Fixed
 
-- Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts.
+- Stack the Start screen sections in narrow windows and apply the selected language to the Start screen, menus, and toolbar labels. Prevent duplicate sample-project requests. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Keep failure messages in the notification center, limit bulk actions to the selected filter, and honor the notification position preference. Dismiss notifications or copy an error directly from its toast. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Keep staged and unstaged files in the same scrolling area so an empty staged section leaves more room for changed files. ([#44](https://github.com/MystifiedSky/GitCraft/pull/44))
+- Draw joined emoji and keycaps in the Windows editor using the installed emoji font.
+- Open the full comparison automatically when a file exceeds the hunk diff limit.
+- Keep the original and modified panes in sync when scrolling large or wrapped split diffs.
+- Wait for the comparison to finish before taking a diff screenshot.
+- Wrap long lines in Hunk View while keeping line-level staging available.
+- Preserve the Windows MSI upgrade identity when moving from the web-view build to the native app.
+- Keep ignored files safe when checking out a newly created branch or a pull request, or undoing or redoing a checkout.
+- Keep history loading when a previous page request finishes late. Give commit rows accessible names and a visible keyboard focus indicator.
+- Restore the Windows title-bar icon and toolbar spacing. Keep the empty Staged Files section visible while unstaged files scroll.
+- Apply installed font choices in the file editor and terminal.
+- Ask before discarding an unsaved file draft from the editor's Cancel button.
+- Fix the Linux RPM package failing to install on Fedora and RHEL with "nothing provides git >= 2.38". The package now depends on `git`, and GitCraft still checks for Git 2.38 or newer when it starts. ([#42](https://github.com/MystifiedSky/GitCraft/pull/42))
 - In the commit graph, a branch that shares a parent with a neighboring commit now connects to that parent instead of appearing to branch off the neighbor.
 - Give the working-changes line its own lane above the checked-out commit so it stays clear of other commits.
 - Show the first bad bisect commit on newer Git versions.
@@ -56,7 +87,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 - Explain unknown and changed SSH host keys, and give install guidance before checking out files that require Git LFS.
 - Poll file changes on network folders that lack reliable file notifications.
 
-- Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived.
+- Release notes list only changes since the previous published version, even when several releases are queued before the changelog is archived. ([#5](https://github.com/MystifiedSky/GitCraft/pull/5))
 
 - Ask whether to save, discard or keep editing before leaving an unsaved file or conflict resolution.
 

@@ -35,12 +35,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -48,26 +46,13 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: tests-${{ matrix.runner }}
-      - name: Install frontend dependencies
-        run: npm --prefix ui ci --ignore-scripts
-      - name: Build and typecheck the frontend
-        run: npm --prefix ui run build
-      - name: Test the frontend
-        run: npm --prefix ui test
       - name: Test release notes
         run: node --test scripts/changelog-release.test.mjs
-      - name: Test browser protocol dispatch
-        run: node --test scripts/cdp-messages.test.mjs
-      - name: Test desktop harness path boundaries
-        run: node --test scripts/desktop-harness-paths.test.mjs
       - name: Test PR disclosure validation
         run: node --test scripts/pr-ai-disclosure.test.mjs
       - name: Check Rust lints
         if: runner.os == 'Linux'
-        run: cargo clippy --locked --all-targets -- -D clippy::correctness
-      - name: Audit npm dependencies
-        if: runner.os == 'Linux'
-        run: npm --prefix ui audit --audit-level=high
+        run: cargo clippy --locked --workspace --all-targets -- -D clippy::correctness
       - name: Audit Cargo dependencies
         if: runner.os == 'Linux'
         run: |
@@ -75,34 +60,29 @@ jobs:
           cargo audit
       - name: Report the Git version
         run: git --version
-      - name: Test native Git operations
+      - name: Test Git operations and the interface
         env:
           RUST_BACKTRACE: short
-        run: cargo test --locked -- --test-threads=1
+        run: cargo test --locked --workspace -- --test-threads=1
 
-  browser:
+  native-ui:
+    # Keep the required check's name while the branch rule still uses it.
     name: Headless browser regressions
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Install Linux build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libxkbcommon-dev libwayland-dev libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
-        id: chrome
-      - run: npm --prefix ui ci --ignore-scripts
-      - name: Exercise components and resource budgets
-        run: node scripts/verify-browser.mjs
-        env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+          toolchain: stable
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          name: browser-regressions
-          path: target/verification/
-          if-no-files-found: warn
+          key: native-headless-ui
+      - name: Test native controls without opening a window
+        run: cargo test --locked -p gitcraft headless_ -- --test-threads=1

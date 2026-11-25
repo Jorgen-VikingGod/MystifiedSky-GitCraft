@@ -1,0 +1,59 @@
+name: Label bugs by operating system
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-platform-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  label:
+    if: contains(github.event.issue.labels.*.name, 'bug')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Apply the reported platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          issue_api="repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER"
+          issue=$(gh api "$issue_api")
+          if ! jq -e '.labels | any(.name == "bug")' <<< "$issue" >/dev/null; then
+            exit 0
+          fi
+          platform=$(jq -r '.body // ""' <<< "$issue" | awk '
+            { sub(/\r$/, "") }
+            $0 == "### Operating system" { reading = 1; next }
+            reading && /^### / { exit }
+            reading && NF { print; exit }
+          ')
+          case "$platform" in
+            Windows) label=os:windows ;;
+            macOS) label=os:macos ;;
+            Linux) label=os:linux ;;
+            'Multiple platforms'|'Other or unsure') label= ;;
+            *) exit 0 ;;
+          esac
+
+          current=$(jq -r '.labels[].name' <<< "$issue")
+          if [[ -n "$label" ]] && ! grep -Fxq -- "$label" <<< "$current"; then
+            label_api="repos/$GITHUB_REPOSITORY/labels/${label/:/%3A}"
+            if ! gh api "$label_api" --silent 2>/dev/null; then
+              # Another issue run may create the same label at the same time.
+              gh label create "$label" --repo "$GITHUB_REPOSITORY" --color 'C5DEF5' --description "Reported on $platform" ||
+                gh api "$label_api" --silent
+            fi
+            gh api --method POST "$issue_api/labels" -f "labels[]=$label" --silent
+          fi
+          for old in os:windows os:macos os:linux; do
+            if [[ "$old" != "$label" ]] && grep -Fxq -- "$old" <<< "$current"; then
+              gh api --method DELETE "$issue_api/labels/${old/:/%3A}" --silent
+            fi
+          done
