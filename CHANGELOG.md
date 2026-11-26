@@ -81,7 +81,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Keep commit, stash, and patch controls reachable when the changes panel is short, and prevent the bottom panel from being resized below the form when space permits. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
+- Keep commit, stash, and patch controls reachable when the changes panel is short, and give the bottom panel room for those controls when space permits. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Open the existing worktree when checking out a branch that is already checked out there. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
 - Offer detached checkout directly in the commit context menu. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
 - Apply Conflict Prevention preference changes immediately in Teams. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))

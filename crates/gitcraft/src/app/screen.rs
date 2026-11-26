@@ -9,6 +9,8 @@ use super::theme::p;
 use super::widgets;
 use egui::{Align2, CornerRadius, FontId, Rect, Ui, pos2, vec2};
 
+const DETAILS_MIN_WIDTH: f32 = 300.0;
+
 impl App {
     pub(super) fn repo_screen(&mut self, ui: &mut Ui, tab: u64, path: &str) {
         self.ensure_repo(tab, path);
@@ -35,7 +37,7 @@ impl App {
         let mut left_w = if show_left { self.settings.num("leftWidth", 381.0) as f32 } else { 28.0 };
         let mut right_w = if show_right && !bottom { self.settings.num("rightWidth", 342.0) as f32 } else { 0.0 };
         let fit_right;
-        (left_w, right_w, show_left, fit_right) = fit_panels(body.width(), left_w, right_w, show_left, show_right && !bottom);
+        (left_w, right_w, show_left, fit_right) = fit_panels(body.width(), left_w, right_w, show_left, show_right && !bottom, bottom);
         show_right = if bottom { show_right } else { fit_right };
         let left = Rect::from_min_size(body.min, vec2(left_w, body.height()));
         {
@@ -104,7 +106,7 @@ impl App {
                 let split = Rect::from_min_size(pos2(right.left() - 2.0, body.top()), vec2(2.0, body.height()));
                 let dx = widgets::splitter(ui, split, ui.scope_id().with("right_split"), true);
                 if dx != 0.0 {
-                    let w = (right_w - dx).clamp(300.0, 640.0);
+                    let w = (right_w - dx).clamp(DETAILS_MIN_WIDTH, 640.0);
                     later.push(Box::new(move |app| app.settings.set("rightWidth", w.round())));
                 }
             }
@@ -183,16 +185,17 @@ fn bottom_panel_height(height: f32, preferred: f32, panel_min: f32) -> f32 {
 /// centre keeps up to 440 px when it can, then gives way down to 160 px while both panels
 /// shrink towards their smallest (200 and 300 px) in proportion to what they can spare. Only a
 /// window too narrow for even that collapses a panel, the left one first, so staging and the
-/// commit box stay. Saved widths are left as they are.
-fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool, mut show_right: bool) -> (f32, f32, bool, bool) {
+/// commit box stay. In the bottom layout, the centre also has to fit the details panel.
+/// Saved widths are left as they are.
+fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool, mut show_right: bool, bottom: bool) -> (f32, f32, bool, bool) {
     const COLLAPSED: f32 = 28.0;
-    const CENTRE_MIN: f32 = 160.0;
+    let centre_min = if bottom { DETAILS_MIN_WIDTH } else { 160.0 };
     let min_l = if show_left { 200.0_f32.min(left_w) } else { left_w };
-    let min_r = if show_right { 300.0_f32.min(right_w) } else { 0.0 };
+    let min_r = if show_right { DETAILS_MIN_WIDTH.min(right_w) } else { 0.0 };
     // A splitter is drawn beside each panel that is shown (a hidden left panel is only a strip, with none).
     let splitters = |left: bool, right: bool| 4.0 * f32::from(u8::from(left) + u8::from(right));
-    let preferred_centre = 440.0_f32.min(body - 504.0).max(CENTRE_MIN);
-    let most = body - CENTRE_MIN - splitters(show_left, show_right);
+    let preferred_centre = 440.0_f32.min(body - 504.0).max(centre_min);
+    let most = body - centre_min - splitters(show_left, show_right);
     let room = (body - preferred_centre - splitters(show_left, show_right)).max(most.min(min_l + min_r));
     if left_w + right_w > room {
         let (spare_l, spare_r) = ((left_w - min_l).max(0.0), (right_w - min_r).max(0.0));
@@ -208,7 +211,7 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
         left_w = COLLAPSED;
     }
     // The left panel is gone, and with it its splitter: the room for the rest is judged on what is drawn now.
-    let most = body - CENTRE_MIN - splitters(show_left, show_right);
+    let most = body - centre_min - splitters(show_left, show_right);
     if left_w + right_w > most && show_right {
         show_right = false;
         right_w = 0.0;
@@ -218,7 +221,7 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
 
 #[cfg(test)]
 mod tests {
-    use super::{bottom_panel_height, fit_panels};
+    use super::{DETAILS_MIN_WIDTH, bottom_panel_height, fit_panels};
 
     #[test]
     fn bottom_panel_height_fits_short_and_normal_windows() {
@@ -238,22 +241,30 @@ mod tests {
     #[test]
     fn the_default_window_keeps_both_panels() {
         // The default 930 px window with the default widths: both at their smallest.
-        let (l, r, show_l, show_r) = fit_panels(930.0, 381.0, 342.0, true, true);
+        let (l, r, show_l, show_r) = fit_panels(930.0, 381.0, 342.0, true, true, false);
         assert!(show_l && show_r);
         assert_eq!((l.round(), r.round()), (200.0, 300.0));
         // Wide enough: the saved widths as they are.
-        assert_eq!(fit_panels(1600.0, 381.0, 342.0, true, true), (381.0, 342.0, true, true));
+        assert_eq!(fit_panels(1600.0, 381.0, 342.0, true, true, false), (381.0, 342.0, true, true));
     }
 
     #[test]
     fn a_narrow_window_collapses_the_left_panel_before_staging() {
-        let (_, r, show_l, show_r) = fit_panels(600.0, 381.0, 342.0, true, true);
+        let (_, r, show_l, show_r) = fit_panels(600.0, 381.0, 342.0, true, true, false);
         assert!(!show_l && show_r);
         assert!(r >= 300.0);
-        let (_, _, show_l, show_r) = fit_panels(400.0, 381.0, 342.0, true, true);
+        let (_, _, show_l, show_r) = fit_panels(400.0, 381.0, 342.0, true, true, false);
         assert!(!show_l && !show_r);
         // With the left panel hidden by the person, the right one gets the room.
-        let (l, r, _, show_r) = fit_panels(700.0, 28.0, 342.0, false, true);
+        let (l, r, _, show_r) = fit_panels(700.0, 28.0, 342.0, false, true, false);
         assert!(show_r && l == 28.0 && r >= 300.0);
+    }
+
+    #[test]
+    fn the_bottom_panel_keeps_room_for_commit_controls() {
+        let (left, _, show_left, _) = fit_panels(620.0, 381.0, 0.0, true, false, true);
+        assert!(show_left && 620.0 - left - 2.0 >= DETAILS_MIN_WIDTH);
+        let (left, _, show_left, _) = fit_panels(400.0, 381.0, 0.0, true, false, true);
+        assert!(!show_left && 400.0 - left >= DETAILS_MIN_WIDTH);
     }
 }
