@@ -6,6 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
+- Move the commit details panel below the commit graph or back to the right from the panel header or the View menu, and resize it in either layout. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -80,6 +81,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Keep commit, stash, and patch controls reachable when the changes panel is short, and give the bottom panel room for those controls when space permits. Keep the divider aligned with the pointer while resizing. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Open the existing worktree when checking out a branch that is already checked out there. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
 - Offer detached checkout directly in the commit context menu. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
 - Apply Conflict Prevention preference changes immediately in Teams. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))

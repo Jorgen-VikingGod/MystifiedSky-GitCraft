@@ -55,6 +55,7 @@ impl App {
         let view = vec![
             self.item("ui:leftPanel", locale.text("Show Left Panel")).check(s.flag("showLeft", true)).into(),
             self.item("ui:detailPanel", locale.text("Show Commit Details Panel")).check(s.flag("showRight", true)).into(),
+            self.item("ui:detailPanelBottom", locale.text("Commit Details Below Graph")).check(s.flag("rightPanelBottom", false)).into(),
             self.item("ui:toolbarLabels", locale.text("Show Toolbar Labels")).check(s.flag("toolbarLabels", true)).into(),
             self.item("ui:terminalPanel", locale.text("Show Terminal Panel")).check(s.flag("showTerminal", false)).into(),
             Node::Separator,
@@ -124,6 +125,7 @@ impl App {
             "app.window" => self.open_in_new_window(),
             "app.update" => self.check_for_updates(true),
             "app.sign_out" => self.sign_out_all(),
+            "ui:detailPanelBottom" => self.settings.toggle("rightPanelBottom", false),
             "help.plan" => self.plan_dialog(),
             "help.diagnostics" => self.copy_diagnostics(ctx),
             "help.release_notes" => self.open_url(RELEASES_URL),

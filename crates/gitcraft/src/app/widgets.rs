@@ -267,8 +267,8 @@ pub fn field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, height: f32
     ui.put(rect.shrink2(vec2(5.0, 0.0)), edit)
 }
 
-/// A thin draggable bar between panels. Returns how far it moved this frame.
-pub fn splitter(ui: &mut Ui, rect: Rect, id: egui::Id, vertical: bool) -> f32 {
+/// A thin draggable bar between panels.
+pub fn splitter(ui: &mut Ui, rect: Rect, id: egui::Id, vertical: bool) -> Response {
     let c = p();
     let response = ui.interact(rect.expand2(if vertical { vec2(2.0, 0.0) } else { vec2(0.0, 2.0) }), id, Sense::drag());
     let lit = response.hovered() || response.dragged();
@@ -276,7 +276,7 @@ pub fn splitter(ui: &mut Ui, rect: Rect, id: egui::Id, vertical: bool) -> f32 {
     if lit {
         ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
     }
-    if vertical { response.drag_delta().x } else { response.drag_delta().y }
+    response
 }
 
 /// A date in a format of the UI Customization preferences (`MM/DD/YYYY @ h:mm A`).

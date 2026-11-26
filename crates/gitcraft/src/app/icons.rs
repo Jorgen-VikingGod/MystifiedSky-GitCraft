@@ -9,6 +9,8 @@ use egui::{Color32, ImageSource, Rect, Response, Sense, Ui, Vec2, include_image}
 pub enum Icon {
     AlertTriangle,
     Archive,
+    ArrowBigDown,
+    ArrowBigRight,
     ArrowDown,
     ArrowDownAZ,
     ArrowDownToLine,
@@ -117,6 +119,8 @@ impl Icon {
         match self {
             Icon::AlertTriangle => include_image!("../../assets/icons/alert-triangle.svg"),
             Icon::Archive => include_image!("../../assets/icons/archive.svg"),
+            Icon::ArrowBigDown => include_image!("../../assets/icons/arrow-big-down.svg"),
+            Icon::ArrowBigRight => include_image!("../../assets/icons/arrow-big-right.svg"),
             Icon::ArrowDown => include_image!("../../assets/icons/arrow-down.svg"),
             Icon::ArrowDownAZ => include_image!("../../assets/icons/arrow-down-az.svg"),
             Icon::ArrowDownToLine => include_image!("../../assets/icons/arrow-down-to-line.svg"),
