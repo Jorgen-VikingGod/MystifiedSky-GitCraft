@@ -200,7 +200,14 @@ impl App {
                 for b in v.data.refs.iter().filter(|r| r.kind == RefKind::Local) {
                     let is_head = Some(&b.name) == v.data.head_branch.as_ref();
                     let name = b.name.clone();
-                    entries.push(item(format!("{}{}", if is_head { "✓ " } else { "   " }, b.name), move |app| {
+                    let label = if is_head {
+                        format!("✓ {name}")
+                    } else if super::repo::other_worktree(v, &name).is_some() {
+                        format!("{name} (open worktree)")
+                    } else {
+                        name.clone()
+                    };
+                    entries.push(item(label, move |app| {
                         if !is_head {
                             app.act(tab, Action::Checkout { target: name, changes: gitcraft_core::actions::CheckoutChanges::Ask });
                         }

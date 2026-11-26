@@ -45,7 +45,7 @@ mod weblinks;
 mod widgets;
 
 use crate::settings::{Store, ZOOM_FACTORS};
-use gitcraft_core::actions::{Action, ActionResult, Engine};
+use gitcraft_core::actions::{Action, DesktopActionResult, Engine};
 use gitcraft_core::session::{HistoryPage, RepoView};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,7 +113,7 @@ pub enum Msg {
     Status { tab: u64, generation: u64, result: Result<gitcraft_core::git::WorkStatus, String> },
     Changed { path: String, full: bool },
     Watching { tab: u64, result: Result<Arc<gitcraft_core::watch::RepoWatch>, String> },
-    Acted { tab: u64, path: String, action: Box<Action>, quiet: bool, result: ActionResult },
+    Acted { tab: u64, path: String, action: Box<Action>, quiet: bool, result: DesktopActionResult },
     CommitFiles { tab: u64, sha: String, files: Vec<gitcraft_core::git::CommitFile>, signature: String },
     CommitDetails { tab: u64, sha: String, result: Result<gitcraft_core::git::Commit, String> },
     RangeFiles { tab: u64, request: u64, key: (String, String), result: Result<Vec<gitcraft_core::git::FileChange>, String> },
@@ -249,7 +249,7 @@ pub struct App {
     /// The last few AI explanations (what was explained, title, text), newest first.
     pub(crate) explanations: std::collections::VecDeque<(String, String, String)>,
     /// Recompose with AI is waiting for its soft reset in this tab, to compose the changes after it.
-    pub(crate) recompose_pending: Option<u64>,
+    pub(crate) recompose_pending: Option<(u64, gitcraft_core::actions::RecomposeSource)>,
     /// The pull request being started stacks on another: its tab, branch and the note the form shows.
     pub(crate) pr_stack: Option<(u64, String, String)>,
     /// The preferences revision the backend last heard about.
@@ -792,6 +792,10 @@ impl eframe::App for App {
 
     /// Closing the window quits the way the system expects.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if self.screenshot.is_none() {
+            placement::position_window(ctx, _frame);
+        }
         self.guard_close(ctx);
         craft_quit::on_close_request(ctx);
     }
@@ -957,6 +961,13 @@ impl App {
             Msg::Watching { tab, result } => self.watching(tab, result),
             Msg::Acted { tab, path, action, quiet, result } => {
                 self.finish_busy_repo(&path);
+                let result = match result {
+                    DesktopActionResult::Performed(result) => result,
+                    DesktopActionResult::OpenWorktree(worktree) => {
+                        self.checkout_opened_worktree(tab, &worktree);
+                        return;
+                    }
+                };
                 // The submodule list in Preferences is read again only after the change is in place, so a frame drawn
                 // meanwhile can't fill the cache with the old list.
                 if matches!(*action, Action::SubmoduleAdd { .. } | Action::SubmoduleUpdate { .. } | Action::SubmoduleRemove { .. })

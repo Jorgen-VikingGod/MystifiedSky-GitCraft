@@ -147,7 +147,11 @@ fn main() {
         .with_drag_and_drop(true)
         .with_icon(window_icon());
     // Picture-taking runs keep the default size, so the pictures always match.
-    let viewport = if opts.screenshot.is_none() { app::placement::apply(viewport) } else { viewport };
+    let placement = opts.screenshot.is_none().then(app::placement::startup).flatten();
+    let viewport = match &placement {
+        Some(p) => app::placement::apply(viewport, p),
+        None => viewport,
+    };
     let mut viewport = app::frame::install(frame, viewport);
     // In a Flatpak the window must carry the app's id, or the desktop can't match it to its icon.
     if let Ok(id) = std::env::var("FLATPAK_ID") {

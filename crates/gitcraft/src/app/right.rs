@@ -299,7 +299,8 @@ impl App {
             // A run of consecutive commits: their combined changes below the actions for the selection.
             if let Some((from, to)) = consecutive_range(r) {
                 let full = ui.available_rect_before_wrap();
-                let top_h = (full.height() * 0.4).clamp(150.0, 320.0).min(full.height());
+                let selection_height = 48.0 + 30.0 * r.ui.multi.len() as f32;
+                let top_h = selection_height.min((full.height() * 0.4).clamp(150.0, 320.0)).min(full.height());
                 let mut top = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(full.min, vec2(full.width(), top_h))).layout(egui::Layout::top_down(egui::Align::Min)));
                 top.set_clip_rect(Rect::from_min_size(full.min, vec2(full.width(), top_h)));
                 self.multi_panel(&mut top, tab, r, true, later);
@@ -330,6 +331,14 @@ impl App {
         ui.painter().rect(rect, CornerRadius::same(3), AI.gamma_multiply(if resp.hovered() { 0.25 } else { 0.15 }), Stroke::new(1.0, AI.gamma_multiply(0.8)), StrokeKind::Inside);
         icons::paint(ui, rect, Icon::Sparkles, 13.0, c.white(0.8));
         resp.tip(tip)
+    }
+
+    fn recompose_button(ui: &mut Ui, tab: u64, base: String, count: usize, later: &mut Vec<Later>) {
+        let button = Self::ai_button(ui, "Recompose with AI");
+        button.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Recompose with AI"));
+        if button.clicked() {
+            later.push(Box::new(move |app| app.recompose_commits(tab, base, count)));
+        }
     }
 
     /// Path / Tree switch and the sort button.
@@ -1011,13 +1020,28 @@ impl App {
             let (a, b) = key.clone();
             later.push(Box::new(move |app| app.want_range_files(tab, &a, &b)));
         }
+        let recompose = (to != WORKDIR && r.ui.multi.len() == 2)
+            .then(|| recompose_base(r)).flatten();
+        let combined = to != WORKDIR && r.ui.multi.len() > 2;
+        let title = if to == WORKDIR {
+            "Viewing diff between a commit and the WIP"
+        } else if combined {
+            "Combined changes"
+        } else {
+            "Viewing diff between 2 commits"
+        };
         let mut close = false;
         Self::panel_header(ui, |ui| {
-            ui.label(egui::RichText::new(if to == WORKDIR { "Viewing diff between a commit and the WIP" } else { "Viewing diff between 2 commits" }).size(12.5).color(c.white(1.0)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::icon_button(ui, Icon::X, 15.0, "Close (Esc)").clicked() {
+                if !combined && widgets::icon_button(ui, Icon::X, 15.0, "Close (Esc)").clicked() {
                     close = true;
                 }
+                if let Some(base) = recompose {
+                    Self::recompose_button(ui, tab, base, 2, later);
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(title).size(12.5).color(c.white(1.0))).truncate());
+                });
             });
         });
         let short = |x: &str| if x == WORKDIR { "working folder".to_owned() } else { x.chars().take(6).collect() };
@@ -1077,62 +1101,52 @@ impl App {
         let oldest_first: Vec<String> = picked.iter().rev().map(|cm| cm.sha.clone()).collect();
         let line = super::rebase::head_line(v);
         let on_line = v.data.head_branch.is_some() && r.ui.multi.iter().all(|x| line.contains(x));
+        let n = picked.len();
         let mut clear = false;
         Self::panel_header(ui, |ui| {
-            ui.label(egui::RichText::new(format!("{} commits selected", picked.len())).size(12.5).color(c.white(1.0)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::icon_button(ui, Icon::X, 15.0, "Clear selection (Esc)").clicked() {
                     clear = true;
                 }
+                let actions = widgets::icon_button(ui, Icon::EllipsisVertical, 16.0, "Selected commit actions");
+                egui::Popup::menu(&actions).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+                    let multi = &r.ui.multi;
+                    let mut entries = vec![
+                        ctxmenu::item(format!("Cherry pick {n} commits"), ctxmenu::act(tab, Action::CherryPickMany { shas: oldest_first.clone() })),
+                        ctxmenu::item("Interactive Cherry Pick", {
+                            let commits = multi.clone();
+                            move |app| app.open_cherry_pick(tab, &commits)
+                        }),
+                    ];
+                    if on_line {
+                        let squash = multi.clone();
+                        let drop = multi.clone();
+                        let base = super::rebase::base_for(v, &oldest_first[0]);
+                        let onto = v.data.head_branch.clone().unwrap_or_else(|| "HEAD".into());
+                        entries.extend([
+                            ctxmenu::Entry::Separator,
+                            ctxmenu::item(format!("Squash {n} commits"), move |app| app.squash_commits(tab, squash)),
+                            ctxmenu::item("Interactive Rebase", move |app| app.open_rebase(tab, &base, &onto, false)),
+                            ctxmenu::danger(format!("Drop {n} commits"), move |app| app.drop_commits(tab, drop)),
+                        ]);
+                    }
+                    ctxmenu::show(ui, entries, later);
+                });
+                if on_line && let Some(base) = recompose_base(r) {
+                    Self::recompose_button(ui, tab, base, n, later);
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("{n} commits selected")).size(12.5).color(c.white(1.0))).truncate());
+                });
             });
         });
-        egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-            let note = if combined { "Their combined changes are shown below." } else { "A combined diff is shown for consecutive commits, or for exactly 2 commits to compare them." };
-            ui.add(egui::Label::new(egui::RichText::new(note).size(12.0).color(c.fg3)).wrap());
-        });
-        let multi = r.ui.multi.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(12.0);
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            let n = picked.len();
-            if widgets::small(ui, Kind::Primary, &format!("Cherry pick {n} commits")).clicked() {
-                let shas = oldest_first.clone();
-                later.push(Box::new(move |app| app.act(tab, Action::CherryPickMany { shas })));
-            }
-            if widgets::small(ui, Kind::Default, "Interactive Cherry Pick").clicked() {
-                let m = multi.clone();
-                later.push(Box::new(move |app| app.open_cherry_pick(tab, &m)));
-            }
-            if on_line {
-                if widgets::small(ui, Kind::Default, &format!("Squash {n} commits")).clicked() {
-                    let m = multi.clone();
-                    later.push(Box::new(move |app| app.squash_commits(tab, m)));
-                }
-                if widgets::small(ui, Kind::Danger, &format!("Drop {n} commits")).clicked() {
-                    let m = multi.clone();
-                    later.push(Box::new(move |app| app.drop_commits(tab, m)));
-                }
-                // A run that ends at HEAD can be composed again into new commits.
-                if let Some((from, to)) = consecutive_range(r).filter(|(_, to)| *to == v.data.head_sha)
-                    && widgets::small(ui, Kind::Ai, "Recompose with AI").clicked()
-                {
-                    let _ = to;
-                    later.push(Box::new(move |app| app.recompose_commits(tab, from, n)));
-                }
-                if widgets::small(ui, Kind::Default, "Interactive Rebase").clicked() {
-                    let base = super::rebase::base_for(v, &oldest_first[0]);
-                    let onto = v.data.head_branch.clone().unwrap_or_else(|| "HEAD".into());
-                    later.push(Box::new(move |app| app.open_rebase(tab, &base, &onto, false)));
-                }
-            }
-        });
-        if !on_line {
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.label(egui::RichText::new("Squash, drop and interactive rebase work on commits of the checked-out branch.").size(11.5).color(c.fg3));
+        if !combined {
+            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new("Select consecutive commits to see their combined changes.").size(12.0).color(c.fg3)).wrap());
             });
+        } else {
+            ui.add_space(8.0);
         }
-        ui.add_space(12.0);
         egui::ScrollArea::vertical().id_salt(("multi", tab)).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             for cm in &picked {
@@ -1152,6 +1166,11 @@ impl App {
             r.ui.multi.clear();
         }
     }
+}
+
+fn recompose_base(r: &RepoTab) -> Option<String> {
+    let (base, newest) = consecutive_range(r)?;
+    (newest == r.view.as_ref()?.data.head_sha).then_some(base)
 }
 
 fn m_counter() -> u32 {

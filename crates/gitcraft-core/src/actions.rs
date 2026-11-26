@@ -115,6 +115,12 @@ pub struct RemoteBranch {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RecomposeSource {
+    pub base: String,
+    pub original: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Action {
     Stage { paths: Vec<String> },
@@ -211,7 +217,7 @@ pub enum Action {
     GitflowInit { config: crate::manage::GitflowConfig },
     LfsInstall,
     /// "Compose commits with AI": commit the given groups of files one after another.
-    ComposeCommits { commits: Vec<crate::ai::ComposedCommit> },
+    ComposeCommits { commits: Vec<crate::ai::ComposedCommit>, #[serde(default)] source: Option<RecomposeSource> },
     /// Apply a .patch file (mailbox patches become commits).
     ApplyPatchFile { file: String },
     /// "Stash this file" / "Stash N files": stash only the chosen files.
@@ -255,6 +261,11 @@ fn spawn_git(dir: &Path, args: &[String]) {
 pub struct ActionResult {
     pub ok: bool,
     pub message: String,
+}
+
+pub enum DesktopActionResult {
+    Performed(ActionResult),
+    OpenWorktree(String),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -597,7 +608,11 @@ impl Engine {
         crate::manage::require_lfs_for_checkout(dir, &revision)?;
         let name = format!("Changes before checking out {target}");
         let notice = self.prepare_checkout_changes(repo, dir, &name, changes)?;
-        let out = self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"]);
+        let out = if valid_undo_oid(target) {
+            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", "--detach", &revision, "--"])
+        } else {
+            self.git(dir, &["checkout", "-q", "--no-overwrite-ignore", target, "--"])
+        };
         let result = if out.ok {
             self.push_undo(repo, UndoRec::Checkout { from, to: target.to_string() });
             Ok(format!("Checked out {target}"))
@@ -713,10 +728,72 @@ impl Engine {
         ActionResult { ok: out.ok, message: if out.ok { if revert { "Reverted commit" } else { "Cherry picked commit" }.into() } else { out.message() } }
     }
 
-    pub fn perform(&self, repo: &str, mut action: Action) -> ActionResult {
+    pub fn perform(&self, repo: &str, action: Action) -> ActionResult {
+        let operation = crate::operation::lock_for(Path::new(repo));
+        let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
+        self.perform_locked(repo, action)
+    }
+
+    /// The desktop can follow a branch to its existing worktree before a checkout can change
+    /// or ask about files in the current worktree.
+    pub fn perform_for_desktop(&self, repo: &str, action: Action) -> DesktopActionResult {
         let dir = Path::new(repo);
         let operation = crate::operation::lock_for(dir);
         let _guard = operation.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(path) = self.checkout_worktree(dir, &action) {
+            return DesktopActionResult::OpenWorktree(path);
+        }
+        let check_again = matches!(&action,
+            Action::Checkout { changes: CheckoutChanges::Ask | CheckoutChanges::Carry, .. }
+            | Action::CheckoutRemote { changes: CheckoutChanges::Ask | CheckoutChanges::Carry, stash_if_needed: false, .. });
+        let retry_target = check_again.then(|| action.clone());
+        let result = self.perform_locked(repo, action);
+        // A worktree can be added by another process while the checkout is in progress.
+        if !result.ok {
+            if let Some(path) = retry_target.and_then(|action| self.checkout_worktree(dir, &action)) {
+                return DesktopActionResult::OpenWorktree(path);
+            }
+        }
+        DesktopActionResult::Performed(result)
+    }
+
+    fn checkout_worktree(&self, dir: &Path, action: &Action) -> Option<String> {
+        let (branch, remote) = match action {
+            Action::Checkout { target, .. } => {
+                if valid_undo_oid(target) { return None; }
+                (target.strip_prefix("refs/heads/").unwrap_or(target.as_str()), None)
+            }
+            Action::CheckoutRemote { remote_branch, .. } => {
+                let (_, branch) = remote_branch.split_once('/')?;
+                (branch, Some(remote_branch))
+            }
+            _ => return None,
+        };
+        let worktrees = git::try_worktrees(dir).ok()?;
+        let target_branch = format!("refs/heads/{branch}");
+        if !worktrees.iter().any(|w| w.branch == branch) || self.branch_ref(dir) == target_branch {
+            return None;
+        }
+        if let Some(remote) = remote {
+            let upstream = git::run(dir, &["rev-parse", "--symbolic-full-name", "--verify", &format!("{branch}@{{upstream}}")]);
+            if !upstream.ok || upstream.stdout.trim() != format!("refs/remotes/{remote}") {
+                return None;
+            }
+        }
+        let common_dir = |path: &Path| {
+            let out = git::run(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+            out.ok.then(|| Path::new(out.stdout.trim()).canonicalize().ok()).flatten()
+        };
+        let common = common_dir(dir)?;
+        worktrees.into_iter().filter(|w| w.branch == branch).find_map(|worktree| {
+            let path = Path::new(&worktree.path);
+            (path.join(".git").exists() && common_dir(path).as_ref() == Some(&common)
+                && self.branch_ref(path) == target_branch).then_some(worktree.path)
+        })
+    }
+
+    fn perform_locked(&self, repo: &str, mut action: Action) -> ActionResult {
+        let dir = Path::new(repo);
         let done = |o: git::GitOut, msg: &str| -> ActionResult {
             if o.ok {
                 ActionResult { ok: true, message: msg.to_string() }
@@ -1332,8 +1409,32 @@ impl Engine {
                 spawn_git(dir, &a);
                 ActionResult { ok: true, message: format!("Opening {file} in the merge tool") }
             }
-            Action::ComposeCommits { commits } => {
+            Action::ComposeCommits { commits, source } => {
                 let before = self.rev(dir, "HEAD");
+                let original_tree = if let Some(source) = &source {
+                    if !valid_undo_oid(&source.original) || before.is_empty() || before != source.base {
+                        return done(git::GitOut::failed("The branch changed while Recompose was open. Review the changes again."), "");
+                    }
+                    let expected = self.rev(dir, &format!("{}^{{tree}}", source.original));
+                    let index = self.git(dir, &["write-tree"]);
+                    if !index.ok { return done(index, ""); }
+                    if expected.is_empty() || index.stdout.trim() != expected {
+                        return done(git::GitOut::failed("The staged files changed while Recompose was open. Review the changes again."), "");
+                    }
+                    let changed = match crate::ai::recompose_paths(dir, &source.base, &source.original) {
+                        Ok(changed) => changed,
+                        Err(error) => return done(git::GitOut::failed(&error), ""),
+                    };
+                    let mut remaining: std::collections::HashSet<_> = changed.iter().map(String::as_str).collect();
+                    if commits.iter().any(|commit| commit.files.is_empty() || commit.files.iter().any(|file| !remaining.remove(file.as_str())))
+                        || !remaining.is_empty()
+                    {
+                        return done(git::GitOut::failed("The proposed commits no longer cover the files to recompose."), "");
+                    }
+                    Some(expected)
+                } else {
+                    None
+                };
                 let o = if before.is_empty() { self.git(dir, &["rm", "-r", "--cached", "--ignore-unmatch", "--", "."]) }
                     else { self.git(dir, &["reset", "-q"]) };
                 if !o.ok { return done(o, ""); }
@@ -1348,7 +1449,10 @@ impl Engine {
                     ActionResult { ok: false, message: format!("Commit {} of {}: {}. Completed commits remain and can be undone.", i + 1, commits.len(), o.message()) }
                 };
                 for (i, c) in commits.iter().enumerate() {
-                    let mut add = vec!["add", "-A", "--"];
+                    let mut add = match &source {
+                        Some(source) => vec!["restore", "--staged", "--source", source.original.as_str(), "--"],
+                        None => vec!["add", "-A", "--"],
+                    };
                     add.extend(c.files.iter().map(|s| s.as_str()));
                     let o = self.git(dir, &add);
                     if !o.ok {
@@ -1361,6 +1465,9 @@ impl Engine {
                     }
                 }
                 let after = self.rev(dir, "HEAD");
+                if original_tree.is_some_and(|tree| self.rev(dir, "HEAD^{tree}") != tree) {
+                    return failed(commits.len().saturating_sub(1), git::GitOut::failed("The recomposed tree differs from the original"));
+                }
                 if before != after && !after.is_empty() {
                     let branch = self.branch_ref(dir);
                     let label = format!("{} composed commits", commits.len());
@@ -1520,20 +1627,11 @@ impl Engine {
                 if paths.is_empty() {
                     return done(git::GitOut::failed("Choose the files to restore."), "");
                 }
-                let mut status = vec!["status", "--porcelain", "-z", "--"];
-                status.extend(paths.iter().map(String::as_str));
-                let changed = self.git(dir, &status);
-                if !changed.ok {
-                    return done(changed, "");
-                }
-                if !changed.stdout.is_empty() {
-                    let backup = self.discard(repo, dir, Some(paths.clone()));
-                    if !backup.ok && backup.message != DISCARD_NOTHING {
-                        return backup;
-                    }
-                }
                 // Only files the commit has can be restored from it.
-                let mut listed = vec!["ls-tree", "-r", "-z", "--name-only", sha.as_str(), "--"];
+                let source = self.git(dir, &["rev-parse", "--verify", "--end-of-options", &format!("{sha}^{{commit}}")]);
+                if !source.ok { return done(source, ""); }
+                let source = source.stdout.trim();
+                let mut listed = vec!["ls-tree", "-r", "-z", "--name-only", source, "--"];
                 listed.extend(paths.iter().map(String::as_str));
                 let present = self.git(dir, &listed);
                 if !present.ok {
@@ -1543,11 +1641,31 @@ impl Engine {
                 if found.is_empty() {
                     return done(git::GitOut::failed("None of these files exist in that commit."), "");
                 }
-                let mut checkout = vec!["checkout", sha.as_str(), "--"];
+                let mut status = vec!["status", "--porcelain", "-z", "--untracked-files=all", "--"];
+                status.extend(found.iter().copied());
+                let changed = self.git(dir, &status);
+                if !changed.ok { return done(changed, ""); }
+                let mut backup = None;
+                if !changed.stdout.is_empty() {
+                    let stash = match self.stash_for_discard(dir, Some(&found)) {
+                        Ok(stash) => stash,
+                        Err(error) => return error,
+                    };
+                    let saved = crate::discard_backups::save_before_file_restore(dir, &stash, source, &found);
+                    if !saved.ok {
+                        return done(git::GitOut::failed(&format!("The changes were kept in Stashes. Could not save the restore backup: {}", saved.message())), "");
+                    }
+                    backup = Some(stash);
+                }
+                let mut checkout = vec!["checkout", source, "--"];
                 checkout.extend(found.iter().copied());
+                let restored = self.git(dir, &checkout);
+                if restored.ok && backup.as_deref().is_some_and(|stash| self.rev(dir, "stash@{0}") == stash) {
+                    let _ = self.git(dir, &["stash", "drop", "-q"]);
+                }
                 let short: String = sha.chars().take(7).collect();
                 let n = found.len();
-                done(self.git(dir, &checkout), &format!("Restored {n} file{} from {short}", if n == 1 { "" } else { "s" }))
+                done(restored, &format!("Restored {n} file{} from {short}", if n == 1 { "" } else { "s" }))
             }
             Action::TakeSide { paths, side } => {
                 let (flag,stage)=match side.as_str() {"ours"=>("--ours","2"),"theirs"=>("--theirs","3"),_=>return done(git::GitOut::failed("Choose current or incoming conflict contents."), "")};
@@ -1691,22 +1809,31 @@ impl Engine {
         self.git(dir, &args)
     }
 
-    fn discard(&self, repo: &str, dir: &Path, paths: Option<Vec<String>>) -> ActionResult {
+    fn stash_for_discard(&self, dir: &Path, paths: Option<&[&str]>) -> Result<String, ActionResult> {
         // Keep an automatic stash so the discard can be undone.
         let mut a = vec!["stash", "push", "--include-untracked", "-m", "Auto stash before discard"];
-        if let Some(p) = &paths {
+        if let Some(p) = paths {
             a.push("--");
-            a.extend(p.iter().map(|s| s.as_str()));
+            a.extend(p.iter().copied());
         }
         let previous = self.rev(dir, "stash@{0}");
         let o = self.git(dir, &a);
         if !o.ok {
-            return ActionResult { ok: false, message: o.message() };
+            return Err(ActionResult { ok: false, message: o.message() });
         }
         let sha = self.rev(dir, "stash@{0}");
         if sha.is_empty() || sha == previous {
-            return ActionResult { ok: false, message: DISCARD_NOTHING.into() };
+            return Err(ActionResult { ok: false, message: DISCARD_NOTHING.into() });
         }
+        Ok(sha)
+    }
+
+    fn discard(&self, repo: &str, dir: &Path, paths: Option<Vec<String>>) -> ActionResult {
+        let pathspec = paths.as_ref().map(|paths| paths.iter().map(String::as_str).collect::<Vec<_>>());
+        let sha = match self.stash_for_discard(dir, pathspec.as_deref()) {
+            Ok(sha) => sha,
+            Err(error) => return error,
+        };
         let backup = crate::discard_backups::save(dir, &sha);
         if backup.ok && self.rev(dir, "stash@{0}") == sha { let _ = self.git(dir, &["stash", "drop", "-q"]); }
         self.push_undo(repo, UndoRec::Discard { stash: sha, paths, redo_state: None });
@@ -2398,14 +2525,41 @@ mod tests {
             head(&d)
         };
         let first = commit("a.txt", "one\n", "one");
+        commit("other.txt", "original other\n", "other");
         commit("a.txt", "two\n", "two");
+        fs::write(d.join("a.txt"), "staged edit\n").unwrap();
+        fs::write(d.join("other.txt"), "unrelated staged edit\n").unwrap();
+        assert!(git::run(&d, &["add", "a.txt", "other.txt"]).ok);
         fs::write(d.join("a.txt"), "local edit\n").unwrap();
         let r = e.perform(&repo, Action::RestoreFiles { sha: first, paths: vec!["a.txt".into()] });
         assert!(r.ok, "{}", r.message);
         assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap().replace("\r\n", "\n"), "one\n");
-        // The local edit went to a discard backup.
+        assert_eq!(git::run(&d, &["show", ":a.txt"]).stdout.trim(), "one");
+        let reference = crate::discard_backups::list(&d).unwrap().remove(0).reference;
+        let recover = || e.perform(&repo, Action::RestoreDiscard { reference: reference.clone() });
+        fs::write(d.join("a.txt"), "new edit\n").unwrap();
+        assert!(!recover().ok);
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap(), "new edit\n");
+        assert!(git::run(&d, &["checkout", "--", "a.txt"]).ok);
+        let r = recover();
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["show", ":a.txt"]).stdout.trim(), "staged edit");
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap().replace("\r\n", "\n"), "local edit\n");
+        assert_eq!(git::run(&d, &["show", ":other.txt"]).stdout.trim(), "unrelated staged edit");
+        assert!(git::run(&d, &["ls-files", "--unmerged"]).stdout.is_empty());
 
-        assert!(!crate::discard_backups::list(&d).unwrap().is_empty());
+        // A file absent from HEAD can still have an untracked local version to recover.
+        assert!(git::run(&d, &["rm", "-f", "a.txt"]).ok);
+        assert!(git::run(&d, &["commit", "-qm", "Remove a"]).ok);
+        fs::write(d.join("a.txt"), "untracked\n").unwrap();
+        let r = e.perform(&repo, Action::RestoreFiles { sha: git::run(&d, &["rev-parse", "HEAD~3"]).stdout.trim().into(), paths: vec!["a.txt".into()] });
+        assert!(r.ok, "{}", r.message);
+        let reference = crate::discard_backups::list(&d).unwrap().into_iter()
+            .find(|backup| backup.reference != reference).unwrap().reference;
+        let r = e.perform(&repo, Action::RestoreDiscard { reference });
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(git::run(&d, &["status", "--porcelain", "--", "a.txt"]).stdout.trim(), "?? a.txt");
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap().replace("\r\n", "\n"), "untracked\n");
     }
 
     #[test]
