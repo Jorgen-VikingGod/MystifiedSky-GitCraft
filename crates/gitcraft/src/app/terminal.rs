@@ -91,6 +91,7 @@ impl Session {
 pub struct Panel {
     pub sessions: Vec<Session>,
     pub active: usize,
+    last_drawn_active: Option<usize>,
     next: usize,
     focused: bool,
     /// The find bar over the screen (Ctrl+Shift+F), while it is open.
@@ -412,33 +413,48 @@ impl App {
         ui.painter().rect_filled(bar, CornerRadius::ZERO, c.panel);
         ui.painter().line_segment([bar.left_bottom(), bar.right_bottom()], Stroke::new(1.0, c.black(0.4)));
         icons::paint(ui, Rect::from_min_size(pos2(bar.left() + 8.0, bar.center().y - 6.5), Vec2::splat(13.0)), Icon::SquareTerminal, 13.0, c.fg2);
-        let mut x = bar.left() + 29.0;
         let mut close: Option<usize> = None;
         let mut add = false;
-        for (i, s) in panel.sessions.iter().enumerate() {
-            let g = ui.painter().layout_no_wrap(s.title.clone(), FontId::proportional(12.0), c.fg);
-            let w = g.size().x + 10.0 + 22.0;
-            let tr = Rect::from_min_size(pos2(x, bar.top()), vec2(w, 26.0));
-            let resp = ui.interact(tr, ui.scope_id().with(("term_tab", i)), Sense::click());
-            let on = panel.active == i;
-            if on {
-                ui.painter().rect_filled(tr, CornerRadius::ZERO, BG);
-            }
-            ui.painter().galley(pos2(tr.left() + 10.0, tr.center().y - g.size().y / 2.0), g, if on || resp.hovered() { c.white(1.0) } else { c.fg2 });
-            let xr = Rect::from_min_size(pos2(tr.right() - 20.0, tr.center().y - 7.0), Vec2::splat(14.0));
-            let xresp = ui.interact(xr, ui.scope_id().with(("term_close", i)), Sense::click());
-            if resp.hovered() || on || xresp.hovered() {
-                icons::paint(ui, xr, Icon::X, 12.0, if xresp.hovered() { c.white(1.0) } else { c.fg3 });
-            }
-            ui.painter().line_segment([tr.right_top(), tr.right_bottom()], Stroke::new(1.0, c.black(0.3)));
-            if xresp.clicked() {
-                close = Some(i);
-            } else if resp.clicked() {
-                panel.active = i;
-            }
-            x += w;
-        }
-        let plus = Rect::from_min_size(pos2(x + 2.0, bar.top() + 2.0), Vec2::splat(22.0));
+        let tabs_left = bar.left() + 29.0;
+        let tabs_right = (bar.right() - 124.0).max(tabs_left);
+        let tabs_rect = Rect::from_min_max(pos2(tabs_left, bar.top()), pos2(tabs_right, bar.bottom()));
+        let mut tabs = ui.new_child(egui::UiBuilder::new().max_rect(tabs_rect));
+        tabs.set_clip_rect(ui.clip_rect().intersect(tabs_rect));
+        tabs.spacing_mut().item_spacing = Vec2::ZERO;
+        let selected = panel.active;
+        let reveal = panel.last_drawn_active.replace(selected) != Some(selected);
+        let strip = egui::ScrollArea::horizontal().id_salt(("terminal_tabs", tab))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(&mut tabs, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, s) in panel.sessions.iter().enumerate() {
+                        let g = ui.painter().layout_no_wrap(s.title.clone(), FontId::proportional(12.0), c.fg);
+                        let w = (g.size().x + 32.0).min(tabs_rect.width().max(1.0));
+                        let (tr, resp) = ui.allocate_exact_size(vec2(w, bar.height()), Sense::click());
+                        let on = selected == i;
+                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, on, &s.title));
+                        if on {
+                            ui.painter().rect_filled(tr, CornerRadius::ZERO, BG);
+                            if reveal { resp.scroll_to_me(None); }
+                        }
+                        let label_bounds = Rect::from_min_max(tr.min, pos2((tr.right() - 20.0).max(tr.left()), tr.bottom()));
+                        let label = ui.painter().with_clip_rect(label_bounds);
+                        label.galley(pos2(tr.left() + 10.0, tr.center().y - g.size().y / 2.0), g, if on || resp.hovered() { c.white(1.0) } else { c.fg2 });
+                        let xr = Rect::from_min_size(pos2(tr.right() - 20.0, tr.center().y - 7.0), Vec2::splat(14.0));
+                        let xresp = ui.interact(xr, ui.scope_id().with(("term_close", i)), Sense::click());
+                        if resp.hovered() || on || xresp.hovered() {
+                            icons::paint(ui, xr, Icon::X, 12.0, if xresp.hovered() { c.white(1.0) } else { c.fg3 });
+                        }
+                        ui.painter().line_segment([tr.right_top(), tr.right_bottom()], Stroke::new(1.0, c.black(0.3)));
+                        if xresp.clicked() {
+                            close = Some(i);
+                        } else if resp.clicked() {
+                            panel.active = i;
+                        }
+                    }
+                });
+            });
+        let plus = Rect::from_min_size(pos2((tabs_left + strip.content_size.x).min(tabs_right) + 2.0, bar.top() + 2.0), Vec2::splat(22.0));
         let presp = ui.interact(plus, ui.scope_id().with("term_add"), Sense::click()).tip("New terminal");
         icons::paint(ui, plus, Icon::Plus, 13.0, if presp.hovered() { c.white(1.0) } else { c.fg2 });
         if presp.clicked() {

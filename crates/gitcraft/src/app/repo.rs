@@ -9,6 +9,10 @@ use gitcraft_core::session::{self, HistoryPage, RepoView};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+pub(super) fn other_worktree<'a>(view: &'a RepoView, branch: &str) -> Option<&'a git::Worktree> {
+    view.data.worktrees.iter().find(|w| w.branch == branch && !super::same_folder(&w.path, &view.path))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     Wip,
@@ -817,9 +821,21 @@ impl App {
         self.update_busy();
         let sent = action.clone();
         self.spawn(move || {
-            let result = engine.perform(&path, sent);
+            let result = engine.perform_for_desktop(&path, sent);
             Msg::Acted { tab, path, action: Box::new(action), quiet, result }
         });
+    }
+
+    pub(crate) fn checkout_opened_worktree(&mut self, tab: u64, path: &str) {
+        let Some(repo) = self.repo_mut(tab) else { return };
+        repo.running = None;
+        repo.action_change = None;
+        self.load_repo(tab);
+        self.diff_changed(tab);
+        self.next_action(tab);
+        if self.active == tab {
+            self.open_repo(path);
+        }
     }
 
     pub(crate) fn acted(&mut self, tab: u64, action: Action, quiet: bool, result: ActionResult) {

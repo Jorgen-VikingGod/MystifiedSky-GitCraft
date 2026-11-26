@@ -38,6 +38,17 @@ fn commit_row_target(ui: &Ui, rect: Rect, id: egui::Id, summary: &str, selected:
     response
 }
 
+fn click_modifiers(ui: &Ui, response: &egui::Response) -> egui::Modifiers {
+    ui.input(|input| {
+        // A quick click and modifier release can arrive in the same frame.
+        input.events.iter().rev().find_map(|event| match event {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }
+                if response.interact_rect.contains(*pos) => Some(*modifiers),
+            _ => None,
+        }).unwrap_or(input.modifiers)
+    })
+}
+
 #[cfg(test)]
 #[test]
 fn headless_graph_row_has_a_name_and_keyboard_activation() {
@@ -835,7 +846,7 @@ impl App {
                 }
                 let resp = commit_row_target(ui, rect, ui.scope_id().with(("row", tab, &commit.sha)), &commit.summary, sel);
                 if resp.clicked() {
-                    clicked_row = Some((d, ui.input(|i| i.modifiers)));
+                    clicked_row = Some((d, click_modifiers(ui, &resp)));
                 }
                 let commit_for_menu = commit.clone();
                 match stash_of.get(commit.sha.as_str()) {
@@ -887,7 +898,7 @@ impl App {
                             stack = Some((i, clock));
                         }
                         if lresp.clicked() {
-                            clicked_row = Some((d, ui.input(|i| i.modifiers)));
+                            clicked_row = Some((d, click_modifiers(ui, &lresp)));
                         }
                         if lresp.double_clicked() {
                             let target = first.clone();
@@ -979,7 +990,7 @@ impl App {
                                             icons::paint(ui, Rect::from_min_size(pos2(lr.right(), row.center().y - 5.5), Vec2::splat(11.0)), Icon::ChevronDown, 11.0, c.fg.gamma_multiply(0.6));
                                         }
                                         if rresp.clicked() {
-                                            clicked_row = Some((d, ui.input(|i| i.modifiers)));
+                                            clicked_row = Some((d, click_modifiers(ui, &rresp)));
                                         }
                                         if rresp.double_clicked() {
                                             let target = (*g).clone();

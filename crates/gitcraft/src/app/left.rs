@@ -17,7 +17,7 @@ use gitcraft_core::session::RepoView;
 /// What the side sections read besides the repository itself.
 #[derive(Default)]
 pub struct SideData {
-    pub generation: u64,
+    request: Option<SideRequest>,
     pub gitflow: Option<gitcraft_core::manage::GitflowConfig>,
     pub lfs: Option<gitcraft_core::manage::LfsInfo>,
     pub locks: Option<Result<Vec<gitcraft_core::manage::LfsLock>, String>>,
@@ -27,33 +27,47 @@ pub struct SideData {
     pub conflicts: Option<gitcraft_core::extras::ConflictCheck>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct SideRequest {
+    generation: u64,
+    detect: bool,
+    base: Vec<String>,
+    excluded: Vec<String>,
+}
+
 const SECTIONS: [&str; 12] = ["local", "remote", "worktrees", "gitflow", "lfs", "stashes", "patches", "prs", "issues", "teams", "tags", "submodules"];
 
 impl App {
     /// Read the side sections' data again after the repository changed.
     pub(crate) fn want_side(&mut self, tab: u64) {
         let detect = self.settings.flag("conflictDetection", true);
-        let Some(r) = self.repo_mut(tab) else { return };
-        if r.side.generation == r.generation || r.view.is_none() {
+        let Some(r) = self.repo(tab) else { return };
+        if r.view.is_none() {
             return;
         }
-        r.side.generation = r.generation;
+        let generation = r.generation;
         let path = r.path.clone();
         let detect = detect && self.repo_pref(&path, "conflictDetection").and_then(|v| v.as_bool()).unwrap_or(true);
         // Conflict Prevention's base branches and excluded branches for this repository, one pattern per line.
         let lines = |key: &str| -> Vec<String> { self.repo_pref(&path, key).and_then(|v| v.as_str().map(|s| s.lines().map(str::to_owned).collect())).unwrap_or_default() };
-        let (base, excluded) = (lines("baseBranches"), lines("excludedBranches"));
-        let generation = self.repo(tab).map_or(0, |r| r.generation);
+        let request = SideRequest { generation, detect, base: lines("baseBranches"), excluded: lines("excludedBranches") };
+        let Some(r) = self.repo_mut(tab) else { return };
+        if r.side.request.as_ref() == Some(&request) {
+            return;
+        }
+        r.side.request = Some(request.clone());
+        r.side.conflicts = None;
         self.spawn(move || {
             let dir = std::path::Path::new(&path);
+            let conflicts = request.detect.then(|| gitcraft_core::extras::conflict_check_with(dir, &request.base, &request.excluded));
             let side = SideData {
-                generation,
+                request: Some(request),
                 gitflow: Some(gitcraft_core::manage::gitflow_config(dir)),
                 lfs: Some(gitcraft_core::manage::lfs_info(dir)),
                 locks: None,
                 locks_loading: false,
                 submodules: Some(gitcraft_core::manage::submodules(dir)),
-                conflicts: detect.then(|| gitcraft_core::extras::conflict_check_with(dir, &base, &excluded)),
+                conflicts,
             };
             super::Msg::Side { tab, side: Box::new(side) }
         });
@@ -61,7 +75,8 @@ impl App {
 
     pub(crate) fn side_loaded(&mut self, tab: u64, side: SideData) {
         if let Some(r) = self.repo_mut(tab)
-            && r.side.generation == side.generation
+            && side.request.as_ref().is_some_and(|request| request.generation == r.generation)
+            && r.side.request == side.request
         {
             let (locks, loading) = (r.side.locks.take(), r.side.locks_loading);
             r.side = side;
@@ -555,6 +570,8 @@ impl App {
         }
         let resp = resp.tip(if is_head {
             "Checked out"
+        } else if r.kind == RefKind::Local && super::repo::other_worktree(v, &r.name).is_some() {
+            "Double-click to open its worktree"
         } else if r.kind == RefKind::Remote {
             "Double-click to check out and fast-forward the local branch if it's behind"
         } else {

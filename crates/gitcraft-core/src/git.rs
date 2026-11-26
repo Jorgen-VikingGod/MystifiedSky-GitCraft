@@ -73,6 +73,30 @@ pub struct Worktree {
     pub locked: bool,
 }
 
+fn parse_worktrees(output: &str) -> Vec<Worktree> {
+    output.split("\0\0").filter_map(|record| {
+        let mut fields = record.split('\0');
+        let path = fields.next()?.strip_prefix("worktree ")?.to_owned();
+        let mut worktree = Worktree { path, branch: String::new(), locked: false };
+        for field in fields {
+            if let Some(branch) = field.strip_prefix("branch refs/heads/") {
+                worktree.branch = branch.to_owned();
+            } else if field == "detached" {
+                worktree.branch = "(detached)".into();
+            } else if field == "locked" || field.starts_with("locked ") {
+                worktree.locked = true;
+            }
+        }
+        Some(worktree)
+    }).collect()
+}
+
+pub(crate) fn try_worktrees(dir: &Path) -> Result<Vec<Worktree>, String> {
+    let out = run(dir, &["worktree", "list", "--porcelain", "-z"]);
+    if !out.ok { return Err(out.message()); }
+    Ok(parse_worktrees(&out.stdout))
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RepoData {
     #[serde(skip)]
@@ -598,7 +622,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         let head = s.spawn(crate::read_jobs::inherit(|| run(dir, &["symbolic-ref", "--short", "-q", "HEAD"])));
         let head_sha = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "HEAD"])));
         let st = s.spawn(crate::read_jobs::inherit(|| run(dir, &["stash", "list", "--format=%H%x1f%gs%x1f%P%x1f%aN%x1f%aE%x1f%at"])));
-        let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain"])));
+        let wt = s.spawn(crate::read_jobs::inherit(|| run(dir, &["worktree", "list", "--porcelain", "-z"])));
         let sm = s.spawn(crate::read_jobs::inherit(|| run(dir, &["config", "--file", ".gitmodules", "--get-regexp", "path"])));
         let remotes = s.spawn(crate::read_jobs::inherit(|| run(dir, &["remote"])));
         let gitdir = s.spawn(crate::read_jobs::inherit(|| run(dir, &["rev-parse", "--git-dir"])));
@@ -693,30 +717,7 @@ pub fn load_view_checked(dir: &Path, max_commits: usize, view: &RefView) -> Resu
         }
     }
 
-    let mut cur: Option<Worktree> = None;
-    for line in wt.stdout.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            if let Some(w) = cur.take() {
-                d.worktrees.push(w);
-            }
-            cur = Some(Worktree { path: p.to_string(), branch: String::new(), locked: false });
-        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
-            if let Some(w) = cur.as_mut() {
-                w.branch = b.to_string();
-            }
-        } else if line == "locked" || line.starts_with("locked ") {
-            if let Some(w) = cur.as_mut() {
-                w.locked = true;
-            }
-        } else if line == "detached" {
-            if let Some(w) = cur.as_mut() {
-                w.branch = "(detached)".into();
-            }
-        }
-    }
-    if let Some(w) = cur.take() {
-        d.worktrees.push(w);
-    }
+    d.worktrees = parse_worktrees(&wt.stdout);
 
     for line in sm.stdout.lines() {
         if let Some((_, p)) = line.split_once(' ') {
