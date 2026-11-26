@@ -52,7 +52,7 @@ impl App {
         let mut x = left.right();
         if show_left {
             let split = Rect::from_min_size(pos2(x, body.top()), vec2(2.0, body.height()));
-            let dx = widgets::splitter(ui, split, ui.scope_id().with("left_split"), true);
+            let dx = widgets::splitter(ui, split, ui.scope_id().with("left_split"), true).drag_delta().x;
             if dx != 0.0 {
                 let w = (left_w + dx).clamp(200.0, 600.0);
                 later.push(Box::new(move |app| app.settings.set("leftWidth", w.round())));
@@ -84,7 +84,7 @@ impl App {
         }
         if show_term {
             let split = Rect::from_min_size(pos2(centre.left(), main.bottom()), vec2(centre.width(), 2.0));
-            let dy = if minimized { 0.0 } else { widgets::splitter(ui, split, ui.scope_id().with("term_split"), false) };
+            let dy = if minimized { 0.0 } else { widgets::splitter(ui, split, ui.scope_id().with("term_split"), false).drag_delta().y };
             if dy != 0.0 {
                 let h = (term_h - dy).clamp(100.0, 800.0);
                 later.push(Box::new(move |app| app.settings.set("terminalHeight", h.round())));
@@ -97,16 +97,16 @@ impl App {
         if show_right {
             if bottom {
                 let split = Rect::from_min_max(pos2(combined.left(), centre.bottom()), pos2(combined.right(), right.top()));
-                let dy = widgets::splitter(ui, split, ui.scope_id().with("right_bottom_split"), false);
-                if dy != 0.0 {
-                    let h = bottom_panel_height(combined.height(), bottom_h - dy, bottom_min);
+                let response = widgets::splitter(ui, split, ui.scope_id().with("right_bottom_split"), false);
+                if let Some(height) = dragged_details_size(&response, bottom_h, false) {
+                    let h = bottom_panel_height(combined.height(), height, bottom_min);
                     later.push(Box::new(move |app| app.settings.set("rightPanelHeight", h.round())));
                 }
             } else {
                 let split = Rect::from_min_size(pos2(right.left() - 2.0, body.top()), vec2(2.0, body.height()));
-                let dx = widgets::splitter(ui, split, ui.scope_id().with("right_split"), true);
-                if dx != 0.0 {
-                    let w = (right_w - dx).clamp(DETAILS_MIN_WIDTH, 640.0);
+                let response = widgets::splitter(ui, split, ui.scope_id().with("right_split"), true);
+                if let Some(width) = dragged_details_size(&response, right_w, true) {
+                    let w = width.clamp(DETAILS_MIN_WIDTH, 640.0);
                     later.push(Box::new(move |app| app.settings.set("rightWidth", w.round())));
                 }
             }
@@ -174,6 +174,22 @@ impl App {
     }
 }
 
+fn dragged_details_size(response: &egui::Response, size: f32, vertical: bool) -> Option<f32> {
+    let delta = response.total_drag_delta()?;
+    let id = response.id.with("start_size");
+    let started = response.drag_started();
+    let start = response.ctx.data_mut(|data| {
+        if started {
+            data.insert_temp(id, size);
+        }
+        data.get_temp::<f32>(id)
+    })?;
+    if started && delta == egui::Vec2::ZERO {
+        return None;
+    }
+    Some(start - if vertical { delta.x } else { delta.y })
+}
+
 fn bottom_panel_height(height: f32, preferred: f32, panel_min: f32) -> f32 {
     let available = (height - 2.0).max(0.0);
     let centre_min = 100.0_f32.min(available / 2.0);
@@ -221,7 +237,35 @@ fn fit_panels(body: f32, mut left_w: f32, mut right_w: f32, mut show_left: bool,
 
 #[cfg(test)]
 mod tests {
-    use super::{DETAILS_MIN_WIDTH, bottom_panel_height, fit_panels};
+    use super::{DETAILS_MIN_WIDTH, bottom_panel_height, dragged_details_size, fit_panels};
+
+    #[test]
+    fn resizing_details_uses_the_pointer_displacement_from_the_press() {
+        use egui::{CentralPanel, Context, Event, Modifiers, PointerButton, RawInput, Rect, Sense, pos2, vec2};
+
+        let ctx = Context::default();
+        let press = pos2(160.0, 120.0);
+        let divider = Rect::from_min_size(pos2(100.0, 118.0), vec2(120.0, 4.0));
+        let frame = |events, size| {
+            let mut next = None;
+            ctx.run_ui(RawInput { events, ..Default::default() }, |ui| {
+                CentralPanel::default().show(ui, |ui| {
+                    let response = ui.interact(divider, ui.scope_id().with("details_split"), Sense::drag());
+                    next = dragged_details_size(&response, size, false);
+                });
+            }).textures_delta.clear();
+            next
+        };
+
+        frame(vec![Event::PointerMoved(pos2(50.0, 60.0))], 428.0);
+        let press_events = vec![
+            Event::PointerMoved(press),
+            Event::PointerButton { pos: press, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        ];
+        assert_eq!(frame(press_events, 428.0), None);
+        assert_eq!(frame(vec![Event::PointerMoved(pos2(160.0, 105.0))], 428.0), Some(443.0));
+        assert_eq!(frame(vec![Event::PointerMoved(pos2(160.0, 90.0))], 443.0), Some(458.0));
+    }
 
     #[test]
     fn bottom_panel_height_fits_short_and_normal_windows() {
