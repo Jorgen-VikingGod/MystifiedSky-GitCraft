@@ -87,16 +87,17 @@ jobs:
         shell: bash
         env:
           FORMATS: ${{ inputs.formats }}
-          SIGN: ${{ inputs.sign }}
+          # linuxdeploy uses SIGN to enable its own AppImage GPG signing.
+          GITCRAFT_SIGN_UPDATES: ${{ inputs.sign }}
           APPIMAGE_EXTRACT_AND_RUN: '1'
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ inputs.sign && secrets.updater-key || '' }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.updater-password || '' }}
         run: |
-          if [[ "$SIGN" == true && -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
+          if [[ "$GITCRAFT_SIGN_UPDATES" == true && -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
             echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY. See RELEASING.md."
             exit 1
           fi
-          if [[ "$SIGN" != true ]]; then
+          if [[ "$GITCRAFT_SIGN_UPDATES" != true ]]; then
             unset CARGO_PACKAGER_SIGN_PRIVATE_KEY CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
           fi
           # The packager reads the binary from target/<triple>/release, then changes into crates/gitcraft.
