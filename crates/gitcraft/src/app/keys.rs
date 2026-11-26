@@ -200,7 +200,13 @@ pub fn label(key: &str) -> String {
 }
 
 /// The key combination of a key press, in the saved form ("Ctrl+Shift+S").
+fn is_modifier_key(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(key, ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight)
+}
+
 pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
+    if is_modifier_key(key) { return None; }
     let name = match key {
         egui::Key::Escape => "Esc".to_owned(),
         egui::Key::Space => "Space".to_owned(),
@@ -234,6 +240,18 @@ pub fn combo_of(key: egui::Key, mods: egui::Modifiers) -> Option<String> {
     }
     parts.push(name);
     Some(parts.join("+"))
+}
+
+fn shortcut_key(key: egui::Key, physical_key: Option<egui::Key>, mods: egui::Modifiers) -> egui::Key {
+    use egui::Key::*;
+    // The number row may arrive as punctuation with Shift or Option held.
+    if (mods.ctrl || mods.mac_cmd) && (mods.shift || mods.alt)
+        && let Some(digit @ (Num0 | Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9)) = physical_key
+        && !matches!(key, Num0 | Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9)
+    {
+        return digit;
+    }
+    key
 }
 
 /// A saved key text as a chord craft-keymap matches.
@@ -406,16 +424,16 @@ impl App {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
-        let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+        let pressed: Vec<_> = ctx.input(|i| {
             i.events
                 .iter()
                 .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, repeat: false, .. } => Some((*key, *modifiers)),
+                    egui::Event::Key { key, physical_key, pressed: true, modifiers, repeat: false } => Some((*key, *physical_key, *modifiers)),
                     _ => None,
                 })
                 .collect()
         });
-        for (key, mods) in pressed {
+        for (key, physical_key, mods) in pressed {
             if self.file_editor_shortcut(ctx, key, mods) {
                 continue;
             }
@@ -425,12 +443,12 @@ impl App {
                 ctx.input_mut(|input| input.consume_key(mods, key));
                 continue;
             }
-            let Some(combo) = combo_of(key, mods) else { continue };
-            if !is_shortcut(&combo) {
-                continue;
-            }
-            let wanted = combo.to_uppercase();
-            let Some(cmd) = COMMANDS.iter().find(|c| self.bindings(c).iter().any(|b| b.to_uppercase() == wanted)) else { continue };
+            let find = |key| {
+                let combo = combo_of(key, mods).filter(|c| is_shortcut(c))?.to_uppercase();
+                COMMANDS.iter().find(|c| self.bindings(c).iter().any(|b| b.to_uppercase() == combo))
+            };
+            let shortcut = shortcut_key(key, physical_key, mods);
+            let Some(cmd) = find(key).or_else(|| if shortcut != key { find(shortcut) } else { None }) else { continue };
             if typing && !cmd.in_inputs {
                 continue;
             }
@@ -721,17 +739,18 @@ impl App {
         // Recording takes the next key press.
         if let Some(id) = s.recording.clone() {
             let pressed = ctx.input(|i| i.events.iter().find_map(|e| match e {
-                egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                egui::Event::Key { key, physical_key, pressed: true, repeat: false, modifiers }
+                    if !is_modifier_key(*key) => Some((*key, *physical_key, *modifiers)),
                 _ => None,
             }));
-            if let Some((key, mods)) = pressed {
+            if let Some((key, physical_key, mods)) = pressed {
                 ctx.input_mut(|i| i.consume_key(mods, key));
                 if key == egui::Key::Escape {
                     s.recording = None;
                 } else if key == egui::Key::Backspace {
                     self.set_keys(&id, Some(String::new()));
                     s.recording = None;
-                } else if let Some(combo) = combo_of(key, mods).filter(|c| is_shortcut(c)) {
+                } else if let Some(combo) = combo_of(shortcut_key(key, physical_key, mods), mods).filter(|c| is_shortcut(c)) {
                     self.set_keys(&id, Some(combo));
                     s.recording = None;
                 }
@@ -960,6 +979,10 @@ mod tests {
         let mods = egui::Modifiers { ctrl: true, shift: true, ..Default::default() };
         assert_eq!(combo_of(egui::Key::S, mods).as_deref(), Some("Ctrl+Shift+S"));
         assert_eq!(combo_of(egui::Key::Num1, egui::Modifiers { ctrl: true, ..Default::default() }).as_deref(), Some("Ctrl+1"));
+        let shifted = shortcut_key(egui::Key::Exclamationmark, Some(egui::Key::Num1), mods);
+        assert_eq!(combo_of(shifted, mods).as_deref(), Some("Ctrl+Shift+1"));
+        assert_eq!(combo_of(egui::Key::ControlLeft, mods), None);
+        assert_eq!(shortcut_key(egui::Key::Exclamationmark, Some(egui::Key::Num1), egui::Modifiers::SHIFT), egui::Key::Exclamationmark);
         let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
         assert_eq!(combo_of(egui::Key::Minus, ctrl).as_deref(), Some("Ctrl+-"));
         assert_eq!(combo_of(egui::Key::Plus, egui::Modifiers { shift: true, ..ctrl }).as_deref(), Some("Ctrl+="));

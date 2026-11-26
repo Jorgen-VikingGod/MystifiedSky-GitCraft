@@ -6,8 +6,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Added
 
-- Move the commit details panel below the commit graph or back to the right, and resize it in either layout.
-
+- Move the commit details panel below the commit graph or back to the right from the panel header or the View menu, and resize it in either layout. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Live agent status: set up Claude Code or Codex in Preferences > External Tools, and the Agents view shows whether each session is running, waiting for you or done. Claude Code's permission requests appear on the worktree card with the command it wants to run, to allow or deny there; an unanswered request is asked in the terminal as before. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - The graph marks the commit each other worktree has checked out with a count of its uncommitted changes; click it to open that worktree. Turn it off in Preferences > Agents. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Drag a branch label onto another in the graph to merge, rebase, fast-forward, push, or start a pull request between them. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
@@ -82,7 +81,22 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
-- Keep commit, stash, and patch controls reachable when the changes panel is short, and prevent the bottom panel from being resized below the form when space permits.
+- Keep commit, stash, and patch controls reachable when the changes panel is short, and prevent the bottom panel from being resized below the form when space permits. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
+- Open the existing worktree when checking out a branch that is already checked out there. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Offer detached checkout directly in the commit context menu. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Apply Conflict Prevention preference changes immediately in Teams. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Keep the worktree-group colors visible along the bottom of repository tabs. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Recover staged, unstaged, and untracked edits after restoring a file from an older commit. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Recognize terminal number shortcuts when the operating system reports the shifted punctuation key. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Record the full keyboard shortcut when modifier keys are pressed before the final key. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Scroll terminal tabs into view when they overflow, leaving the toolbar controls accessible. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Keep Repository Management columns clear of branch information and show the current zoom level with a check mark. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Restore Windows placement in physical pixels and return to the primary display when the saved display is gone and the window is offscreen. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Respect modifier keys held at the time of a commit graph click, even if they are released in the same frame. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Put selection actions in the commit panel header, leaving more space for commits and combined changes. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Offer Recompose with AI when comparing two consecutive commits that end at the checked-out commit. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+- Preserve the original file contents and modes when recomposing commits, including repositories with line-ending conversion. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))
+
 - "Automatically group worktree tabs together" now works: tabs of worktrees of the same repository sit side by side and share a colored line. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Conflict Prevention now uses the repository's base branches and skips the excluded branches set in Preferences. "Delete .orig files after merging" and the submodule update preferences now take effect. ([#56](https://github.com/MystifiedSky/GitCraft/pull/56))
 - Reject Fetch and Pull actions while their repository is busy, including from open menus, shortcuts and Repository Management. ([#54](https://github.com/MystifiedSky/GitCraft/pull/54))

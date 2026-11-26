@@ -252,7 +252,17 @@ impl App {
             let mut open_paths: Vec<String> = Vec::new();
             // Resizable Repository, Location and Upstream columns, remembered across restarts; the rest of the row
             // shows the branch and its status.
-            let mut cols: [f32; 3] = app.settings.get("repoManagementColumns").unwrap_or([180.0, 260.0, 150.0]);
+            const DEFAULT_COLUMNS: [f32; 3] = [130.0, 180.0, 125.0];
+            const MIN_COLUMN: f32 = 72.0;
+            // Leave space for branch details, status and the four hover actions.
+            let column_room = (ui.available_width() - 42.0 - 230.0).max(3.0 * MIN_COLUMN);
+            let mut cols: [f32; 3] = app.settings.get("repoManagementColumns").unwrap_or(DEFAULT_COLUMNS);
+            cols = cols.map(|width| width.clamp(MIN_COLUMN, 600.0));
+            let flexible = cols.iter().sum::<f32>() - 3.0 * MIN_COLUMN;
+            let room = column_room - 3.0 * MIN_COLUMN;
+            if flexible > room {
+                cols = cols.map(|width| MIN_COLUMN + (width - MIN_COLUMN) * room / flexible);
+            }
             {
                 let w = ui.available_width();
                 let (head, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
@@ -263,13 +273,23 @@ impl App {
                     x += cols[i];
                     let grip = Rect::from_center_size(pos2(x - 4.0, head.center().y), vec2(8.0, 22.0));
                     let g = ui.interact(grip, ui.scope_id().with(("repo_col", i)), Sense::drag());
-                    if g.hovered() || g.dragged() {
+                    if g.hovered() || g.dragged() || g.has_focus() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                         ui.painter().line_segment([pos2(x - 4.0, head.top() + 4.0), pos2(x - 4.0, head.bottom() - 4.0)], egui::Stroke::new(1.0, c.fg3));
                     }
-                    if g.dragged() {
-                        cols[i] = (cols[i] + g.drag_delta().x).clamp(80.0, 600.0);
-                        changed = true;
+                    g.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, format!("Resize {title} column")));
+                    let keyboard = if g.has_focus() {
+                        ui.input(|input| {
+                            i32::from(input.key_pressed(egui::Key::ArrowRight)) - i32::from(input.key_pressed(egui::Key::ArrowLeft))
+                        }) as f32 * 8.0
+                    } else { 0.0 };
+                    let drag = if g.drag_stopped() { ui.input(|input| input.pointer.delta().x) } else { g.drag_delta().x };
+                    let delta = drag + keyboard;
+                    if delta != 0.0 {
+                        let others: f32 = cols.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, width)| width).sum();
+                        let width = (cols[i] + delta).clamp(MIN_COLUMN, (column_room - others).max(MIN_COLUMN));
+                        changed |= width != cols[i];
+                        cols[i] = width;
                     }
                 }
                 ui.painter().text(pos2(head.right() - 8.0, head.center().y), egui::Align2::RIGHT_CENTER, "Branch", super::fonts::semibold(11.5), c.fg3);
@@ -376,23 +396,30 @@ impl App {
                                 x -= 26.0;
                             }
                         }
+                        let branch_left = location_x + cols[1] + cols[2];
+                        let branch_area = Rect::from_min_max(pos2(branch_left, row.top()), row.right_bottom());
+                        let branch_painter = ui.painter().with_clip_rect(branch_area);
                         match sum {
                             Some(s) if !s.exists => {
-                                ui.painter().text(pos2(x, row.center().y), egui::Align2::RIGHT_CENTER, "Repo is unreachable and may have been deleted", FontId::proportional(11.5), REMOVED);
+                                let message = widgets::fit(ui, "Repo is unreachable and may have been deleted", FontId::proportional(11.5), REMOVED, x - branch_left);
+                                branch_painter.galley(pos2(x - message.size().x, row.center().y - message.size().y / 2.0), message, REMOVED);
                             }
                             Some(s) => {
                                 let changes = if s.changes > 0 { format!("{} change{}", s.changes, if s.changes == 1 { "" } else { "s" }) } else { "clean".into() };
-                                let r = ui.painter().text(pos2(x, row.center().y), egui::Align2::RIGHT_CENTER, changes, FontId::proportional(11.5), if s.changes > 0 { WARN } else { c.fg3 });
+                                let r = branch_painter.text(pos2(x, row.center().y), egui::Align2::RIGHT_CENTER, changes, FontId::proportional(11.5), if s.changes > 0 { WARN } else { c.fg3 });
                                 x = r.left() - 8.0;
                                 if s.ahead > 0 || s.behind > 0 {
-                                    let r = ui.painter().text(pos2(x, row.center().y), egui::Align2::RIGHT_CENTER, format!("↑{} ↓{}", s.ahead, s.behind), FontId::proportional(11.5), c.fg2);
+                                    let r = branch_painter.text(pos2(x, row.center().y), egui::Align2::RIGHT_CENTER, format!("↑{} ↓{}", s.ahead, s.behind), FontId::proportional(11.5), c.fg2);
                                     x = r.left() - 8.0;
                                 }
-                                if let Some(b) = &s.branch {
-                                    let g = ui.painter().layout_no_wrap(b.clone(), FontId::proportional(11.5), c.white(0.85));
+                                if let Some(b) = &s.branch
+                                    && x - branch_left > 24.0
+                                {
+                                    let g = widgets::fit(ui, b, FontId::proportional(11.5), c.white(0.85), x - branch_left - 12.0);
                                     let br = Rect::from_min_size(pos2(x - g.size().x - 12.0, row.center().y - 9.0), vec2(g.size().x + 12.0, 18.0));
-                                    ui.painter().rect_filled(br, CornerRadius::same(3), c.white(0.08));
-                                    ui.painter().galley(pos2(br.left() + 6.0, br.center().y - g.size().y / 2.0), g, c.white(0.85));
+                                    branch_painter.rect_filled(br, CornerRadius::same(3), c.white(0.08));
+                                    branch_painter.galley(pos2(br.left() + 6.0, br.center().y - g.size().y / 2.0), g, c.white(0.85));
+                                    ui.interact(br, ui.scope_id().with(("branch", title, path)), Sense::hover()).tip(b);
                                 }
                             }
                             None => {}

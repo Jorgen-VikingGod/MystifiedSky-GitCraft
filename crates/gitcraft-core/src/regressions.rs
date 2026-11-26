@@ -206,6 +206,58 @@ fn fixture(label: &str) -> tempfile::TempDir {
 fn head(path: &Path) -> String { git::run(path, &["rev-parse", "HEAD"]).stdout.trim().to_owned() }
 
 #[test]
+fn desktop_checkout_opens_the_existing_worktree_and_can_still_detach() {
+    use crate::actions::{CheckoutChanges, DesktopActionResult};
+    let fixture = fixture("gitcraft-worktree-checkout-");
+    let other = tempfile::tempdir().unwrap();
+    let dir = fixture.path();
+    let linked = other.path().join("linked checkout");
+    let linked_path = linked.to_str().unwrap();
+    let run = |args: &[&str]| {
+        let out = git::run(dir, args);
+        assert!(out.ok, "{}", out.message());
+        out.stdout
+    };
+    let target = head(dir);
+    run(&["worktree", "add", "-q", "-b", "parity/linked", linked_path, &target]);
+    run(&["commit", "-qm", "Advance main", "--allow-empty"]);
+    let main = head(dir);
+    run(&["remote", "add", "origin", linked_path]);
+    run(&["update-ref", "refs/remotes/origin/parity/linked", &main]);
+    run(&["branch", "--set-upstream-to", "origin/parity/linked", "parity/linked"]);
+    std::fs::write(dir.join("file.txt"), "source edit\n").unwrap();
+    run(&["add", "file.txt"]);
+    std::fs::write(linked.join("file.txt"), "linked edit\n").unwrap();
+
+    let engine = Engine::default();
+    let repo = dir.to_str().unwrap();
+    let to_worktree = [
+        Action::Checkout { target: "parity/linked".into(), changes: CheckoutChanges::Ask },
+        Action::CheckoutRemote { remote_branch: "origin/parity/linked".into(), stash_if_needed: false, changes: CheckoutChanges::Ask },
+    ];
+    for action in to_worktree {
+        let DesktopActionResult::OpenWorktree(path) = engine.perform_for_desktop(repo, action) else {
+            panic!("Checkout should open the existing worktree");
+        };
+        assert_eq!(Path::new(&path).canonicalize().unwrap(), linked.canonicalize().unwrap());
+    }
+    assert_eq!(run(&["symbolic-ref", "--short", "HEAD"]).trim(), "main");
+    assert_eq!(run(&["show", ":file.txt"]).trim(), "source edit");
+    assert_eq!(std::fs::read_to_string(linked.join("file.txt")).unwrap(), "linked edit\n");
+    assert_eq!(head(&linked), target);
+    assert!(run(&["stash", "list"]).is_empty());
+
+    run(&["restore", "--source=HEAD", "--staged", "--worktree", "--", "file.txt"]);
+    let DesktopActionResult::Performed(result) = engine.perform_for_desktop(repo, Action::Checkout {
+        target: target.clone(), changes: CheckoutChanges::Ask,
+    }) else { panic!("A commit ID should check out a detached HEAD"); };
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(head(dir), target);
+    assert!(!git::run(dir, &["symbolic-ref", "--quiet", "HEAD"]).ok);
+    assert_eq!(git::run(&linked, &["symbolic-ref", "--short", "HEAD"]).stdout.trim(), "parity/linked");
+}
+
+#[test]
 fn discard_without_new_changes_preserves_an_existing_stash() {
     let folder = fixture("gitcraft-discard-stash-"); let path = folder.path();
     std::fs::write(path.join("file.txt"), "saved work\n").unwrap();
@@ -268,12 +320,54 @@ fn partially_created_composed_commits_remain_undoable() {
     }
     let engine = Engine::default(); let repo = path.to_string_lossy();
     let commits = ["one.txt", "two.txt"].map(|file| crate::ai::ComposedCommit { summary: file.into(), description: String::new(), files: vec![file.into()] }).to_vec();
-    assert!(!engine.perform(&repo, Action::ComposeCommits { commits }).ok);
+    assert!(!engine.perform(&repo, Action::ComposeCommits { commits, source: None }).ok);
     assert_ne!(head(path), before);
     assert!(engine.undo_info(&repo).undo.is_some());
     assert!(engine.perform(&repo, Action::Undo).ok);
     assert_eq!(head(path), before);
     assert!(path.join("one.txt").exists() && path.join("two.txt").exists());
+}
+
+#[test]
+fn recomposing_uses_committed_bytes_and_refuses_a_changed_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    assert!(git::run(dir, &["init", "-q", "-b", "main"]).ok);
+    for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com"), ("core.autocrlf", "false")] {
+        assert!(git::run(dir, &["config", key, value]).ok);
+    }
+    std::fs::write(dir.join("one.txt"), b"before\n").unwrap();
+    assert!(git::run(dir, &["add", "."]).ok);
+    assert!(git::run(dir, &["commit", "-qm", "Base"]).ok);
+    let base = head(dir);
+    std::fs::write(dir.join("one.txt"), b"after\n").unwrap();
+    std::fs::write(dir.join("two.txt"), b"added\n").unwrap();
+    assert!(git::run(dir, &["add", "."]).ok);
+    assert!(git::run(dir, &["commit", "-qm", "Original changes"]).ok);
+    let original = head(dir);
+    assert!(git::run(dir, &["reset", "--soft", &base]).ok);
+    std::fs::write(dir.join("one.txt"), b"after\r\n").unwrap();
+    std::fs::write(dir.join("two.txt"), b"added\r\n").unwrap();
+
+    let engine = Engine::default();
+    let repo = dir.to_string_lossy();
+    let recompose = || {
+        let commits = ["one.txt", "two.txt"].map(|file| crate::ai::ComposedCommit {
+            summary: file.into(), description: String::new(), files: vec![file.into()],
+        }).to_vec();
+        let source = crate::actions::RecomposeSource { base: base.clone(), original: original.clone() };
+        engine.perform(&repo, Action::ComposeCommits { commits, source: Some(source) })
+    };
+    assert!(git::run(dir, &["add", "one.txt"]).ok);
+    assert!(!recompose().ok);
+    assert_eq!(head(dir), base);
+    assert!(git::run(dir, &["restore", "--staged", "--source", &original, "--", "one.txt"]).ok);
+
+    let result = recompose();
+    assert!(result.ok, "{}", result.message);
+    assert!(!git::run(dir, &["diff", "--quiet", "HEAD~1", &original, "--", "two.txt"]).ok);
+    assert!(git::run(dir, &["diff", "--quiet", "HEAD", &original, "--"]).ok);
+    assert_eq!(std::fs::read(dir.join("one.txt")).unwrap(), b"after\r\n");
 }
 
 #[test]
@@ -285,7 +379,7 @@ fn initial_composition_separates_staged_files_and_supports_undo_redo() {
     assert!(git::run(path, &["add", "."]).ok);
     let commits = ["one.txt", "two.txt"].map(|file| crate::ai::ComposedCommit { summary: file.into(), description: String::new(), files: vec![file.into()] }).to_vec();
     let engine = Engine::default(); let repo = path.to_string_lossy();
-    let result = engine.perform(&repo, Action::ComposeCommits { commits });
+    let result = engine.perform(&repo, Action::ComposeCommits { commits, source: None });
     assert!(result.ok, "{}", result.message);
     assert_eq!(git::run(path, &["ls-tree", "--name-only", "HEAD~1"]).stdout.trim(), "one.txt");
     let after = head(path);

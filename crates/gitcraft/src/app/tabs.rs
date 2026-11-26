@@ -138,8 +138,15 @@ impl App {
     /// The open tabs, scrolled sideways by the mouse wheel when they do not fit.
     /// The repository a tab's worktree belongs to (its main worktree), when that repository has more than one.
     fn worktree_group(&self, id: u64) -> Option<String> {
-        let v = self.repos.get(&id)?.view.as_ref()?;
-        (v.data.worktrees.len() > 1).then(|| v.data.worktrees.first().map(|w| w.path.replace('\\', "/").trim_end_matches('/').to_lowercase())).flatten()
+        let repo = self.repos.get(&id)?;
+        let worktrees = repo.view.as_ref().map(|v| &v.data.worktrees).or_else(|| {
+            // An inactive restored tab might not have loaded. A loaded member of the same
+            // group already knows its path from Git's worktree list.
+            self.repos.values().filter_map(|r| r.view.as_ref()).map(|v| &v.data.worktrees)
+                .find(|trees| trees.iter().any(|w| super::same_folder(&w.path, &repo.path)))
+        })?;
+        if worktrees.len() < 2 { return None; }
+        worktrees.first().map(|w| w.path.replace('\\', "/").trim_end_matches('/').to_lowercase())
     }
 
     /// UI Customization > Automatically group worktree tabs together: worktrees of one repository sit side by side.
@@ -235,7 +242,8 @@ impl App {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             group.hash(&mut h);
             let color = super::widgets::lane_color(h.finish() as usize % 16);
-            ui.painter().line_segment([pos2(rect.left(), rect.bottom() - 1.5), pos2(rect.right(), rect.bottom() - 1.5)], egui::Stroke::new(3.0, color));
+            let underline = Rect::from_min_max(pos2(rect.left() + 1.0, rect.bottom() - 8.0), pos2(rect.right() - 1.0, rect.bottom() - 5.0));
+            ui.painter().rect_filled(underline, CornerRadius::ZERO, color);
         }
         let response = response.tip(tab.path().unwrap_or(&tab.title).to_owned());
 

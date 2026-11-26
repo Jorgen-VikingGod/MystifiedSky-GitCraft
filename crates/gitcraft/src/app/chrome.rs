@@ -100,7 +100,7 @@ impl App {
                             let mut factors = crate::settings::ZOOM_FACTORS;
                             factors.sort_by(f32::total_cmp);
                             for z in factors {
-                                let label = format!("{}{}%", if (z - now).abs() < 0.001 { "âœ“ " } else { "   " }, (z * 100.0).round());
+                                let label = format!("{}{}%", if (z - now).abs() < 0.001 { "✓ " } else { "   " }, (z * 100.0).round());
                                 if ui.button(label).clicked() {
                                     pick = Some(z);
                                 }

@@ -47,6 +47,7 @@ impl Locale {
             "Redo" => "Rehacer",
             "Show Left Panel" => "Mostrar panel izquierdo",
             "Show Commit Details Panel" => "Mostrar detalles del commit",
+            "Commit Details Below Graph" => "Detalles del commit debajo del gráfico",
             "Move to bottom" => "Mover abajo",
             "Move to right" => "Mover a la derecha",
             "Show Toolbar Labels" => "Mostrar etiquetas de la barra",

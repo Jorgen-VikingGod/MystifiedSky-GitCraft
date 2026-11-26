@@ -453,6 +453,35 @@ pub fn compose(dir: &Path, untracked: crate::ai_context::Untracked) -> Result<Ve
     let has_head = git::run(dir, &["rev-parse", "--verify", "HEAD"]).ok;
     let mut diff = crate::ai_context::diff(dir, if has_head { &["diff", "HEAD"] } else { &["diff", "--cached"] })?;
     diff.push_str(&untracked.text);
+    compose_files(files, diff)
+}
+
+pub(crate) fn recompose_paths(dir: &Path, base: &str, original: &str) -> Result<Vec<String>, String> {
+    let out = git::run(dir, &["diff", "--name-only", "--no-renames", "--ignore-submodules=none", "-z", base, original, "--"]);
+    if !out.ok { return Err(out.message()); }
+    Ok(out.stdout.split_terminator('\0').map(str::to_owned).collect())
+}
+
+/// Review the two committed trees so working-copy conversions and edits cannot enter the plan.
+pub fn compose_tree(dir: &Path, base: &str, original: &str) -> Result<Vec<ComposedCommit>, String> {
+    let (private, shared): (Vec<_>, Vec<_>) = recompose_paths(dir, base, original)?
+        .into_iter().partition(|file| crate::ai_context::sensitive_path(file));
+    if private.is_empty() && shared.is_empty() {
+        return Err("There are no tree changes to recompose into commits.".into());
+    }
+    let mut commits = if shared.is_empty() {
+        Vec::new()
+    } else {
+        let diff = crate::ai_context::diff(dir, &["diff", "--no-renames", base, original])?;
+        compose_files(shared, diff)?
+    };
+    if !private.is_empty() {
+        commits.push(ComposedCommit { summary: "Preserve local files".into(), description: String::new(), files: private });
+    }
+    Ok(commits)
+}
+
+fn compose_files(files: Vec<String>, diff: String) -> Result<Vec<ComposedCommit>, String> {
     let prompt = format!("Changed files (every one must appear in exactly one commit):\n{}\n\nDiff:\n{diff}", files.join("\n"));
     let schema = json!({
         "type": "object",

@@ -5,7 +5,7 @@
 use super::App;
 use super::dialogs::Dialog;
 use super::widgets::Kind;
-use gitcraft_core::actions::Action;
+use gitcraft_core::actions::{Action, RecomposeSource};
 use gitcraft_core::ai::{self, AiConfig, ComposedCommit};
 use gitcraft_core::ai_context::{self, PreviewKind};
 use std::path::Path;
@@ -16,7 +16,7 @@ pub enum AiOutput {
     StashTitle { tab: u64, before: String, text: String },
     /// `key` names what was explained (a commit, or a branch at its tip) for the recent explanations kept.
     Explain { key: Option<String>, title: String, text: String },
-    Compose { tab: u64, commits: Vec<ComposedCommit> },
+    Compose { tab: u64, commits: Vec<ComposedCommit>, source: Option<RecomposeSource> },
     Merge { tab: u64, file: String, editor: u64, revision: u64, text: String, notes: Vec<ai::ConflictNote> },
     PullText { tab: u64, request: u64, title: String, body: String },
 }
@@ -128,11 +128,11 @@ impl App {
                 }
                 self.dialog = Some(Dialog::info(&title, &text));
             }
-            AiOutput::Compose { tab, commits } => {
+            AiOutput::Compose { tab, commits, source } => {
                 let n = commits.len();
                 let list = commits.iter().enumerate().map(|(i, c)| format!("{}. {}\n{}", i + 1, c.summary, c.files.iter().map(|f| format!("     {f}")).collect::<Vec<_>>().join("\n"))).collect::<Vec<_>>().join("\n\n");
                 let plural = if n == 1 { "" } else { "s" };
-                self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits })));
+                self.dialog = Some(Dialog::confirm_with(&format!("Create {n} commit{plural}?"), &format!("{list}\n\nYou can undo this with Undo."), &format!("Create {n} Commit{plural}"), false, move |app, _| app.act(tab, Action::ComposeCommits { commits, source })));
             }
             AiOutput::Merge { tab, file, editor, revision, text, notes } => self.ai_merged(tab, &file, editor, revision, Ok((text, notes))),
             AiOutput::PullText { tab, request, title, body } => self.pr_text_ready(tab, request, title, body),
@@ -197,7 +197,7 @@ impl App {
             Reviewed::Compose => self.ai_run("Grouping your changes into commits…", move || {
                 let dir = Path::new(&path);
                 let files = ai_context::take_preview(dir, PreviewKind::Compose, preview)?;
-                Ok(AiOutput::Compose { tab, commits: ai::compose(dir, files)? })
+                Ok(AiOutput::Compose { tab, commits: ai::compose(dir, files)?, source: None })
             }),
         }
     }
@@ -270,21 +270,27 @@ impl App {
             return self.toast(false, "Commit or stash your working changes first, so only these commits are recomposed.");
         }
         let plural = if count == 1 { "" } else { "s" };
+        let original = v.data.head_sha.clone();
         let text = format!("The {count} newest commit{plural} on this branch are undone (their changes stay in the working folder) and composed again into new commits with AI. You can review the result before it is committed, and Undo brings the original commits back.");
         self.dialog = Some(Dialog::confirm_with(&format!("Recompose {count} commit{plural} with AI?"), &text, "Recompose", false, move |app, _| {
-            app.recompose_pending = Some(tab);
+            app.recompose_pending = Some((tab, RecomposeSource { base: base.clone(), original }));
             app.act(tab, Action::Reset { sha: base, mode: "soft".into() });
         }));
     }
 
     /// The soft reset of Recompose with AI finished: compose its changes, or stop if it failed.
     pub(crate) fn recompose_reset_done(&mut self, tab: u64, ok: bool) {
-        if self.recompose_pending != Some(tab) {
+        if !self.recompose_pending.as_ref().is_some_and(|(pending, _)| *pending == tab) {
             return;
         }
-        self.recompose_pending = None;
-        if ok {
-            self.compose_commits(tab);
+        if let Some((_, source)) = self.recompose_pending.take()
+            && ok
+            && let Some(path) = self.repo(tab).map(|repo| repo.path.clone())
+        {
+            self.ai_run("Grouping your changes into commits…", move || {
+                let commits = ai::compose_tree(Path::new(&path), &source.base, &source.original)?;
+                Ok(AiOutput::Compose { tab, commits, source: Some(source) })
+            });
         }
     }
 
