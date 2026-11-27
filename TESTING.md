@@ -64,6 +64,10 @@ Only one GitCraft window runs per user: a second launch hands its folder or `git
 
 To package the app locally, install the packager once with `cargo install cargo-packager --locked --version 0.11.8`, then run `cargo build --release --locked -p gitcraft` and `cargo packager --release -p gitcraft --formats <formats>` (after a `--target` build, pass the same `--target` to the packager: 0.11.8 ignores `--binaries-dir`, and a relative `--out-dir` is read from `crates/gitcraft`): `nsis` or `wix` on Windows, `app` or `dmg` on macOS, `deb` or `appimage` on Linux. For an RPM, install `cargo install cargo-generate-rpm --locked --version 0.21.1` and run `cargo generate-rpm -p crates/gitcraft`. Published updater artifacts are built separately by the signed release pipeline; a local build alone does not verify the published update flow.
 
+On Windows, run `./scripts/check-windows-icon.ps1 -Executable target/debug/gitcraft.exe` after a
+debug build to verify that Windows can extract the executable icon used by shortcuts and Explorer.
+The release workflow checks this for both Windows architectures.
+
 On Windows, run `./scripts/check-msi-upgrade.ps1 -Directory <msi-output-directory>` to verify
 that a newly packaged MSI recognizes the existing GitCraft MSI. In a disposable Windows VM,
 install the previous public MSI, then run the new MSI with a higher version and verify that

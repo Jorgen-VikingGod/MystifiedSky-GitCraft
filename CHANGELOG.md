@@ -81,6 +81,7 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Restore the GitCraft icon on Windows taskbar pins, shortcuts, and the executable in Explorer.
 - Keep the Create Repository and Clone forms readable beside their source list, and stack the panels in narrow windows.
 - Open branch cleanup in a larger, resizable dialog with scrollable results and visible Cancel and Delete buttons on smaller screens.
 - Build Linux AppImage installers on x64 and ARM64 with their automatic update signatures. ([#59](https://github.com/MystifiedSky/GitCraft/pull/59))

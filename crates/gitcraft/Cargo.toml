@@ -10,6 +10,9 @@ publish = false
 name = "gitcraft"
 path = "src/main.rs"
 
+[build-dependencies]
+winresource = { version = "0.1.34", default-features = false }
+
 # Installers, built with `cargo packager -p gitcraft --release` (see RELEASING.md). Paths are
 # relative to this folder. The update feed and its signatures stay as they were, so installed
 # copies update to these builds.
