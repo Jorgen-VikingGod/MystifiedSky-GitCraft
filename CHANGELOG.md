@@ -81,6 +81,8 @@ This file records notable changes to GitCraft. It follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Keep the Create Repository and Clone forms readable beside their source list, and stack the panels in narrow windows.
+- Open branch cleanup in a larger, resizable dialog with scrollable results and visible Cancel and Delete buttons on smaller screens.
 - Build Linux AppImage installers on x64 and ARM64 with their automatic update signatures. ([#59](https://github.com/MystifiedSky/GitCraft/pull/59))
 - Keep commit, stash, and patch controls reachable when the changes panel is short, and give the bottom panel room for those controls when space permits. Keep the divider aligned with the pointer while resizing. ([#57](https://github.com/MystifiedSky/GitCraft/pull/57))
 - Open the existing worktree when checking out a branch that is already checked out there. ([#58](https://github.com/MystifiedSky/GitCraft/pull/58))

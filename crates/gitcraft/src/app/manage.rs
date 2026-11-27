@@ -19,6 +19,76 @@ type Review = Arc<Mutex<(u64, Option<Vec<CleanupBranch>>)>>;
 /// A repository's pull mode and its autostash preference for a rebase pull.
 type PullMode = (String, Option<bool>);
 
+#[test]
+fn headless_branch_cleanup_fits_results_and_keeps_actions_visible() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1920.0, 1033.0));
+    let compact = Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 520.0));
+    let render = |app: &mut App, screen, events| {
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |_| app.draw_dialog(&ctx));
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let visible = |shapes: &[egui::epaint::ClippedShape], label: &str| shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Text(text) if text.galley.text() == label && shape.clip_rect.contains_rect(text.visual_bounding_rect()) => {
+            Some(text.visual_bounding_rect().center())
+        }
+        _ => None,
+    });
+    app.dialog = Some(Dialog::new("Short dialog", Body::Text("Short body".into())).no_cancel());
+    for _ in 0..3 {
+        render(&mut app, screen, vec![]);
+    }
+    let branches = (1..=19).map(|i| CleanupBranch {
+        name: format!("topic-{i:02}"), time: 0, merged: true, patch_equivalent: false, upstream_gone: false,
+        upstream: format!("origin/topic-{i:02}"), remote: "origin".into(), remote_ref: format!("refs/heads/topic-{i:02}"),
+    }).collect();
+    let list: Review = Default::default();
+    app.dialog = Some(App::cleanup_review_dialog(1, String::new(), list.clone()));
+    let loading = render(&mut app, screen, vec![]);
+    assert!(visible(&loading, "Delete 0 branches").is_some());
+    list.lock().unwrap().1 = Some(branches);
+    let desktop = render(&mut app, screen, vec![]);
+    for label in ["Select all branches", "topic-01", "topic-19", "Delete 0 branches", "Cancel"] {
+        assert!(visible(&desktop, label).is_some(), "{label} is clipped or missing on desktop");
+    }
+
+    let dialog_rect = || ctx.memory(|m| m.area_rect(egui::Id::NULL.with("dialog"))).expect("the dialog has a frame");
+    let full = dialog_rect();
+    let grip = full.right_bottom() - Vec2::splat(14.0 + ctx.global_style().visuals.resize_corner_size / 2.0);
+    let mouse_button = |pos, pressed| egui::Event::PointerButton {
+        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+    };
+    render(&mut app, screen, vec![egui::Event::PointerMoved(grip), mouse_button(grip, true)]);
+    let dragged = grip - vec2(0.0, 150.0);
+    render(&mut app, screen, vec![egui::Event::PointerMoved(dragged)]);
+    render(&mut app, screen, vec![mouse_button(dragged, false)]);
+    assert!(dialog_rect().height() < full.height() - 100.0, "dragging the corner adjusts the dialog height");
+
+    let small = render(&mut app, compact, vec![]);
+    let cancel = visible(&small, "Cancel").expect("Cancel is visible in a small window");
+    let delete = visible(&small, "Delete 0 branches").expect("Delete is visible in a small window");
+    let first_branch = visible(&small, "topic-01").expect("the first branch is visible in a small window");
+    assert!(visible(&small, "topic-19").is_none());
+    let scroll = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -800.0), modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown,
+    };
+    render(&mut app, compact, vec![egui::Event::PointerMoved(first_branch), scroll]);
+    for _ in 0..12 {
+        render(&mut app, compact, vec![]);
+    }
+    let scrolled = render(&mut app, compact, vec![]);
+    assert!(visible(&scrolled, "topic-19").is_some(), "the last branch is reachable by scrolling");
+    assert_eq!(visible(&scrolled, "Cancel"), Some(cancel));
+    assert_eq!(visible(&scrolled, "Delete 0 branches"), Some(delete));
+    render(&mut app, compact, vec![egui::Event::PointerMoved(cancel), mouse_button(cancel, true)]);
+    render(&mut app, compact, vec![mouse_button(cancel, false)]);
+    assert!(app.dialog.is_none(), "Cancel closes the dialog after scrolling");
+}
+
 impl App {
     /// Clean Up Local Branches: filter by age, merge and upstream state, then delete the picked ones.
     pub(crate) fn cleanup_dialog(&mut self, tab: u64) {
@@ -26,93 +96,116 @@ impl App {
         // The branches of the latest review, with the number of that review: a slower, earlier
         // review never replaces a newer one's list.
         let list: Review = Default::default();
-        let load = |list: &Review, app: &App, path: &str, patches: bool| {
-            let request = {
-                let mut l = list.lock().unwrap_or_else(|e| e.into_inner());
-                l.0 += 1;
-                l.1 = None;
-                l.0
-            };
-            let (l, path) = (list.clone(), path.to_owned());
-            let ctx = app.ctx.clone();
-            std::thread::spawn(move || {
-                let branches = gitcraft_core::manage::review_cleanup(Path::new(&path), patches);
-                let mut l = l.lock().unwrap_or_else(|e| e.into_inner());
-                if l.0 == request {
-                    l.1 = Some(branches);
-                }
-                drop(l);
-                ctx.request_repaint();
-            });
+        self.load_cleanup(&list, &path, false);
+        self.dialog = Some(Self::cleanup_review_dialog(tab, path, list));
+    }
+
+    fn load_cleanup(&self, list: &Review, path: &str, patches: bool) {
+        let request = {
+            let mut review = list.lock().unwrap_or_else(|e| e.into_inner());
+            review.0 += 1;
+            review.1 = None;
+            review.0
         };
-        load(&list, self, &path, false);
+        let (list, path) = (list.clone(), path.to_owned());
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let branches = gitcraft_core::manage::review_cleanup(Path::new(&path), patches);
+            let mut review = list.lock().unwrap_or_else(|e| e.into_inner());
+            if review.0 == request {
+                review.1 = Some(branches);
+            }
+            drop(review);
+            ctx.request_repaint();
+        });
+    }
+
+    fn cleanup_review_dialog(tab: u64, path: String, list: Review) -> Dialog {
         let mut days = String::from("0");
         let mut merge = "merged";
         let mut up = "any";
         let mut patches = false;
         let mut picked: HashSet<String> = HashSet::new();
         let mut remotes: HashSet<String> = HashSet::new();
-        let path2 = path.clone();
         let draw = move |app: &mut App, ui: &mut Ui| -> bool {
             let c = p();
             let mut close = false;
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                ui.label(egui::RichText::new("Older than (days):").size(12.5).color(c.fg2));
-                widgets::field(ui, &mut days, "", 56.0, 28.0, 12.5);
-                days.retain(|ch| ch.is_ascii_digit());
-                ui.label(egui::RichText::new("Merge status:").size(12.5).color(c.fg2));
-                egui::ComboBox::from_id_salt("cleanup_merge").selected_text(match merge {
-                    "any" => "Any",
-                    "merged" => "Merged",
-                    _ => "Not merged",
-                }).show_ui(ui, |ui| {
-                    for (v, l) in [("any", "Any"), ("merged", "Merged"), ("unmerged", "Not merged")] {
-                        ui.selectable_value(&mut merge, v, l);
-                    }
-                });
-                ui.label(egui::RichText::new("Remote status:").size(12.5).color(c.fg2));
-                egui::ComboBox::from_id_salt("cleanup_up").selected_text(match up {
-                    "any" => "Any",
-                    "has" => "Has upstream",
-                    "none" => "Doesn't have upstream",
-                    _ => "Upstream gone",
-                }).show_ui(ui, |ui| {
-                    for (v, l) in [("any", "Any"), ("has", "Has upstream"), ("none", "Doesn't have upstream"), ("gone", "Upstream gone")] {
-                        ui.selectable_value(&mut up, v, l);
-                    }
-                });
+            let mut all = list.lock().unwrap_or_else(|e| e.into_inner()).1.clone();
+            let remote_count = all.iter().flatten().filter(|b| {
+                picked.contains(&b.name) && remotes.contains(&b.name) && !b.upstream.is_empty() && !b.upstream_gone
+            }).count();
+            let warning = (remote_count > 0).then(|| {
+                let suffix = if remote_count == 1 { "" } else { "es" };
+                ui.painter().layout(
+                    format!("Warning: {remote_count} remote branch{suffix} will be deleted. This cannot be undone."),
+                    FontId::proportional(12.0), REMOVED, ui.available_width(),
+                )
             });
-            ui.add_space(8.0);
-            if widgets::checkbox(ui, &mut patches, "Include squash- and rebase-merged changes", 12.0).tip("Compare patches against the default branch. Equivalent patches may have different commits.").clicked() {
-                picked.clear();
-                remotes.clear();
-                load(&list, app, &path2, patches);
-            }
-            ui.add_space(8.0);
-            let now = chrono::Local::now().timestamp();
-            // An age that isn't a number of days, or that overflows, deletes nothing until it is fixed.
-            let min_age = days.trim().parse::<i64>().ok().and_then(|d| d.checked_mul(86400)).filter(|d| *d >= 0);
-            if min_age.is_none() {
-                ui.label(egui::RichText::new("Enter the age in whole days.").size(12.0).color(REMOVED));
-            }
-            let age_valid = min_age.is_some();
-            let min_age = min_age.unwrap_or(i64::MAX);
-            let all = list.lock().unwrap_or_else(|e| e.into_inner()).1.clone();
-            let shown: Vec<CleanupBranch> = all.clone().unwrap_or_default().into_iter().filter(|b| {
-                now - b.time >= min_age
-                    && (merge == "any" || (merge == "merged") == (b.merged || b.patch_equivalent))
-                    && match up {
-                        "gone" => b.upstream_gone,
-                        "has" => !b.upstream.is_empty() && !b.upstream_gone,
-                        "none" => b.upstream.is_empty() && !b.upstream_gone,
-                        _ => true,
-                    }
-            }).collect();
-            ui.label(egui::RichText::new(if shown.len() == 1 { "1 branch matching filters".to_owned() } else { format!("{} branches matching filters", shown.len()) }).size(12.0).color(c.fg3));
-            ui.add_space(6.0);
-            egui::Frame::new().stroke(egui::Stroke::new(1.0, c.white(0.05))).corner_radius(CornerRadius::same(4)).show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            let footer_height = 44.0 + warning.as_ref().map_or(0.0, |g| g.size().y + 6.0);
+            let age_valid = egui::ScrollArea::both().id_salt("cleanup_contents").auto_shrink([false, false])
+                .min_scrolled_height(0.0).max_height((ui.available_height() - footer_height).max(0.0))
+                .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                    ui.label(egui::RichText::new("Older than (days):").size(12.5).color(c.fg2));
+                    widgets::field(ui, &mut days, "", 56.0, 28.0, 12.5);
+                    days.retain(|ch| ch.is_ascii_digit());
+                    ui.label(egui::RichText::new("Merge status:").size(12.5).color(c.fg2));
+                    egui::ComboBox::from_id_salt("cleanup_merge").selected_text(match merge {
+                        "any" => "Any",
+                        "merged" => "Merged",
+                        _ => "Not merged",
+                    }).show_ui(ui, |ui| {
+                        for (v, l) in [("any", "Any"), ("merged", "Merged"), ("unmerged", "Not merged")] {
+                            ui.selectable_value(&mut merge, v, l);
+                        }
+                    });
+                    ui.label(egui::RichText::new("Remote status:").size(12.5).color(c.fg2));
+                    egui::ComboBox::from_id_salt("cleanup_up").selected_text(match up {
+                        "any" => "Any",
+                        "has" => "Has upstream",
+                        "none" => "Doesn't have upstream",
+                        _ => "Upstream gone",
+                    }).show_ui(ui, |ui| {
+                        for (v, l) in [("any", "Any"), ("has", "Has upstream"), ("none", "Doesn't have upstream"), ("gone", "Upstream gone")] {
+                            ui.selectable_value(&mut up, v, l);
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                if widgets::checkbox(ui, &mut patches, "Include squash- and rebase-merged changes", 12.0).tip("Compare patches against the default branch. Equivalent patches may have different commits.").clicked() {
+                    picked.clear();
+                    remotes.clear();
+                    app.load_cleanup(&list, &path, patches);
+                    all = None;
+                }
+                ui.add_space(8.0);
+                let now = chrono::Local::now().timestamp();
+                // An age that isn't a number of days, or that overflows, deletes nothing until it is fixed.
+                let min_age = days.trim().parse::<i64>().ok().and_then(|d| d.checked_mul(86400)).filter(|d| *d >= 0);
+                if min_age.is_none() {
+                    ui.label(egui::RichText::new("Enter the age in whole days.").size(12.0).color(REMOVED));
+                }
+                let age_valid = min_age.is_some();
+                let min_age = min_age.unwrap_or(i64::MAX);
+                let shown: Vec<&CleanupBranch> = all.iter().flatten().filter(|b| {
+                    now - b.time >= min_age
+                        && (merge == "any" || (merge == "merged") == (b.merged || b.patch_equivalent))
+                        && match up {
+                            "gone" => b.upstream_gone,
+                            "has" => !b.upstream.is_empty() && !b.upstream_gone,
+                            "none" => b.upstream.is_empty() && !b.upstream_gone,
+                            _ => true,
+                        }
+                }).collect();
+                ui.label(egui::RichText::new(if shown.len() == 1 { "1 branch matching filters".to_owned() } else { format!("{} branches matching filters", shown.len()) }).size(12.0).color(c.fg3));
+                ui.add_space(6.0);
+                if widgets::link(ui, "Select all branches", 12.0).clicked() {
+                    picked = shown.iter().map(|b| b.name.clone()).collect();
+                }
+                ui.add_space(8.0);
+                egui::Frame::new().stroke(egui::Stroke::new(1.0, c.white(0.05))).corner_radius(CornerRadius::same(4)).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                     if all.is_none() {
                         ui.label(egui::RichText::new("Loading…").size(12.0).color(c.fg3));
@@ -146,35 +239,31 @@ impl App {
                         });
                     }
                 });
-            });
-            ui.add_space(8.0);
-            if widgets::link(ui, "Select all branches", 12.0).clicked() {
-                picked = shown.iter().map(|b| b.name.clone()).collect();
+                age_valid
+            }).inner;
+            ui.add_space(6.0);
+            if let Some(warning) = warning {
+                ui.add(egui::Label::new(warning));
+                ui.add_space(6.0);
             }
-            ui.add_space(12.0);
-            let remote_count = remotes.iter().filter(|r| picked.contains(*r) && all.as_ref().is_some_and(|l| l.iter().any(|b| &b.name == *r && !b.upstream.is_empty() && !b.upstream_gone))).count();
-            ui.horizontal(|ui| {
-                if remote_count > 0 {
-                    ui.label(egui::RichText::new(format!("Warning: {remote_count} remote branch{} will be deleted. This cannot be undone.", if remote_count == 1 { "" } else { "es" })).size(12.0).color(REMOVED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(ui.visuals().resize_corner_size + 4.0);
+                let n = picked.len();
+                if widgets::button(ui, Kind::Danger, None, &format!("Delete {n} branch{}", if n == 1 { "" } else { "es" }), 28.0, n > 0 && age_valid).clicked() {
+                    let names: Vec<String> = picked.iter().cloned().collect();
+                    // Each remote branch as reviewed here, so a changed upstream isn't deleted.
+                    let ups: Vec<RemoteBranch> = all.iter().flatten().filter(|b| picked.contains(&b.name) && remotes.contains(&b.name) && !b.upstream.is_empty() && !b.upstream_gone).map(|b| RemoteBranch { branch: b.name.clone(), remote: b.remote.clone(), reference: b.remote_ref.clone() }).collect();
+                    app.act(tab, Action::DeleteBranches { names, remotes: ups });
+                    close = true;
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let n = picked.len();
-                    if widgets::button(ui, Kind::Danger, None, &format!("Delete {n} branch{}", if n == 1 { "" } else { "es" }), 28.0, n > 0 && age_valid).clicked() {
-                        let names: Vec<String> = picked.iter().cloned().collect();
-                        // Each remote branch as reviewed here, so a changed upstream isn't deleted.
-                        let ups: Vec<RemoteBranch> = all.iter().flatten().filter(|b| picked.contains(&b.name) && remotes.contains(&b.name) && !b.upstream.is_empty() && !b.upstream_gone).map(|b| RemoteBranch { branch: b.name.clone(), remote: b.remote.clone(), reference: b.remote_ref.clone() }).collect();
-                        app.act(tab, Action::DeleteBranches { names, remotes: ups });
-                        close = true;
-                    }
-                    if widgets::button(ui, Kind::Default, None, "Cancel", 28.0, true).clicked() {
-                        close = true;
-                    }
-                });
+                if widgets::button(ui, Kind::Default, None, "Cancel", 28.0, true).clicked() {
+                    close = true;
+                }
             });
             close
         };
-        let d = Dialog::new("Clean Up Local Branches", Body::Custom(Box::new(draw))).width(640.0).no_cancel();
-        self.dialog = Some(d);
+        Dialog::new("Clean Up Local Branches", Body::Custom(Box::new(draw)))
+            .width(760.0).resizable_height(740.0).no_cancel()
     }
 
     /// Sparse Checkout: the patterns of files to keep in the working folder.

@@ -120,6 +120,7 @@ pub struct Dialog {
     pub token: u64,
     pub title: String,
     pub width: f32,
+    resizable_height: Option<f32>,
     pub body: Body,
     pub values: Values,
     /// A list down the left side (Clone, Init): (id, label, enabled), and the picked id.
@@ -143,6 +144,7 @@ impl Dialog {
             token: NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title: title.into(),
             width: 440.0,
+            resizable_height: None,
             body,
             values: Values::default(),
             sidebar: None,
@@ -159,6 +161,12 @@ impl Dialog {
 
     pub fn width(mut self, width: f32) -> Dialog {
         self.width = width;
+        self
+    }
+
+    /// Give a body that manages its own scrolling a resizable viewport.
+    pub fn resizable_height(mut self, height: f32) -> Dialog {
+        self.resizable_height = Some(height);
         self
     }
 
@@ -528,14 +536,28 @@ impl App {
             }
         });
         let width = dialog.width.min(screen.width() - 32.0);
-        let max_height = screen.height() * 0.75;
         let left = screen.center().x - width / 2.0;
-        let top = screen.top() + screen.height() * 0.18;
+        let resizable_height = dialog.resizable_height;
+        let stacked = dialog.sidebar.is_some() && width < 510.0;
+        let top = screen.top() + if resizable_height.is_some() || stacked {
+            (screen.height() * 0.04).clamp(8.0, 40.0)
+        } else {
+            (screen.height() * 0.18).min((screen.height() - 180.0).max(8.0))
+        };
+        let has_footer = dialog.cancel.is_some() || !dialog.choices.is_empty();
+        let footer_height = if has_footer { 44.0 } else { 0.0 };
+        let available_height = screen.bottom() - top - 8.0;
+        let max_height = if stacked { available_height } else { (screen.height() * 0.75).max(180.0).min(available_height) };
+        let token = dialog.token;
         let blocked = dialog.check.as_ref().and_then(|f| f(&dialog.values));
-        egui::Area::new(egui::Id::NULL.with("dialog")).order(egui::Order::Tooltip).fixed_pos(pos2(left, top)).show(ctx, |ui| {
+        egui::Area::new(egui::Id::NULL.with("dialog")).order(egui::Order::Tooltip)
+            .fixed_pos(pos2(left, top)).constrain(resizable_height.is_none()).show(ctx, |ui| {
             let frame = egui::Frame::new().fill(c.panel).stroke(Stroke::new(1.0, c.white(0.12))).corner_radius(CornerRadius::same(6)).shadow(egui::Shadow { offset: [0, 8], blur: 32, spread: 0, color: Color32::from_black_alpha(110) });
             frame.show(ui, |ui| {
                 ui.set_width(width);
+                if resizable_height.is_none() {
+                    ui.set_max_height(max_height);
+                }
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 // Header.
                 let (head, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
@@ -547,46 +569,58 @@ impl App {
                 if xr.clicked() && dialog.busy.is_none() {
                     close = true;
                 }
-                let body_height = (max_height - 40.0 - 56.0).max(120.0);
-                ui.horizontal_top(|ui| {
+                let body_height = (max_height - 40.0 - footer_height - 32.0).max(0.0);
+                let sidebar_width = if stacked { width } else { 195.0 };
+                let sidebar_height = if stacked { (body_height / 3.0).min(100.0) } else { body_height.min(320.0) };
+                let body_width = if dialog.sidebar.is_some() && !stacked {
+                    width - sidebar_width - ui.spacing().item_spacing.x
+                } else {
+                    width
+                };
+                let body_height = if stacked { body_height - sidebar_height } else { body_height };
+                let layout = if stacked { egui::Layout::top_down(egui::Align::Min) } else { egui::Layout::left_to_right(egui::Align::Min) };
+                ui.with_layout(layout, |ui| {
                     if let Some((items, active)) = dialog.sidebar.as_mut() {
                         // Its own scroll area, so every source stays reachable when the dialog is short.
-                        let view = 320.0_f32.min(body_height);
-                        ui.set_width(195.0);
-                        egui::ScrollArea::vertical().id_salt("sources").max_height(view).auto_shrink([false, false]).show(ui, |ui| {
-                        let (side, _) = ui.allocate_exact_size(vec2(195.0, (items.len() as f32 * 31.0 + 2.0).max(view)), Sense::hover());
-                        ui.painter().rect_filled(side, CornerRadius::ZERO, Color32::from_black_alpha(50));
-                        ui.painter().line_segment([side.right_top(), side.right_bottom()], Stroke::new(1.0, c.line));
-                        for (i, (id, label, enabled)) in items.iter().enumerate() {
-                            let row = Rect::from_min_size(pos2(side.left(), side.top() + 1.0 + i as f32 * 31.0), vec2(side.width() - 1.0, 31.0));
-                            let r = ui.interact(row, ui.scope_id().with(("source", i)), if *enabled { Sense::click() } else { Sense::hover() });
-                            let on = active == id;
-                            if on {
-                                ui.painter().rect_filled(row, CornerRadius::ZERO, c.selrow);
-                            } else if r.hovered() && *enabled {
-                                ui.painter().rect_filled(row, CornerRadius::ZERO, c.hoverrow);
-                            }
-                            let fade = if *enabled { 1.0 } else { 0.4 };
-                            let icon = match id.as_str() {
-                                "url" => Icon::Globe,
-                                "local" => Icon::Laptop,
-                                s if s.starts_with("github") => Icon::Github,
-                                s if s.starts_with("gitlab") => Icon::Gitlab,
-                                _ => Icon::Cloud,
-                            };
-                            icons::paint(ui, Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 7.0), Vec2::splat(14.0)), icon, 14.0, c.white(0.8).gamma_multiply(fade));
-                            ui.painter().text(pos2(row.left() + 36.0, row.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), if on { c.white(1.0) } else { c.fg.gamma_multiply(fade) });
-                            if !*enabled {
-                                r.tip("Creating a repository on a service isn't available yet. Initialize it here, then add the remote.");
-                            } else if r.clicked() {
-                                *active = id.clone();
-                            }
-                        }
+                        ui.vertical(|ui| {
+                            ui.set_width(sidebar_width);
+                            egui::ScrollArea::vertical().id_salt(("sources", token)).min_scrolled_height(0.0).max_height(sidebar_height).auto_shrink([false, false]).show(ui, |ui| {
+                                let (side, _) = ui.allocate_exact_size(vec2(ui.available_width(), (items.len() as f32 * 31.0 + 2.0).max(sidebar_height)), Sense::hover());
+                                ui.painter().rect_filled(side, CornerRadius::ZERO, Color32::from_black_alpha(50));
+                                ui.painter().line_segment([side.right_top(), side.right_bottom()], Stroke::new(1.0, c.line));
+                                for (i, (id, label, enabled)) in items.iter().enumerate() {
+                                    let row = Rect::from_min_size(pos2(side.left(), side.top() + 1.0 + i as f32 * 31.0), vec2(side.width() - 1.0, 31.0));
+                                    let r = ui.interact(row, ui.scope_id().with(("source", i)), if *enabled { Sense::click() } else { Sense::hover() });
+                                    let on = active == id;
+                                    if on {
+                                        ui.painter().rect_filled(row, CornerRadius::ZERO, c.selrow);
+                                    } else if r.hovered() && *enabled {
+                                        ui.painter().rect_filled(row, CornerRadius::ZERO, c.hoverrow);
+                                    }
+                                    let fade = if *enabled { 1.0 } else { 0.4 };
+                                    let icon = match id.as_str() {
+                                        "url" => Icon::Globe,
+                                        "local" => Icon::Laptop,
+                                        s if s.starts_with("github") => Icon::Github,
+                                        s if s.starts_with("gitlab") => Icon::Gitlab,
+                                        _ => Icon::Cloud,
+                                    };
+                                    icons::paint(ui, Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 7.0), Vec2::splat(14.0)), icon, 14.0, c.white(0.8).gamma_multiply(fade));
+                                    ui.painter().text(pos2(row.left() + 36.0, row.center().y), Align2::LEFT_CENTER, label, FontId::proportional(13.0), if on { c.white(1.0) } else { c.fg.gamma_multiply(fade) });
+                                    if !*enabled {
+                                        r.tip("Creating a repository on a service isn't available yet. Initialize it here, then add the remote.");
+                                    } else if r.clicked() {
+                                        *active = id.clone();
+                                    }
+                                }
+                            });
                         });
                     }
                     ui.vertical(|ui| {
-                        egui::Frame::new().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
-                            egui::ScrollArea::vertical().max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+                        ui.set_width(body_width);
+                        let margin = if resizable_height.is_some() { 12 } else { 16 };
+                        egui::Frame::new().inner_margin(egui::Margin::same(margin)).show(ui, |ui| {
+                            let draw_body = |ui: &mut Ui| {
                                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                                 let source = dialog.sidebar.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
                                 if source != "url" && source != "local" && !source.is_empty() {
@@ -610,12 +644,25 @@ impl App {
                                     ui.add_space(6.0);
                                     ui.label(RichText::new(reason).size(12.0).color(REMOVED));
                                 }
-                            });
+                            };
+                            if let Some(height) = resizable_height {
+                                let max_height = (screen.bottom() - top - 40.0 - 2.0 * f32::from(margin)
+                                    - footer_height - 12.0).max(1.0);
+                                let width = ui.available_width();
+                                egui::Resize::default().id_salt(("dialog_body", token))
+                                    .resizable([false, true]).with_stroke(false)
+                                    .default_size(vec2(width, height))
+                                    .min_size(vec2(width, 280.0_f32.min(max_height)))
+                                    .max_size(vec2(width, max_height))
+                                    .show(ui, |ui| ui.push_id(token, draw_body).inner);
+                            } else {
+                                egui::ScrollArea::vertical().id_salt(("body", token)).min_scrolled_height(0.0).max_height(body_height).auto_shrink([false, true]).show(ui, draw_body);
+                            }
                         });
                     });
                 });
                 // Footer.
-                if dialog.cancel.is_some() || !dialog.choices.is_empty() {
+                if has_footer {
                     ui.add_space(0.0);
                     let (foot, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
                     let mut row = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(foot.min, pos2(foot.right() - 16.0, foot.bottom() - 16.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -744,7 +791,7 @@ fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>,
                 ui.label(RichText::new(intro).size(15.0).color(c.white(1.0)));
                 ui.add_space(12.0);
             }
-            let grid = *grid;
+            let grid = *grid && ui.available_width() >= 420.0;
             let fields = fields.clone();
             let mut focus_done = !first;
             for f in &fields {
@@ -768,7 +815,7 @@ fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>,
                             ui.horizontal(|ui| {
                                 let id = ui.scope_id().with(("field", &f.key));
                                 let focused = ui.memory(|m| m.has_focus(id));
-                                let (rect, _) = ui.allocate_exact_size(vec2(width - browse_w, 32.0), Sense::hover());
+                                let (rect, _) = ui.allocate_exact_size(vec2((width - browse_w).max(16.0), 32.0), Sense::hover());
                                 ui.painter().rect(rect, CornerRadius::same(4), c.field, Stroke::new(1.0, if focused { ACCENT } else { c.white(0.1) }), StrokeKind::Inside);
                                 let edit = egui::TextEdit::singleline(&mut text)
                                     .id(id)
@@ -853,6 +900,75 @@ fn body(ui: &mut Ui, dialog: &mut Dialog, browse: &mut Option<(String, String)>,
                     *chosen = last;
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn headless_repository_dialogs_keep_the_form_beside_the_sidebar() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut settings = crate::settings::Store::in_memory();
+    settings.set("defaultCloneFolder", "C:/Projects/Repositories/Example parent folder");
+    let mut app = App::new(&cc, super::StartOptions::default(), settings);
+    for size in [vec2(1920.0, 1033.0), vec2(760.0, 520.0), vec2(390.0, 410.0)] {
+        for (init, source, intro, submit) in [
+            (true, "Local Only", "Initialize a Repo", "Create Repository"),
+            (false, "Clone with URL", "Clone a Repo", "Clone the repo!"),
+        ] {
+            if init { app.init_dialog(); } else { app.clone_dialog("https://example.invalid/project.git"); }
+            if !init {
+                app.dialog.as_mut().unwrap().values.0.insert("shallow".into(), Value::Flag(true));
+            }
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |_| app.draw_dialog(&ctx));
+                output.textures_delta.clear();
+                if frame < 2 { continue; }
+                let text = |label: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(t) if t.galley.text() == label && shape.clip_rect.contains_rect(t.visual_bounding_rect()) => Some(t),
+                    _ => None,
+                }).unwrap_or_else(|| panic!("{label} must be fully visible at {size:?}"));
+                assert_eq!(text(intro).galley.rows.len(), 1, "the heading must have room to fit");
+                if size.x > 510.0 {
+                    assert!(text(intro).pos.x - text(source).pos.x > 130.0, "the form must have a separate column");
+                    assert!(text("Browse").pos.x - text(intro).pos.x > 280.0, "the directory field must have room before Browse");
+                } else {
+                    assert!(text(intro).pos.y > text(source).pos.y, "the form must stack below the source list");
+                    assert!(text("Browse").pos.x - text(intro).pos.x > 180.0);
+                }
+                assert!(text(submit).pos.y > text("Browse").pos.y);
+            }
+        }
+    }
+}
+
+#[test]
+fn headless_short_dialog_does_not_constrain_the_next_body() {
+    let ctx = egui::Context::default();
+    let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&cc, super::StartOptions::default(), crate::settings::Store::in_memory());
+    let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(760.0, 520.0));
+    let render = |app: &mut App| {
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |_| app.draw_dialog(&ctx));
+        output.textures_delta.clear();
+        output.shapes
+    };
+    let bodies = [
+        Body::Form { intro: "Fixture content".into(), fields: vec![Field::new("fixture", "Notes", FieldKind::Multiline(6))], grid: false },
+        Body::List(vec![("Today".into(), "Fixture content".into())]),
+        Body::Info("Fixture content".into()),
+        Body::Mono("Fixture content".into()),
+        Body::Pick { hint: "Filter".into(), filter: String::new(), rows: vec![("Fixture content".into(), "Details".into())], button: "Open".into(), on_pick: std::rc::Rc::new(|_, _| {}) },
+    ];
+    for body in bodies {
+        app.dialog = Some(Dialog::new("Short dialog", Body::Text("Short body".into())).no_cancel());
+        render(&mut app);
+        render(&mut app);
+        app.dialog = Some(Dialog::new("Longer dialog", body).choice("Continue", Kind::Primary, |_, _| {}));
+        let shapes = render(&mut app);
+        for label in ["Fixture content", "Cancel", "Continue"] {
+            assert!(shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == label && s.clip_rect.contains_rect(t.visual_bounding_rect()))), "{label} is clipped");
         }
     }
 }
